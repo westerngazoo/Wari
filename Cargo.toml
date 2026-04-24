@@ -22,9 +22,10 @@ members = [
     "wasi",
     "kernel",
     "apps/hello",
+    "tests/integration",
     # drivers/*  — populated in Phase 1
     # tools/*    — populated as needed
-    # tests/*    — populated per-phase
+    # tests/security, tests/fuzz — populated per-phase
 ]
 exclude = [
     "platform/vf2",  # firmware blobs only, not a crate

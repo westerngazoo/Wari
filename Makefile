@@ -6,7 +6,7 @@
 # §PR Workflow → Build numbering).
 
 KERNEL_CRATE := wari-kernel
-KERNEL_ELF   := kernel/target/riscv64gc-unknown-none-elf/release/wari
+KERNEL_ELF   := target/riscv64gc-unknown-none-elf/release/wari
 KERNEL_BIN   := build/wari.bin
 HELLO_WASM   := apps/hello/target/wasm32-unknown-unknown/release/wari_hello.wasm
 QEMU         := qemu-system-riscv64

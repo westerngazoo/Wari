@@ -9,4 +9,5 @@
 //! and `SyscallError` from `goose-os/kernel/src/abi.rs` into
 //! `wari-abi/src/lib.rs`; this module then becomes `pub use wari_abi::*;`.
 
+#[allow(unused_imports)] // Phase 0: re-export for kernel modules; consumers arrive PR 2+.
 pub use wari_abi::*;

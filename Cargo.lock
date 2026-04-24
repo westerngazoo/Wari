@@ -14,6 +14,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wari-integration-tests"
+version = "0.0.1"
+
+[[package]]
 name = "wari-kernel"
 version = "0.0.1"
 dependencies = [

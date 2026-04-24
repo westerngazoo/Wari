@@ -29,6 +29,7 @@ pub const USER_VA_END:   usize = 0x8000_0000;
 
 /// Is `addr` page-aligned?
 #[inline]
+#[allow(clippy::manual_is_multiple_of)] // is_multiple_of not const-stable on pinned 1.95.0
 pub const fn is_page_aligned(addr: usize) -> bool {
     addr % PAGE_SIZE == 0
 }
