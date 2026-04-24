@@ -7,15 +7,9 @@
 //! with documented pre- and post-conditions (goose-os pattern; see
 //! book Part 1, Ch 4 "Inheritance from Goose").
 //!
-//! Phase 0 scaffold: `_start` is a stub. The execution agent populates
-//! the modules below per the lean Phase 0 plan in CLAUDE.md — build
-//! from scratch, copy only what makes sense from predecessor code
-//! (pure logic: page_alloc, page_table, validators, invariants).
-//!
-//! No IPC, no scheduler, no multi-process in Phase 0: a single WASM
-//! module loaded at boot runs to completion and the kernel halts.
-//! Multi-tenant pieces arrive in Phase 1 alongside the capability
-//! system.
+//! Phase 0 PR 1: boot.S lands hart 0 in `kmain`, which prints the
+//! banner and halts. Paging, trap vector, wasmi, and everything else
+//! lands in later PRs per the approved Phase-0 plan.
 
 #![no_std]
 #![no_main]
@@ -24,31 +18,44 @@
 
 use core::panic::PanicInfo;
 
-// Module skeleton — populated Phase 0a onward.
+// Assemble boot.S into the crate. Keeps the build single-step (no
+// build.rs, no cc crate). The linker script's `KEEP(*(.text.entry))`
+// places the resulting `_start` at the load address.
+core::arch::global_asm!(include_str!("boot.S"));
+
+// Module skeleton — populated per the approved Phase-0 plan.
 mod abi;
 mod boot;
 mod error;
+mod kputc;
 mod mem;
 mod mmio;
 mod trap;
 mod validate;
 
-/// Kernel entry point.
-///
-/// Called from `boot.S` (not yet in tree) after OpenSBI hands control
-/// to S-mode and the boot stack is set up. Never returns.
+/// Build identifier string — supplied by the Makefile via the
+/// `WARI_BUILD` env var. Falls back to `"dev"` for ad-hoc builds
+/// (e.g. `cargo build` without going through make).
+const BUILD: &str = match option_env!("WARI_BUILD") {
+    Some(s) => s,
+    None => "dev",
+};
+
+/// Kernel entry point, called from `boot.S` after OpenSBI hands
+/// control to S-mode and the boot stack is set up. Never returns.
 ///
 /// # Safety
-/// This function is the first Rust code to run after OpenSBI. It runs
-/// with interrupts disabled, MMU off, and only the kernel image mapped.
-/// See `boot.rs` staged invariants.
+///
+/// First Rust code to run after OpenSBI. Interrupts disabled, MMU
+/// off, only the kernel image mapped. `.bss` has already been zeroed
+/// by `boot.S`.
 #[no_mangle]
-pub extern "C" fn _start(_hart_id: usize, _dtb_addr: usize) -> ! {
-    // Phase-0 placeholder. The agent's first PR rewires this to
-    // `boot::run(hart_id, dtb_addr)` per the staged-boot pattern.
+pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
+    mmio::uart_ns16550::init();
+    kprintln!("Wari v0 build {} boot OK, hart {}", BUILD, hart_id);
+
     loop {
-        // SAFETY: wfi is an S-mode instruction; we are in S-mode.
-        // See docs/invariants.md INV-7 (privileged ASM in S-mode).
+        // SAFETY: INV-7 — wfi is an S-mode instruction; we are in S-mode.
         unsafe { core::arch::asm!("wfi"); }
     }
 }
@@ -62,7 +69,7 @@ pub extern "C" fn _start(_hart_id: usize, _dtb_addr: usize) -> ! {
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {
-        // SAFETY: wfi is an S-mode instruction; see INV-7.
+        // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
         unsafe { core::arch::asm!("wfi"); }
     }
 }

@@ -125,10 +125,13 @@ with the alignment fix.
 
 *(Populated as the kernel is cherry-picked.)*
 
-| File                        | Site | Invariant | Rationale |
-|-----------------------------|------|-----------|-----------|
-| `kernel/src/main.rs:45`     | `wfi` in placeholder loop | INV-7 | S-mode WFI |
-| `kernel/src/main.rs:57`     | `wfi` in panic loop       | INV-7 | S-mode WFI |
+| File                                    | Site                               | Invariant | Rationale |
+|-----------------------------------------|------------------------------------|-----------|-----------|
+| `kernel/src/main.rs` (`kmain` wfi loop) | `wfi` after banner, pre-runtime    | INV-7     | S-mode WFI |
+| `kernel/src/main.rs` (`panic` handler)  | `wfi` in panic halt loop           | INV-7     | S-mode WFI |
+| `kernel/src/boot.S`                     | Boot asm: `.bss` zero, stack setup, call into `kmain`, `wfi` park | INV-7 | Privileged asm in S-mode |
+| `kernel/src/mmio/volatile.rs`           | `VolatilePtr::new` construction; `read` / `write` volatile ops    | INV-3 | Typed MMIO access — the one module where raw volatile lives (R3) |
+| `kernel/src/mmio/uart_ns16550.rs`       | `VolatilePtr::new` calls for THR / LSR at `0x1000_0000`            | INV-3 | NS16550 UART registers on QEMU virt |
 
 ---
 

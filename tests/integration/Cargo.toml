@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Wari integration tests — host-side QEMU harness.
+#
+# Each test under `tests/` is a separate binary that shells out to
+# `qemu-system-riscv64`, captures UART output, and asserts on the
+# kernel's observable behavior. Host target only — compiles for
+# x86_64/aarch64, runs QEMU as a subprocess.
+
+[package]
+name = "wari-integration-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true

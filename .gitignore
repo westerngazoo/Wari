@@ -15,3 +15,6 @@ rustc-ice-*.txt
 # QEMU runtime debris
 *.pcap
 *.img.tmp
+
+# PR body scratch (written by agent, consumed by `gh pr create`)
+/pr-body.md
