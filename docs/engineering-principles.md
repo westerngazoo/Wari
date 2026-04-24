@@ -1,10 +1,14 @@
 # Wari — Engineering Principles
 
-> These four principles sit alongside the Code Quality Standards in
-> `CLAUDE.md` and the PR workflow in `pr-workflow.md`. They govern how
-> every line of code in Wari gets written, by humans and by AI
-> collaborators alike. Cite them by number in PR bodies when they
-> apply.
+> Four principles that govern how every line of code in Wari gets
+> written. They sit alongside the per-module rules in `CLAUDE.md`
+> and the PR workflow in `pr-workflow.md`. Cite them by number in
+> PR bodies and code review when they apply.
+
+These are universal. They apply to Wari work regardless of whether
+the contributor is a senior engineer, a junior, an external auditor,
+or an automated agent. They predate this project — they're distilled
+from years of debugging shipped systems — and they will outlast it.
 
 ---
 
@@ -12,24 +16,26 @@
 
 **Don't assume. Don't hide confusion. Surface trade-offs.**
 
-LLMs (and rushed humans) often pick an interpretation silently and
-run with it. This principle forces explicit reasoning:
+The single most common cause of a regression is silent commitment to
+one interpretation of an ambiguous spec. The fix is process, not
+talent:
 
-- **State assumptions explicitly** — If uncertain, ask rather than
-  guess.
-- **Present multiple interpretations** — Don't pick silently when
-  ambiguity exists.
-- **Push back when warranted** — If a simpler approach exists, say
-  so. Rule #6 of the co-architect protocol obliges this: Claude
-  surfaces disagreement in writing before executing.
-- **Stop when confused** — Name what's unclear and ask for
-  clarification. Do not proceed with a compile-clean guess.
+- **State assumptions explicitly.** Write down what you believe the
+  spec means before writing the code that depends on it. If a
+  reviewer can't see your assumption, they can't catch a wrong one.
+- **Present multiple interpretations.** When the spec or code allows
+  two readings, name both, choose one with reasoning, and link to
+  that reasoning from the commit message.
+- **Push back when warranted.** If a simpler approach exists, say
+  so before writing the more complex one. "I was told to" is not a
+  valid post-hoc defense for over-engineered code.
+- **Stop when confused.** Name what's unclear and ask. A guess that
+  compiles is still a guess.
 
-Concrete application in a PR body: when the `Why` or `How` section
-encountered a fork in the road, the four-question depth rule from
-`pr-workflow.md` covers one direction — document the alternatives
-considered. When the fork could not be resolved without Gustavo's
-input, quote the chat decision verbatim or link to it.
+In Wari this principle is the day-to-day form of the Why/How depth
+rule in `pr-workflow.md`: every non-obvious decision in a PR body
+answers what was picked, what was considered, why this won, and what
+cost was accepted.
 
 ---
 
@@ -37,23 +43,24 @@ input, quote the chat decision verbatim or link to it.
 
 **Minimum code that solves the problem. Nothing speculative.**
 
-Combat the tendency toward over-engineering:
+The Wari kernel target size is 5–10 KLOC for a reason: a small
+kernel can be formally verified; a sprawling one cannot. Every line
+either earns its place or makes verification harder.
 
 - No features beyond what was asked.
-- No abstractions for single-use code. (Cross-reference:
-  `CLAUDE.md` §Code Quality #4 — "Every abstraction pays for
-  itself.")
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
+- No abstractions for single-use code. (See per-module rule #4 in
+  `CLAUDE.md`: *"every abstraction pays for itself"*.)
+- No "flexibility" or "configurability" that isn't currently required.
+- No error handling for cases that cannot occur.
 - If 200 lines could be 50, rewrite it.
 
-**The test**: Would a senior engineer say this is overcomplicated?
-If yes, simplify.
+**The senior-engineer test**: would a senior engineer skimming this
+PR call it overcomplicated? If yes, simplify before requesting review.
 
-Concrete application: when PR 1 adds a new module, every
-`pub fn`, every trait, every type parameter has to earn its place.
-A trait with one impl is debt; a function extracted "for future
-reuse" is debt; a generic parameter with one instantiation is debt.
+A trait with one impl is debt. A function extracted "for future
+reuse" that never gets reused is debt. A generic parameter with one
+instantiation is debt. Indirection is added when the second caller
+arrives, not in anticipation of one.
 
 ---
 
@@ -61,27 +68,30 @@ reuse" is debt; a generic parameter with one instantiation is debt.
 
 **Touch only what you must. Clean up only your own mess.**
 
-When editing existing code:
+Most merge conflicts and regressions come from PRs that quietly
+"improve" code adjacent to their stated scope. The discipline:
 
-- **Don't "improve" adjacent code**, comments, or formatting.
-- **Don't refactor things that aren't broken**.
-- **Match existing style**, even if you'd do it differently.
-- **If you notice unrelated dead code, mention it — don't delete
-  it.** It may belong to in-flight work you can't see.
+- Don't reformat code, comments, or imports that aren't part of the
+  task.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it — don't delete it.
+  It may belong to in-flight work you can't see.
 
-When your changes create orphans:
+When your changes legitimately create orphans:
 
-- Remove imports / variables / functions that **your** changes made
-  unused.
-- Don't remove **pre-existing** dead code unless asked.
+- Remove the imports / variables / functions that **your** changes
+  made unused.
+- Don't remove **pre-existing** dead code unless explicitly asked.
 
-**The test**: Every changed line should trace directly to the user's
-request.
+**The trace test**: every changed line in your diff should trace
+directly to the user-visible task or to an orphan you created. If it
+doesn't, it's scope creep — split it into its own PR.
 
-This principle is the operational form of `CLAUDE.md` §Co-Architect
-rule #3 ("No silent structural changes") and rule #5 ("Tactical
-cleanup during a task is allowed — structural changes are not
-tactical").
+This principle is the operational form of the rules in `CLAUDE.md`'s
+co-architect protocol: structural changes (refactors, renames,
+dependency additions, module moves) are not tactical, even if they
+look small.
 
 ---
 
@@ -89,53 +99,56 @@ tactical").
 
 **Define success criteria. Loop until verified.**
 
-Transform imperative tasks into verifiable goals:
+A task is finished when its success criteria are met — not when the
+contributor feels done. The discipline starts at task definition
+time:
 
-| Instead of… | Transform to… |
+| Vague task | Becomes |
 |---|---|
 | "Add validation" | "Write tests for invalid inputs, then make them pass" |
 | "Fix the bug" | "Write a test that reproduces it, then make it pass" |
 | "Refactor X" | "Ensure tests pass before and after" |
-| "Make it faster" | "Measure baseline, change code, verify target threshold is met" |
+| "Make it faster" | "Measure baseline, change code, verify the target threshold" |
 | "Clean up the driver" | (not a goal — reject until re-scoped) |
 
-For multi-step tasks, state a brief plan before executing:
+For multi-step work, write the plan as numbered steps with a verify
+clause each:
 
 ```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
+1. [step] → verify: [check]
+2. [step] → verify: [check]
+3. [step] → verify: [check]
 ```
 
-Strong success criteria let the AI (or any executor) loop
-independently. Weak criteria ("make it work") require constant
-clarification.
+Strong success criteria let any executor loop independently to
+completion. Weak criteria require constant clarification and produce
+ambiguous "is it done?" reviews.
 
-Concrete application for Wari: every PR has a **Local verification**
-section (per `pr-workflow.md`). That section is the reification of
-this principle — it's the exact checks that verify success, with
-expected outputs. If the verification commands are vague, the PR
-cannot be evaluated. If they're specific, the reviewer can run them
-and know the moment the PR is done.
+In Wari every PR has a **Local verification** section in its body
+(see `pr-workflow.md`) that lists the exact commands a reviewer
+runs to confirm the PR is done. If those commands are vague, the PR
+isn't reviewable. If they're specific, the reviewer can run them
+and know the moment the work is complete.
 
-Phase-level goal-driven execution: every phase gate has numbered,
+Phase-level goal-driven execution: every Wari phase has numbered,
 testable exit criteria (see `CLAUDE.md` §Phase 0 Exit Criteria for
 the template). A phase isn't done when someone feels it's done;
-it's done when all N criteria have a green verification trail.
+it's done when every numbered criterion has a green verification
+trail.
 
 ---
 
-## Cross-references
+## When principles conflict with rules
 
-These principles are the *how*; the *what* they govern lives in:
+These four principles state the *how*; the specific rules in
+`CLAUDE.md` (R1–R8 absolute rules, the per-module standards, the
+co-architect protocol) state the *what* and the *boundaries*.
 
-- `CLAUDE.md` §Code Quality Standards — the six per-module rules
-- `CLAUDE.md` §Absolute Rules (R1–R8) — the kernel invariants
-- `CLAUDE.md` §Co-Architect Protocol — the human-AI decision loop
-- `pr-workflow.md` §Why/How depth rule — per-decision documentation
-- `testing.md` §What "coverage" means — the success-criteria
-  standard
+When a principle and a specific rule conflict, the specific rule
+wins. Example: Simplicity First says "no error handling for cases
+that cannot occur," but R5 (no panics in kernel paths) requires a
+typed `KernelError` return even when a fault feels impossible. The
+rule wins because it encodes a concrete safety property; the
+principle yields.
 
-When these principles conflict with any specific rule (e.g.,
-Simplicity First vs. a required feature flag), the specific rule
-wins. When the specific rules are silent, these principles apply.
+When the specific rules are silent, these principles apply.
