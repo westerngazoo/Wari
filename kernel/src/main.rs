@@ -54,6 +54,16 @@ pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
     mmio::uart_ns16550::init();
     kprintln!("Wari v0 build {} boot OK, hart {}", BUILD, hart_id);
 
+    if let Err(e) = mem::kvm::init() {
+        kprintln!("MMU init failed: {:?}", e);
+        loop {
+            // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
+            unsafe { core::arch::asm!("wfi"); }
+        }
+    }
+    trap::install();
+    kprintln!("mmu OK, traps installed");
+
     loop {
         // SAFETY: INV-7 — wfi is an S-mode instruction; we are in S-mode.
         unsafe { core::arch::asm!("wfi"); }

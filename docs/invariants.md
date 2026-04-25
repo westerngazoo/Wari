@@ -136,6 +136,14 @@ with the alignment fix.
 | `wari-mem/src/page_alloc.rs` (`install`)| `addr_of_mut!(ALLOC).write(..)` boot-time install                  | INV-1, INV-8 | Called once during boot, interrupts off |
 | `wari-mem/src/page_alloc.rs` (`zero_page`) | `write_volatile` over a 4 KiB page                              | INV-5 | Allocator-returned PA is identity-mapped RW |
 | `wari-mem/src/page_table.rs`            | *No `unsafe` blocks.* INV-9 has no site: `walk()` takes a `read: FnMut(usize) -> u64` closure rather than reinterpreting `&[u8]` as `&Pte`, so the slice-to-struct alignment caveat from goose-os `unsafe-audit.md` follow-up #1 (which targets `elf.rs`, not cherry-picked into Wari) is structurally avoided. | — | — |
+| `kernel/src/mem/kvm.rs` (`init`, ~120)  | `csrw satp` write                                                  | INV-7        | Privileged S-mode CSR write that turns paging on |
+| `kernel/src/mem/kvm.rs` (`init`, ~120)  | `sfence.vma zero, zero`                                            | INV-7        | TLB flush ordering after satp write (R6) |
+| `kernel/src/mem/kvm.rs` (`init`, ~70)   | `page_alloc::install` from linker syms                             | INV-4, INV-5, INV-8 | Heap range `[_end,_heap_end)` is kernel-writable; one-time post-init install |
+| `kernel/src/mem/kvm.rs` (`read_pte`/`write_pte`, ~190/~200) | `read_volatile`/`write_volatile` on PTE slots          | INV-5        | PTE slot lives in an allocator-owned identity-mapped page |
+| `kernel/src/trap.rs` (`handle_trap`, ~115) | `&mut TrapFrame` parameter                                      | INV-2        | Trap-frame exclusivity during S-mode service |
+| `kernel/src/trap.rs` (`install`, ~95)   | `csrw stvec` write                                                 | INV-7        | Privileged S-mode CSR write |
+| `kernel/src/trap.rs` (`ack_timer`, ~150)| `csrc sip` clear                                                   | INV-7        | Privileged S-mode CSR clear |
+| `kernel/src/trap.S` (`_trap_entry`)     | Privileged register save/restore + `sret`                          | INV-7        | S-mode trap-vector asm |
 
 ---
 
