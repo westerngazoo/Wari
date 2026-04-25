@@ -18,8 +18,7 @@ RISC-V. Targeting sovereign cloud infrastructure in Latin America.
   (auditable `.wasm`) + confidential computing (CoVE, Phase 3) +
   custom silicon (GAPU FPGA, Phase 3).
 
-See `CLAUDE.md` for the full architectural specification and
-co-architect protocol. See `docs/book/` for the narrative derivation.
+See `docs/book/` for the narrative derivation.
 
 ## Getting started
 
