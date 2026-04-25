@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Fuzz harness — standalone package (cargo-fuzz constraint).
+#
+# Not a member of the kernel workspace at /Cargo.toml: cargo-fuzz wraps
+# `libfuzzer-sys`, which uses linker tricks (libFuzzer runtime, custom
+# `_LLVMFuzzerTestOneInput` symbol) that don't compose with a multi-
+# crate workspace. Mirrors the standalone pattern used by
+# `scripts/Cargo.toml`.
+#
+# Run:
+#   cd tests/fuzz
+#   cargo fuzz run fuzz_wasm_validator -- -max_total_time=3600
+#   cargo fuzz run fuzz_abi_decode    -- -max_total_time=3600
+#
+# Phase-0 gate (per docs/testing.md): 1 h clean per target.
+
+[workspace]
+
+[package]
+name = "wari-fuzz"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+wasmi = { version = "=1.0.9", default-features = false }
+wari-abi = { path = "../../abi-shared" }
+
+[[bin]]
+name = "fuzz_wasm_validator"
+path = "fuzz_targets/fuzz_wasm_validator.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_abi_decode"
+path = "fuzz_targets/fuzz_abi_decode.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1

@@ -1,0 +1,5 @@
+# cargo-fuzz output dirs — never committed.
+corpus/
+artifacts/
+target/
+Cargo.lock
