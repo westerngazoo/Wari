@@ -80,7 +80,7 @@ SECTIONS {
      */
     . = ALIGN(4K);
     _runtime_heap_start = .;
-    . += 0x40000;
+    . += 0x400000;  /* 4 MiB — wasmi linear memory + state for one Tier-2 instance */
     _runtime_heap_end = .;
 
     /DISCARD/ : {

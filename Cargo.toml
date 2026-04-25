@@ -23,8 +23,8 @@ members = [
     "wasi",
     "kernel",
     "apps/hello",
+    "drivers/uart",
     "tests/integration",
-    # drivers/*  — populated in Phase 1
     # tools/*    — populated as needed
     # tests/security, tests/fuzz — populated per-phase
 ]

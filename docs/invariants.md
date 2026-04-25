@@ -134,6 +134,21 @@ integrity, etc.).
 > manifest. The signature is verified against a compiled-in public key
 > before any bytecode executes.
 
+### INV-13 · Tier-2 Bytecode Is Signature-Verified Before Instantiation *(Phase 0; generalizes into INV-11 in Phase 1)*
+
+> Any `.wasm` bytecode loaded at Tier 2 passes signature verification
+> against the kernel's compiled-in ed25519 `ACCEPTED_PUBKEY` before a
+> wasmi `Module::new()` is constructed from it. Verification failure
+> aborts the load and the kernel halts in Phase 0 (no Tier-2 driver =
+> no I/O).
+
+**Consequence**: every `Tier::Two` instance reachable by the runtime
+has passed signature check in this boot.
+
+**When this breaks**: Phase 1 adds pubkey registries and signed
+manifests (INV-11's full form). Phase 0's single-pubkey fast path is
+replaced.
+
 ---
 
 ## Per-file sites
@@ -163,6 +178,9 @@ integrity, etc.).
 | `kernel/src/mem/kvm.rs` (`init`, end)   | `runtime::heap::init(runtime_heap_start, runtime_heap_end)`        | INV-1, INV-12 | One-time boot install of the bump arena |
 | `kernel/src/runtime/heap.rs` (`init`)   | `static mut HEAP_CURSOR/HEAP_END` write                            | INV-1, INV-12 | Single-hart boot-only init of the arena |
 | `kernel/src/runtime/heap.rs` (`alloc`)  | `static mut HEAP_CURSOR` read/write                                | INV-1, INV-12 | Single-hart cursor advance, post-init |
+| `kernel/src/runtime/sign.rs` (`verify`) | ed25519 verify of envelope vs. `ACCEPTED_PUBKEY`                   | INV-13       | First gate before any Tier-2 wasmi parse |
+| `kernel/src/runtime/host_fns.rs` (`host_mmio_write8`) | `core::ptr::write_volatile` byte write to MMIO       | INV-3        | Validator-narrowed: only `is_uart_mmio_addr` addresses reach the volatile write; capability gate (`mmio_uart`) precedes |
+| `kernel/src/cap/static_caps.rs`         | `Caps` construction + `caps_for` lookup                            | INV-1        | Plain-value caps; immutable post-load on a single-hart kernel |
 
 ---
 
