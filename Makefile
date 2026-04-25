@@ -67,12 +67,18 @@ help:
 
 # ── Build ──────────────────────────────────────────────────────
 
-build: build-uart-driver
+build: build-uart-driver build-hello
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) cargo build --release --features qemu
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 
+# Build the Tier-1 hello.wasm and stage it where the kernel's
+# `runtime/hello_blob.rs` `include_bytes!` expects it. Phase 0
+# Tier-1 is unsigned (Q4) — no signing step.
 build-hello:
 	cd apps/hello && cargo build --release
+	mkdir -p build/apps
+	cp target/wasm32-unknown-unknown/release/wari_hello.wasm \
+		build/apps/hello.wasm
 
 # Build + (manual) sign the Tier-2 UART driver.
 #

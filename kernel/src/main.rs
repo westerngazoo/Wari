@@ -75,6 +75,14 @@ pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
     }
     kprintln!("tier-2 uart driver loaded");
 
+    if let Err(e) = runtime::run_tier1_hello() {
+        kprintln!("wari runtime: tier-1 hello failed: {:?}", e);
+        loop {
+            // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
+            unsafe { core::arch::asm!("wfi"); }
+        }
+    }
+
     loop {
         // SAFETY: INV-7 — wfi is an S-mode instruction; we are in S-mode.
         unsafe { core::arch::asm!("wfi"); }

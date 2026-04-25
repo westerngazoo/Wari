@@ -35,16 +35,22 @@ pub const E_PERM: i32 = -1;
 /// Errno returned to WASM when the address fails the range check.
 pub const E_INVAL: i32 = -2;
 
-/// Per-instance host context threaded through `Store<HostState>`.
+/// Per-instance host context threaded through `Store<Tier2HostState>`.
 ///
 /// Keeps the `Caps` granted at load time so every host-fn invocation
 /// can re-check (cheap, single-hart, no contention).
-pub struct HostState {
+///
+/// **Tier separation**: this state is Tier-2-only. Tier-1 instances use
+/// `runtime::wasi::Tier1HostState`. Two types instead of one shared
+/// struct so each tier's linker is parameterised by exactly the cap
+/// shape its host fns inspect — preventing a Tier-1 host fn from
+/// accidentally reading a Tier-2 cap (and vice versa) at the type level.
+pub struct Tier2HostState {
     /// Capabilities granted to this instance at `load_tier2` time.
     pub caps: Caps,
 }
 
-/// Register Phase-0 host fns into a fresh linker.
+/// Register Phase-0 Tier-2 host fns into a fresh linker.
 ///
 /// # Contract
 ///
@@ -54,7 +60,7 @@ pub struct HostState {
 ///   fns (IRQ ack, fuel refill, …) get appended here as they land.
 /// - Errors: `KernelError::BadWasm` if wasmi rejects the binding
 ///   (signature mismatch with itself; should not happen).
-pub fn register_host_fns(linker: &mut Linker<HostState>) -> Result<(), KernelError> {
+pub fn register_host_fns(linker: &mut Linker<Tier2HostState>) -> Result<(), KernelError> {
     linker
         .func_wrap("wari", "mmio_write8", host_mmio_write8)
         .map_err(|_| KernelError::BadWasm)?;
@@ -64,7 +70,7 @@ pub fn register_host_fns(linker: &mut Linker<HostState>) -> Result<(), KernelErr
 /// `wari::mmio_write8(addr: u32, val: u32) -> i32` — write the low
 /// byte of `val` to the MMIO register at `addr`, gated by the caller's
 /// `mmio_uart` capability and the validator's range check.
-fn host_mmio_write8(caller: Caller<'_, HostState>, addr: u32, val: u32) -> i32 {
+fn host_mmio_write8(caller: Caller<'_, Tier2HostState>, addr: u32, val: u32) -> i32 {
     let host = caller.data();
 
     if !host.caps.mmio_uart {

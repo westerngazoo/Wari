@@ -1,0 +1,251 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! WASI Preview 1 host functions exposed to Tier-1 WASM.
+//!
+//! Phase 0 surface (matches `docs/wasi-surface.md`):
+//!   - `wasi_snapshot_preview1::fd_write(fd, iovs, iovs_len, nwritten) -> errno`
+//!   - `wasi_snapshot_preview1::proc_exit(code) -> !`
+//!
+//! Both are gated by Tier-1 capabilities (`stdout`, `exit`). Failure
+//! modes return WASI errnos to the calling module — never a kernel
+//! panic (R5).
+//!
+//! ## Why `wasi_snapshot_preview1` as the import module name
+//!
+//! Picked: the standard WASI Preview 1 module name. Considered: a
+//! Wari-private `wari_wasi` module name (rejected — would force every
+//! Tier-1 toolchain to emit non-standard imports; defeats the
+//! "WASI-compatible Tier-1" goal in `docs/wasi-surface.md`). Why this
+//! won: maximum toolchain compatibility (wasi-libc, Rust's `std::io`,
+//! Go's WASI target, etc.). Cost accepted: Wari must implement the
+//! exact WASI P1 ABI shapes, not invent its own.
+//!
+//! ## Why single-iovec `fd_write`
+//!
+//! Picked: read only `iovs[0]` and ignore higher iovecs. Considered:
+//! full iovec-array semantics (write each iovec sequentially, sum the
+//! byte counts). Why this won: Phase 0 Simplicity First — the only
+//! Tier-1 module is `apps/hello`, which always passes a single iovec.
+//! A loop over up to 16 iovecs is ~30 LOC of marshalling per call;
+//! defer until a second caller appears. Cost accepted: a Tier-1 module
+//! that batched multiple iovecs would silently drop all but the first.
+//! `nwritten` reflects the actual count written, so callers that check
+//! `nwritten` against `iovs_len`-summed-buf_len would notice.
+//!
+//! ## Why `proc_exit` via `wasmi::Error::i32_exit`
+//!
+//! Picked: return `wasmi::Error::i32_exit(code as i32)` from the host
+//! fn. The error unwinds the wasmi call stack; the kernel-side runner
+//! (`runtime::run_tier1_hello`) inspects the resulting `Error` via
+//! `i32_exit_status()`. Considered:
+//!   - set a flag in `Tier1HostState.exit_code` and have the host fn
+//!     return normally → rejected: the WASI spec says `proc_exit` does
+//!     not return; returning normally would let the WASM module
+//!     continue executing past the call, which would either trap on a
+//!     bogus return type mismatch or behave undefined.
+//!   - `wasmi::Error::host` with a custom HostError → workable but
+//!     re-implements the i32-exit pattern wasmi already exposes for
+//!     exactly this case (see `wasmi/src/error.rs`'s comment "This is
+//!     usually used as return code by WASI applications").
+//! Why this won: matches wasmi's first-class WASI exit support. The
+//! kernel detects the exit cleanly via `i32_exit_status()`. Cost
+//! accepted: we still also stash the code in `Tier1HostState.exit_code`
+//! for diagnostic logging at the trap site.
+
+#![allow(dead_code)]
+#![allow(clippy::doc_lazy_continuation)]
+
+use wasmi::{Caller, Error, Linker};
+
+use crate::cap::Caps;
+use crate::error::KernelError;
+use crate::runtime::tier2_uart;
+
+/// WASI Preview 1 errno: success.
+pub const WASI_ESUCCESS: u32 = 0;
+/// WASI Preview 1 errno: bad fd.
+pub const WASI_EBADF: u32 = 8;
+/// WASI Preview 1 errno: bad address (iovec OOB on linear memory).
+pub const WASI_EFAULT: u32 = 21;
+/// WASI Preview 1 errno: I/O error (driver-side failure).
+pub const WASI_EIO: u32 = 29;
+/// WASI Preview 1 errno: permission denied (capability not granted).
+pub const WASI_EPERM: u32 = 63;
+
+/// Per-instance host context for Tier-1 modules.
+///
+/// Carries the Tier-1 capability set and an exit-code latch the kernel
+/// inspects after `proc_exit` traps the instance. `exit_code` is `None`
+/// until `host_proc_exit` fires; the runner clears nothing afterward
+/// (the instance is dropped immediately).
+pub struct Tier1HostState {
+    /// Capabilities granted to this instance at `load_tier1` time.
+    pub caps: Caps,
+    /// Set by `host_proc_exit` so the kernel-side runner can log the
+    /// exit code in addition to inspecting `Error::i32_exit_status`.
+    pub exit_code: Option<u32>,
+}
+
+/// Register Phase-0 Tier-1 WASI host fns into a fresh linker.
+///
+/// # Contract
+///
+/// - Precondition: `linker` is freshly constructed.
+/// - Postcondition: `wasi_snapshot_preview1::fd_write` and
+///   `wasi_snapshot_preview1::proc_exit` are bound.
+/// - Errors: `KernelError::BadWasm` if wasmi rejects either binding.
+pub fn register_wasi_host_fns(
+    linker: &mut Linker<Tier1HostState>,
+) -> Result<(), KernelError> {
+    linker
+        .func_wrap("wasi_snapshot_preview1", "fd_write", host_fd_write)
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap("wasi_snapshot_preview1", "proc_exit", host_proc_exit)
+        .map_err(|_| KernelError::BadWasm)?;
+    Ok(())
+}
+
+/// Size of a WASI Preview 1 `iovec` in linear memory: two `u32`s.
+const IOVEC_SIZE: usize = 8;
+
+/// Maximum byte count Phase-0 will marshal in a single `fd_write` call.
+///
+/// Bounded so the on-stack scratch buffer in `host_fd_write` is small
+/// and known. The hello string is 16 bytes; this leaves headroom for
+/// short messages without needing the heap (R2: no allocation in
+/// host-fn dispatch).
+const FD_WRITE_MAX: usize = 256;
+
+/// `wasi_snapshot_preview1::fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno`.
+///
+/// Phase 0 semantics:
+///   - Validate `caps.stdout` — `EPERM` if denied.
+///   - Validate `fd == 1` — `EBADF` for any other fd.
+///   - Read the first iovec from caller's linear memory at `iovs_ptr`
+///     (8 bytes: `(buf, buf_len)` as little-endian `u32`s).
+///   - Read up to `FD_WRITE_MAX` bytes from caller's lin-mem at `buf`.
+///   - Push the bytes through the Tier-2 UART driver via
+///     `tier2_uart::write` — `EIO` on driver failure.
+///   - Write the byte count to caller's lin-mem at `nwritten_ptr`.
+///   - Return `ESUCCESS` (0).
+///
+/// Any out-of-bounds linear-memory access on the caller side returns
+/// `EFAULT` rather than panicking (R5).
+fn host_fd_write(
+    mut caller: Caller<'_, Tier1HostState>,
+    fd: u32,
+    iovs_ptr: u32,
+    iovs_len: u32,
+    nwritten_ptr: u32,
+) -> u32 {
+    // Capability gate.
+    if !caller.data().caps.stdout {
+        return WASI_EPERM;
+    }
+    // Phase-0: only stdout (fd=1) is plumbed.
+    if fd != 1 {
+        return WASI_EBADF;
+    }
+    // No iovecs → trivially zero bytes; report success and zero count.
+    if iovs_len == 0 {
+        return write_nwritten(&mut caller, nwritten_ptr, 0);
+    }
+
+    // Resolve the caller's linear memory.
+    let memory = match caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+    {
+        Some(m) => m,
+        None => return WASI_EFAULT,
+    };
+
+    // Stage 1 — read the first iovec (single-iovec policy, see
+    // module docstring).
+    let mut iov_buf = [0u8; IOVEC_SIZE];
+    if memory
+        .read(&caller, iovs_ptr as usize, &mut iov_buf)
+        .is_err()
+    {
+        return WASI_EFAULT;
+    }
+    let buf_offset =
+        u32::from_le_bytes([iov_buf[0], iov_buf[1], iov_buf[2], iov_buf[3]]);
+    let buf_len =
+        u32::from_le_bytes([iov_buf[4], iov_buf[5], iov_buf[6], iov_buf[7]]);
+
+    // Bound the byte count by the on-stack scratch (R2: no alloc in
+    // host-fn dispatch). Truncate silently if the caller asked for
+    // more — the byte count returned via `nwritten_ptr` reflects what
+    // was actually written.
+    let n = (buf_len as usize).min(FD_WRITE_MAX);
+    let mut bytes = [0u8; FD_WRITE_MAX];
+    if memory
+        .read(&caller, buf_offset as usize, &mut bytes[..n])
+        .is_err()
+    {
+        return WASI_EFAULT;
+    }
+
+    // Stage 2 — push through the Tier-2 UART driver.
+    // SAFETY: INV-1 (single-hart) + INV-8 (post-init) + INV-14 (Tier-2
+    // singleton). `kmain` orders `run_tier2_uart` before
+    // `run_tier1_hello`, so by the time any Tier-1 host fn fires the
+    // singleton is `Some(_)`.
+    let written = match unsafe { tier2_uart::write(&bytes[..n]) } {
+        Ok(w) => w,
+        Err(_) => return WASI_EIO,
+    };
+
+    // Stage 3 — report the byte count back to the caller.
+    write_nwritten(&mut caller, nwritten_ptr, written as u32)
+}
+
+/// Helper: write `count` to caller's linear memory at `nwritten_ptr`
+/// (4 bytes, little-endian). Returns `WASI_ESUCCESS` on a clean write,
+/// `WASI_EFAULT` if the address is OOB.
+fn write_nwritten(
+    caller: &mut Caller<'_, Tier1HostState>,
+    nwritten_ptr: u32,
+    count: u32,
+) -> u32 {
+    let memory = match caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+    {
+        Some(m) => m,
+        None => return WASI_EFAULT,
+    };
+    let bytes = count.to_le_bytes();
+    if memory
+        .write(&mut *caller, nwritten_ptr as usize, &bytes)
+        .is_err()
+    {
+        return WASI_EFAULT;
+    }
+    WASI_ESUCCESS
+}
+
+/// `wasi_snapshot_preview1::proc_exit(code) -> !`.
+///
+/// Returns `wasmi::Error::i32_exit(code as i32)` to trap the instance.
+/// The kernel-side runner (`runtime::run_tier1_hello`) catches the
+/// `Error` and inspects `i32_exit_status()` to obtain `code`.
+///
+/// Capability gate: requires `caps.exit`. A denied call still traps
+/// with `i32_exit(-1)` so the module cannot continue executing without
+/// the cap — the alternative (return normally) violates the WASI spec
+/// "does not return" contract.
+fn host_proc_exit(
+    mut caller: Caller<'_, Tier1HostState>,
+    code: u32,
+) -> Result<(), Error> {
+    if !caller.data().caps.exit {
+        // Even on cap denial we must not return: WASI says proc_exit
+        // never returns. Trap with -1 so the kernel logs a denied exit.
+        caller.data_mut().exit_code = Some(u32::MAX);
+        return Err(Error::i32_exit(-1));
+    }
+    caller.data_mut().exit_code = Some(code);
+    Err(Error::i32_exit(code as i32))
+}

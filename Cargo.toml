@@ -25,8 +25,9 @@ members = [
     "apps/hello",
     "drivers/uart",
     "tests/integration",
+    "tests/security",
     # tools/*    — populated as needed
-    # tests/security, tests/fuzz — populated per-phase
+    # tests/fuzz — populated per-phase
 ]
 exclude = [
     "platform/vf2",  # firmware blobs only, not a crate

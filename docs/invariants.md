@@ -149,6 +149,26 @@ has passed signature check in this boot.
 manifests (INV-11's full form). Phase 0's single-pubkey fast path is
 replaced.
 
+### INV-14 · Tier-2 Driver Instance Is a Boot-Initialized Singleton
+
+> The Tier-2 UART driver's `wasmi::Instance` (with its `Store` and the
+> typed `write` function handle) is held in a static
+> `Option<Tier2UartHandle>` installed exactly once at boot via
+> `tier2_uart::install`. Subsequent `tier2_uart::write` calls obtain
+> a `&mut TIER2_UART` and rely on INV-1 (single-hart) for exclusivity.
+
+**Consequence**: the WASI `fd_write` host fn (called from Tier-1) safely
+reaches into the singleton without locks. Cross-tier marshaling
+(`Memory::write` into the driver's linear memory + typed-call into
+its `write` export) becomes a synchronous, single-threaded sequence.
+
+**When this breaks**: SMP. INV-1's failure mode propagates here;
+every `tier2_uart::write` call site needs a per-hart or locked
+discipline. INV-14 also breaks if a second `install` ever lands —
+the second handle would silently shadow the first, leaking the
+previous Store. Enforced structurally by the `unsafe fn install`
+contract: caller must guarantee one-time invocation pre-runtime use.
+
 ---
 
 ## Per-file sites
@@ -181,6 +201,10 @@ replaced.
 | `kernel/src/runtime/sign.rs` (`verify`) | ed25519 verify of envelope vs. `ACCEPTED_PUBKEY`                   | INV-13       | First gate before any Tier-2 wasmi parse |
 | `kernel/src/runtime/host_fns.rs` (`host_mmio_write8`) | `core::ptr::write_volatile` byte write to MMIO       | INV-3        | Validator-narrowed: only `is_uart_mmio_addr` addresses reach the volatile write; capability gate (`mmio_uart`) precedes |
 | `kernel/src/cap/static_caps.rs`         | `Caps` construction + `caps_for` lookup                            | INV-1        | Plain-value caps; immutable post-load on a single-hart kernel |
+| `kernel/src/runtime/tier2_uart.rs` (`install`) | `addr_of_mut!(TIER2_UART)` write of the `Option<Tier2UartHandle>` singleton | INV-1, INV-8, INV-14 | One-time boot install of the Tier-2 UART driver handle, called from `runtime::run_tier2_uart` before any Tier-1 host fn dispatch |
+| `kernel/src/runtime/tier2_uart.rs` (`write`)   | `addr_of_mut!(TIER2_UART)` mutable read; `Memory::write` into driver lin-mem; `TypedFunc::call` into driver `write` export | INV-1, INV-8, INV-14 | Single-hart post-init access to the singleton; cross-tier marshaling is bounds-checked by wasmi |
+| `kernel/src/runtime/wasi.rs` (`host_fd_write`) | `unsafe { tier2_uart::write(&bytes[..n]) }` call from Tier-1 host fn dispatch | INV-1, INV-8, INV-14 | The Tier-1 → Tier-2 → MMIO marshaling chain; capability gate (`caps.stdout`) and fd validation precede |
+| `kernel/src/runtime/loader.rs` (`load_tier1`)  | *No `unsafe` blocks.* The Tier-1 path is pure wasmi orchestration; the unsafe surface lives in `tier2_uart` (singleton) and `wasi` (delegating to that singleton). | — | — |
 
 ---
 

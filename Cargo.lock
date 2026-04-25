@@ -229,9 +229,6 @@ version = "0.0.1"
 [[package]]
 name = "wari-hello"
 version = "0.0.1"
-dependencies = [
- "wari-abi",
-]
 
 [[package]]
 name = "wari-integration-tests"
@@ -249,6 +246,10 @@ dependencies = [
 
 [[package]]
 name = "wari-mem"
+version = "0.0.1"
+
+[[package]]
+name = "wari-security-tests"
 version = "0.0.1"
 
 [[package]]
