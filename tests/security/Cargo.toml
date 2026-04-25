@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Wari adversarial security tests — Phase 0.
+#
+# Each test under `tests/` is a separate binary that boots the kernel
+# under QEMU virt RV64 and asserts a specific safety property holds
+# under attack. Host target only — compiles for x86_64/aarch64, runs
+# QEMU as a subprocess.
+#
+# ## Phase 0 cadence (Q8=A: all 5 in PR 6)
+#
+# - malformed_wasm        — invalid bytecode rejected at load
+# - oom_bomb              — `memory.grow` past limit contained by wasmi
+# - host_fn_escape        — invalid args to WASI fns return typed errnos
+# - mmio_bypass           — Tier-1 cannot reach raw MMIO
+# - page_fault_kill       — Tier-1 lin-mem OOB trapped by wasmi
+# - kernel_panic_absence  — meta-test: none of the above panicked
+
+[package]
+name = "wari-security-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
