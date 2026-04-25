@@ -30,6 +30,7 @@ mod error;
 mod kputc;
 mod mem;
 mod mmio;
+mod runtime;
 mod trap;
 mod validate;
 
@@ -63,6 +64,15 @@ pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
     }
     trap::install();
     kprintln!("mmu OK, traps installed");
+
+    if let Err(e) = runtime::run_noop() {
+        kprintln!("wasmi runtime failed: {:?}", e);
+        loop {
+            // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
+            unsafe { core::arch::asm!("wfi"); }
+        }
+    }
+    kprintln!("wasmi OK");
 
     loop {
         // SAFETY: INV-7 — wfi is an S-mode instruction; we are in S-mode.

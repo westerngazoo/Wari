@@ -103,6 +103,21 @@ unaligned access faults.
 `../goose-os/docs/unsafe-audit.md` follow-up #1. Wari cherry-picks
 with the alignment fix.
 
+### INV-12 · Bump-Allocator Arena Is Boot-Only
+
+> The runtime bump allocator's arena `[HEAP_CURSOR, HEAP_END)` is
+> initialized exactly once during `kvm::init()` and never re-initialized.
+> After init, the arena is mutated only by `alloc()` calls; `dealloc()`
+> is a no-op (Phase 0: arena-per-boot, no free).
+
+**Consequence**: bump allocator's `unsafe` blocks rely on INV-1 (single-
+hart) for cursor exclusivity AND on the post-init guarantee that
+`HEAP_CURSOR <= HEAP_END` is the only relevant invariant.
+
+**When this breaks**: Phase 1's real allocator lands. INV-12 retires; a
+new INV covers the replacement allocator's invariants (free-list
+integrity, etc.).
+
 ---
 
 ## Phase-1 invariants (added when capability system lands)
@@ -144,6 +159,10 @@ with the alignment fix.
 | `kernel/src/trap.rs` (`install`, ~95)   | `csrw stvec` write                                                 | INV-7        | Privileged S-mode CSR write |
 | `kernel/src/trap.rs` (`ack_timer`, ~150)| `csrc sip` clear                                                   | INV-7        | Privileged S-mode CSR clear |
 | `kernel/src/trap.S` (`_trap_entry`)     | Privileged register save/restore + `sret`                          | INV-7        | S-mode trap-vector asm |
+| `kernel/src/mem/kvm.rs` (`init`, runtime-heap symbols) | `sym_addr(&_runtime_heap_start/_end)`             | INV-4        | Linker-symbol addresses for the bump arena |
+| `kernel/src/mem/kvm.rs` (`init`, end)   | `runtime::heap::init(runtime_heap_start, runtime_heap_end)`        | INV-1, INV-12 | One-time boot install of the bump arena |
+| `kernel/src/runtime/heap.rs` (`init`)   | `static mut HEAP_CURSOR/HEAP_END` write                            | INV-1, INV-12 | Single-hart boot-only init of the arena |
+| `kernel/src/runtime/heap.rs` (`alloc`)  | `static mut HEAP_CURSOR` read/write                                | INV-1, INV-12 | Single-hart cursor advance, post-init |
 
 ---
 
