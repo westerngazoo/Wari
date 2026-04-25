@@ -1,11 +1,13 @@
-//! Bitmap-based physical page allocator.
+// SPDX-License-Identifier: AGPL-3.0-only
+//! Re-export of `wari-mem`'s page allocator for kernel consumers.
 //!
-//! Pure logic: one `BitmapAllocator` struct with `alloc` / `free` /
-//! `free_count` methods. No `unsafe`, no MMIO, no linker symbols in
-//! this file — integration glue lives in `kvm.rs`.
+//! The pure logic (and host tests) live in the `wari-mem` workspace
+//! crate; this kernel-side module exists only so existing call sites
+//! using `crate::mem::page_alloc::*` keep compiling unchanged.
 //!
-//! Invariant: bit `N` set ↔ page at `base + N * PAGE_SIZE` is allocated.
-//! Conservation: `alloc_count() + free_count() == total_pages`.
-//!
-//! Cherry-pick source: `goose-os/kernel/src/page_alloc.rs` (484 LOC,
-//! host-tested).
+//! Phase 0a PR 3 will add the `kvm.rs` consumer that drives `install()`
+//! from linker symbols at boot. Until then the re-export has no in-tree
+//! caller — `unused_imports` is silenced here, not workspace-wide.
+
+#[allow(unused_imports)]
+pub use wari_mem::page_alloc::*;
