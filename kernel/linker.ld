@@ -66,6 +66,23 @@ SECTIONS {
     . = ALIGN(4K);
     _heap_end = .;
 
+    /* Runtime bump-allocator arena (Phase 0b, PR 4).
+     *
+     * Distinct from the page-allocator pool `[_end, _heap_end)`. The
+     * bump allocator backs `#[global_allocator]` so wasmi can land its
+     * internal `Vec`/`Box`/`String` somewhere during boot-time
+     * `Module::new` + `Linker::instantiate`. Phase 0 is arena-per-boot
+     * (no free); Phase 1's real allocator replaces this region.
+     *
+     * Size: 256 KiB (64 pages). Comfortable headroom for wasmi 0.32's
+     * Module + Engine + Store state for one tiny module. Adjust if
+     * boot-time OOM is observed during the gate.
+     */
+    . = ALIGN(4K);
+    _runtime_heap_start = .;
+    . += 0x40000;
+    _runtime_heap_end = .;
+
     /DISCARD/ : {
         *(.eh_frame)
         *(.comment)

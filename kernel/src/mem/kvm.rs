@@ -43,6 +43,8 @@ extern "C" {
     static _stack_top: u8;
     static _end: u8;
     static _heap_end: u8;
+    static _runtime_heap_start: u8;
+    static _runtime_heap_end: u8;
 }
 
 /// Read a linker-defined symbol's address as a `usize`.
@@ -129,6 +131,15 @@ pub fn init() -> Result<(), KernelError> {
     // every allocator-returned PA is reachable post-MMU.
     map_range(root, heap_start, heap_end, KERNEL_RW)?;
 
+    // Runtime bump-allocator arena (Phase 0b, PR 4) — distinct from the
+    // page-allocator pool above. Identity-map RW so wasmi's allocations
+    // are reachable post-MMU.
+    // SAFETY: INV-4. Reading linker symbol addresses; no deref.
+    let runtime_heap_start = unsafe { sym_addr(&_runtime_heap_start) };
+    // SAFETY: INV-4.
+    let runtime_heap_end   = unsafe { sym_addr(&_runtime_heap_end) };
+    map_range(root, runtime_heap_start, runtime_heap_end, KERNEL_RW)?;
+
     // UART MMIO — one page, RW. RISC-V Sv39 has no cache-disable PTE bit;
     // cacheability is a PMA property, not a PTE property. Identity-map
     // the page RW and trust the platform PMA configuration.
@@ -154,6 +165,15 @@ pub fn init() -> Result<(), KernelError> {
             "sfence.vma zero, zero",
             in(reg) satp,
         );
+    }
+
+    // Seed the runtime bump allocator. Done after MMU enable so wasmi
+    // sees identity-mapped RW pages from the first allocation.
+    // SAFETY: INV-1, INV-12. Single-hart boot context, called exactly
+    // once before any allocator user runs (`runtime::run_noop` is the
+    // first consumer, invoked from `kmain` after this returns).
+    unsafe {
+        crate::runtime::heap::init(runtime_heap_start, runtime_heap_end);
     }
 
     Ok(())

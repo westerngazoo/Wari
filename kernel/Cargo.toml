@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 wari-abi = { path = "../abi-shared" }
 wari-mem = { path = "../wari-mem" }
-# wasmi = { version = "0.32", default-features = false }  # Phase 0b — agent pins exact version
+wasmi = { version = "=1.0.9", default-features = false }
 
 [features]
 default = []
