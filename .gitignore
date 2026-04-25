@@ -16,5 +16,6 @@ rustc-ice-*.txt
 *.pcap
 *.img.tmp
 
-# PR body scratch (written by agent, consumed by `gh pr create`)
+# PR body scratch (written by agent, consumed by `gh pr create` or web UI)
 /pr-body.md
+/pr*-body.md

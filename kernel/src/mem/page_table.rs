@@ -1,12 +1,13 @@
-//! Sv39 page table structures — pure, host-testable.
+// SPDX-License-Identifier: AGPL-3.0-only
+//! Re-export of `wari-mem`'s Sv39 page-table primitives for kernel consumers.
 //!
-//! 3-level page table: 9+9+9+12 bits of a 39-bit VA.
-//! `walk(root, va, read_closure)` walks the tree without dereferencing
-//! anything — the read closure resolves PTE slots to u64 values, so
-//! the same function works against real memory (kernel) and fake
-//! memory (host tests).
+//! The pure logic (and host tests) live in the `wari-mem` workspace
+//! crate; this kernel-side module exists only so existing call sites
+//! using `crate::mem::page_table::*` keep compiling unchanged.
 //!
-//! No `unsafe` in this file. Hardware integration lives in `kvm.rs`.
-//!
-//! Cherry-pick source: `goose-os/kernel/src/page_table.rs` (~680 LOC,
-//! host-tested including the `walk()` test harness from Build 101).
+//! Phase 0a PR 3 (`kvm.rs`) will be the first in-tree consumer; until
+//! then the re-export has no caller and `unused_imports` is silenced
+//! here, not workspace-wide.
+
+#[allow(unused_imports)]
+pub use wari_mem::page_table::*;

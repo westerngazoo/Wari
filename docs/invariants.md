@@ -132,6 +132,10 @@ with the alignment fix.
 | `kernel/src/boot.S`                     | Boot asm: `.bss` zero, stack setup, call into `kmain`, `wfi` park | INV-7 | Privileged asm in S-mode |
 | `kernel/src/mmio/volatile.rs`           | `VolatilePtr::new` construction; `read` / `write` volatile ops    | INV-3 | Typed MMIO access — the one module where raw volatile lives (R3) |
 | `kernel/src/mmio/uart_ns16550.rs`       | `VolatilePtr::new` calls for THR / LSR at `0x1000_0000`            | INV-3 | NS16550 UART registers on QEMU virt |
+| `wari-mem/src/page_alloc.rs` (`get`)    | `&mut *addr_of_mut!(ALLOC)` returns global allocator               | INV-1, INV-8 | Single-hart kernel + post-init accessor |
+| `wari-mem/src/page_alloc.rs` (`install`)| `addr_of_mut!(ALLOC).write(..)` boot-time install                  | INV-1, INV-8 | Called once during boot, interrupts off |
+| `wari-mem/src/page_alloc.rs` (`zero_page`) | `write_volatile` over a 4 KiB page                              | INV-5 | Allocator-returned PA is identity-mapped RW |
+| `wari-mem/src/page_table.rs`            | *No `unsafe` blocks.* INV-9 has no site: `walk()` takes a `read: FnMut(usize) -> u64` closure rather than reinterpreting `&[u8]` as `&Pte`, so the slice-to-struct alignment caveat from goose-os `unsafe-audit.md` follow-up #1 (which targets `elf.rs`, not cherry-picked into Wari) is structurally avoided. | — | — |
 
 ---
 

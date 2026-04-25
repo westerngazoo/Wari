@@ -19,6 +19,7 @@
 resolver = "2"
 members = [
     "abi-shared",
+    "wari-mem",
     "wasi",
     "kernel",
     "apps/hello",

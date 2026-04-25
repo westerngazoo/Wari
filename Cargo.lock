@@ -22,7 +22,12 @@ name = "wari-kernel"
 version = "0.0.1"
 dependencies = [
  "wari-abi",
+ "wari-mem",
 ]
+
+[[package]]
+name = "wari-mem"
+version = "0.0.1"
 
 [[package]]
 name = "wari-wasi"
