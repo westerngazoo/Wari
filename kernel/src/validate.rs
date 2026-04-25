@@ -21,6 +21,12 @@ pub const MAX_PROCS: usize = 64;
 /// Maximum number of PLIC IRQs the kernel will track.
 pub const MAX_IRQS: usize = 64;
 
+/// QEMU `virt` NS16550 register window — base address.
+pub const UART_MMIO_BASE: usize = 0x1000_0000;
+
+/// QEMU `virt` NS16550 register window — length in bytes.
+pub const UART_MMIO_LEN: usize = 0x8;
+
 /// User-mappable VA range. Below `USER_VA_START` is MMIO; at or above
 /// `USER_VA_END` is kernel space. Phase-0 scaffold — revisit when the
 /// capability system gates mappings per-module.
@@ -57,6 +63,18 @@ pub const fn is_valid_irq(irq: usize) -> bool {
     irq < MAX_IRQS
 }
 
+/// Is `addr` inside the NS16550 register window?
+///
+/// Phase 0 grants `CAP_MMIO_UART` exclusively to the Tier-2 UART
+/// driver, so this is the only MMIO surface that capability covers.
+/// The validator narrows INV-3 (MMIO address validity) to this exact
+/// range; any address outside it must be refused at the host-fn
+/// boundary regardless of capability.
+#[inline]
+pub const fn is_uart_mmio_addr(addr: usize) -> bool {
+    addr >= UART_MMIO_BASE && addr < UART_MMIO_BASE + UART_MMIO_LEN
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +100,17 @@ mod tests {
         assert!(!is_valid_ipc_target(2, 2));          // no self
         assert!(!is_valid_ipc_target(MAX_PROCS, 1));  // out of bounds
         assert!(is_valid_ipc_target(2, 1));           // ok
+    }
+
+    #[test]
+    fn uart_mmio_window_boundaries() {
+        // Inside (inclusive lower bound).
+        assert!(is_uart_mmio_addr(0x1000_0000));
+        // Inside (last byte of the 8-byte window).
+        assert!(is_uart_mmio_addr(0x1000_0007));
+        // Just past — exclusive upper bound.
+        assert!(!is_uart_mmio_addr(0x1000_0008));
+        // Just below — outside the window.
+        assert!(!is_uart_mmio_addr(0x0FFF_FFFF));
     }
 }

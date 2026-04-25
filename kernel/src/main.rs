@@ -26,6 +26,7 @@ core::arch::global_asm!(include_str!("boot.S"));
 // Module skeleton — populated per the approved Phase-0 plan.
 mod abi;
 mod boot;
+mod cap;
 mod error;
 mod kputc;
 mod mem;
@@ -65,14 +66,14 @@ pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
     trap::install();
     kprintln!("mmu OK, traps installed");
 
-    if let Err(e) = runtime::run_noop() {
-        kprintln!("wasmi runtime failed: {:?}", e);
+    if let Err(e) = runtime::run_tier2_uart() {
+        kprintln!("wari runtime: tier-2 load failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
             unsafe { core::arch::asm!("wfi"); }
         }
     }
-    kprintln!("wasmi OK");
+    kprintln!("tier-2 uart driver loaded");
 
     loop {
         // SAFETY: INV-7 — wfi is an S-mode instruction; we are in S-mode.

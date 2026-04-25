@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Host-side tooling. Standalone workspace — not a member of the kernel
+# workspace at /Cargo.toml so its std deps don't leak into Tier-0
+# builds. Run as:
+#
+#   cargo run --manifest-path scripts/Cargo.toml --bin gen-keypair -- ...
+#   cargo run --manifest-path scripts/Cargo.toml --bin sign-module  -- ...
+
+[workspace]
+
+[package]
+name = "wari-tooling"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.95.0"
+license = "AGPL-3.0-only"
+authors = ["Gustavo Delgadillo <goose@wari.dev>"]
+
+[[bin]]
+name = "sign-module"
+path = "sign-module.rs"
+
+[[bin]]
+name = "gen-keypair"
+path = "gen-keypair.rs"
+
+[dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"

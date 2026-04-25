@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "wari-driver-uart"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

@@ -28,7 +28,7 @@ DEPLOY_FILES := $(KERNEL_BIN) kernel/ abi-shared/ wasi/ apps/ drivers/ \
                 platform/ scripts/ docs/ Makefile Cargo.toml Cargo.lock \
                 rust-toolchain.toml CLAUDE.md README.md .build_number
 
-.PHONY: help build build-hello build-all test run debug objdump clean \
+.PHONY: help build build-hello build-uart-driver build-all test run debug objdump clean \
         kernel-vf2 flash-sd deploy \
         test-unit test-integration test-security test-fuzz \
         clippy fmt check audit
@@ -67,12 +67,25 @@ help:
 
 # ── Build ──────────────────────────────────────────────────────
 
-build:
+build: build-uart-driver
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) cargo build --release --features qemu
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 
 build-hello:
 	cd apps/hello && cargo build --release
+
+# Build + (manual) sign the Tier-2 UART driver.
+#
+# After this target the unsigned blob is at build/drivers/uart.wasm.
+# The parent agent runs the signer separately once the dev keypair is
+# generated; the kernel `include_bytes!`s build/drivers/uart.signed.wasm.
+build-uart-driver:
+	cd drivers/uart && cargo build --release
+	mkdir -p build/drivers
+	cp target/wasm32-unknown-unknown/release/wari_driver_uart.wasm \
+		build/drivers/uart.wasm
+	@echo ">>> Now sign: cargo run --manifest-path scripts/Cargo.toml --bin sign-module -- \\"
+	@echo ">>>   build/drivers/uart.wasm build/drivers/uart.signed.wasm"
 
 build-all: build build-hello
 
