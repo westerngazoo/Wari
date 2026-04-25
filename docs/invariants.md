@@ -47,6 +47,20 @@ addresses is sound.
 **When this breaks**: porting to a different SoC layout. MMIO bases
 move behind `platform::` module.
 
+**Update (PR 8)**: MMIO base addresses are no longer hardcoded at use
+sites; they are exported from `kernel/src/platform/{qemu_virt,vf2}.rs`
+and selected at compile time via the `qemu` / `vf2` feature gate
+(exactly one must be active; `platform::mod` `compile_error!`s
+otherwise). INV-3's claim — "hardcoded MMIO bases are fixed by
+hardware spec" — applies to the `platform::*` constants, not their
+call sites. Sites that previously hardcoded `0x1000_0000`
+(`mmio/uart_ns16550.rs`, `mem/kvm.rs`, `validate.rs`) now defer to
+`platform::UART_BASE`. The `mmio/uart_ns16550.rs` file additionally
+sources `platform::UART_REG_STRIDE` so the same kernel printk path
+works on QEMU's NS16550A (1-byte stride) and VF2's DesignWare 8250
+(4-byte stride). PR 8 introduces no new `unsafe` blocks; the
+platform module is pure constants.
+
 ### INV-4 · Linker Symbol Addresses Are Valid
 
 > Linker script exports symbols (`_end`, `_heap_end`, etc.) whose
@@ -181,7 +195,7 @@ contract: caller must guarantee one-time invocation pre-runtime use.
 | `kernel/src/main.rs` (`panic` handler)  | `wfi` in panic halt loop           | INV-7     | S-mode WFI |
 | `kernel/src/boot.S`                     | Boot asm: `.bss` zero, stack setup, call into `kmain`, `wfi` park | INV-7 | Privileged asm in S-mode |
 | `kernel/src/mmio/volatile.rs`           | `VolatilePtr::new` construction; `read` / `write` volatile ops    | INV-3 | Typed MMIO access — the one module where raw volatile lives (R3) |
-| `kernel/src/mmio/uart_ns16550.rs`       | `VolatilePtr::new` calls for THR / LSR at `0x1000_0000`            | INV-3 | NS16550 UART registers on QEMU virt |
+| `kernel/src/mmio/uart_ns16550.rs`       | `VolatilePtr::new` calls for THR / LSR at `platform::UART_BASE + index * platform::UART_REG_STRIDE` | INV-3 | NS16550A on QEMU virt (stride 1); DesignWare 8250 on VF2 / JH7110 (stride 4). PR 8 routed both through `platform::*`. |
 | `wari-mem/src/page_alloc.rs` (`get`)    | `&mut *addr_of_mut!(ALLOC)` returns global allocator               | INV-1, INV-8 | Single-hart kernel + post-init accessor |
 | `wari-mem/src/page_alloc.rs` (`install`)| `addr_of_mut!(ALLOC).write(..)` boot-time install                  | INV-1, INV-8 | Called once during boot, interrupts off |
 | `wari-mem/src/page_alloc.rs` (`zero_page`) | `write_volatile` over a 4 KiB page                              | INV-5 | Allocator-returned PA is identity-mapped RW |

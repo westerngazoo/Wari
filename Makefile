@@ -29,7 +29,7 @@ DEPLOY_FILES := $(KERNEL_BIN) kernel/ abi-shared/ wasi/ apps/ drivers/ \
                 rust-toolchain.toml CLAUDE.md README.md .build_number
 
 .PHONY: help build build-hello build-uart-driver build-all test run debug objdump clean \
-        kernel-vf2 flash-sd deploy \
+        kernel-vf2 build-vf2 flash-sd deploy \
         test-unit test-integration test-security test-fuzz \
         clippy fmt check audit
 
@@ -143,9 +143,17 @@ audit:
 
 # ── VisionFive 2 ───────────────────────────────────────────────
 
+# Cross-compile sanity check — builds the VF2 kernel ELF without
+# bumping the build number or producing the flashable .bin. The parent
+# uses this to assert PR 8 keeps both targets green even when the VF2
+# board isn't reachable.
+build-vf2:
+	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
+	  cargo build --release --features vf2 --no-default-features
+
 kernel-vf2:
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
-	cd kernel && WARI_BUILD=$(NEXT_BUILD) RUSTFLAGS="-C link-arg=-Tlinker-vf2.ld" \
+	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
 	  cargo build --release --features vf2 --no-default-features
 	$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
 	@ls -lh $(KERNEL_BIN)

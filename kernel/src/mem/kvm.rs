@@ -18,15 +18,15 @@
 
 use crate::error::KernelError;
 use crate::kprintln;
+use crate::platform;
 use wari_mem::page_alloc::{self, AllocError, BitmapAllocator, PAGE_SIZE};
 use wari_mem::page_table::{
     make_satp, va_parts, KERNEL_RW, KERNEL_RX, KERNEL_RO, Pte, PteFlags, PT_ENTRIES,
 };
 
-/// QEMU `virt` NS16550 UART base. Matches `mmio::uart_ns16550::UART_BASE`.
-/// Hardcoded here because Phase 0 has no `platform::` module yet (lands in
-/// Phase 1 alongside VF2 support).
-const UART_MMIO_BASE: usize = 0x1000_0000;
+/// UART MMIO base — sourced from the active platform (PR 8). Identity-
+/// mapped one page RW so the kernel printk path keeps working post-MMU.
+const UART_MMIO_BASE: usize = platform::UART_BASE;
 
 // ── Linker symbol accessors ─────────────────────────────────────
 

@@ -20,7 +20,12 @@ wasmi = { version = "=1.0.9", default-features = false }
 ed25519-dalek = { version = "2", default-features = false }
 
 [features]
-default = []
+# Default = qemu so `cargo build` and `cargo test` pick the QEMU
+# platform without flags. VF2 builds opt out via
+# `--features vf2 --no-default-features`. PR 8 enforces "exactly one
+# platform feature" at compile time via `compile_error!` in
+# `src/platform/mod.rs`.
+default = ["qemu"]
 # Platform selection — exactly one must be active at build time.
 qemu = []
 vf2  = []

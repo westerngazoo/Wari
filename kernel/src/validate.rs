@@ -21,11 +21,16 @@ pub const MAX_PROCS: usize = 64;
 /// Maximum number of PLIC IRQs the kernel will track.
 pub const MAX_IRQS: usize = 64;
 
-/// QEMU `virt` NS16550 register window — base address.
-pub const UART_MMIO_BASE: usize = 0x1000_0000;
+/// UART register window — base address. Sourced from the active
+/// platform (`crate::platform::UART_BASE`) since PR 8 so the validator
+/// stays correct on QEMU virt and VF2 alike.
+pub const UART_MMIO_BASE: usize = crate::platform::UART_BASE;
 
-/// QEMU `virt` NS16550 register window — length in bytes.
-pub const UART_MMIO_LEN: usize = 0x8;
+/// UART register window — length in bytes. Sourced from the active
+/// platform (`crate::platform::UART_MMIO_LEN`); QEMU's 8-byte NS16550A
+/// window and VF2's 32-byte DesignWare window differ because of register
+/// stride, not register count.
+pub const UART_MMIO_LEN: usize = crate::platform::UART_MMIO_LEN;
 
 /// User-mappable VA range. Below `USER_VA_START` is MMIO; at or above
 /// `USER_VA_END` is kernel space. Phase-0 scaffold — revisit when the

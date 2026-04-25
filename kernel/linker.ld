@@ -88,3 +88,10 @@ SECTIONS {
         *(.comment)
     }
 }
+
+/* Boot hart ID — consumed PC-relative by boot.S. QEMU virt brings
+ * hart 0 up first. (PR 8: both linker scripts now export this symbol
+ * so boot.S works unchanged on QEMU virt and VF2 / JH7110, where the
+ * SiFive S7 monitor occupies hart 0 and the U74 boot hart is hart 1.) */
+_boot_hart_id = 0;
+

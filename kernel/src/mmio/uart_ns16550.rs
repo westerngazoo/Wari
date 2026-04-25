@@ -14,20 +14,31 @@
 //! Reference: Texas Instruments TL16C550 datasheet (SLLS177I), §6
 //! "Register summary". NS16550-compatible devices share the layout.
 //!
-//! Register map (byte offsets from base):
-//!   +0  THR  transmit holding register (write)
-//!   +5  LSR  line status register     (read; bit 5 = THR empty)
+//! Register map (logical indices; multiply by `platform::UART_REG_STRIDE`
+//! for the byte offset):
+//!   index 0  THR  transmit holding register (write)
+//!   index 5  LSR  line status register     (read; bit 5 = THR empty)
+//!
+//! On QEMU `virt` the stride is 1 (NS16550A, byte-spaced registers);
+//! on JH7110 / VF2 the stride is 4 (DesignWare 8250, 32-bit-aligned
+//! registers). Both expose 8-bit register *contents*; only the spacing
+//! differs. We keep `VolatilePtr<u8>` for the access width and let the
+//! stride pick the offset.
 //!
 //! Phase 0 scope: poll-write bytes, no interrupts, no reads. The
 //! Tier-2 driver handles RX, IRQs, flow control, etc.
 
 use super::volatile::VolatilePtr;
+use crate::platform;
 
-/// NS16550 base on QEMU `virt`. Fixed by QEMU's machine model.
-const UART_BASE: usize = 0x1000_0000;
+/// NS16550-style UART base — sourced from the active platform.
+const UART_BASE: usize = platform::UART_BASE;
 
-const THR_OFFSET: usize = 0;
-const LSR_OFFSET: usize = 5;
+/// Bytes between consecutive registers (1 on QEMU, 4 on VF2).
+const REG_STRIDE: usize = platform::UART_REG_STRIDE;
+
+const THR_INDEX: usize = 0;
+const LSR_INDEX: usize = 5;
 
 /// Bit 5 of LSR: transmit holding register empty (ready to accept).
 const LSR_THRE: u8 = 1 << 5;
@@ -48,14 +59,18 @@ pub fn init() {
 ///   register latency we do not wait on.
 /// - Panics: never.
 pub fn putc(byte: u8) {
-    // SAFETY: INV-3. UART_BASE + THR_OFFSET / LSR_OFFSET are fixed
-    // NS16550 registers on QEMU virt. Both pointers are naturally
-    // aligned (u8).
-    let lsr: VolatilePtr<u8> =
-        unsafe { VolatilePtr::new((UART_BASE + LSR_OFFSET) as *mut u8) };
+    // SAFETY: INV-3. `UART_BASE + index * REG_STRIDE` is a fixed
+    // hardware register address on the active platform (NS16550A on
+    // QEMU virt, DesignWare 8250 on JH7110 / VF2). Both layouts use
+    // 8-bit register *contents*; the stride only changes spacing.
+    // u8 is naturally aligned at every byte address.
+    let lsr: VolatilePtr<u8> = unsafe {
+        VolatilePtr::new((UART_BASE + LSR_INDEX * REG_STRIDE) as *mut u8)
+    };
     // SAFETY: INV-3 (same).
-    let thr: VolatilePtr<u8> =
-        unsafe { VolatilePtr::new((UART_BASE + THR_OFFSET) as *mut u8) };
+    let thr: VolatilePtr<u8> = unsafe {
+        VolatilePtr::new((UART_BASE + THR_INDEX * REG_STRIDE) as *mut u8)
+    };
 
     // Poll LSR until THRE is set. On QEMU this is effectively
     // always set, but the loop keeps the code correct on real

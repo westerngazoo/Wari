@@ -8,12 +8,24 @@
 //! bare relative path, which resolves against cargo's CWD — that works
 //! from the crate dir but not from the workspace root.
 
-/// Build script entry — emits the linker-script path.
+/// Build script entry — emits the platform-appropriate linker-script path.
+///
+/// Picks `linker-vf2.ld` when the `vf2` feature is active, otherwise
+/// `linker.ld`. The Makefile's `build-vf2` target sets `--features vf2`;
+/// the default path uses the QEMU layout. Resolved as an absolute path
+/// so cargo invocations from the workspace root and from `kernel/` both
+/// link correctly.
 #[allow(clippy::expect_used)] // build script: cargo guarantees CARGO_MANIFEST_DIR
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts");
-    println!("cargo:rustc-link-arg=-T{}/linker.ld", dir);
+    let script = if std::env::var("CARGO_FEATURE_VF2").is_ok() {
+        "linker-vf2.ld"
+    } else {
+        "linker.ld"
+    };
+    println!("cargo:rustc-link-arg=-T{}/{}", dir, script);
     println!("cargo:rerun-if-changed=linker.ld");
+    println!("cargo:rerun-if-changed=linker-vf2.ld");
     println!("cargo:rerun-if-changed=src/boot.S");
 }

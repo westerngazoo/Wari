@@ -31,6 +31,7 @@ mod error;
 mod kputc;
 mod mem;
 mod mmio;
+mod platform;
 mod runtime;
 mod trap;
 mod validate;
