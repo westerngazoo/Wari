@@ -54,7 +54,7 @@ const BUILD: &str = match option_env!("WARI_BUILD") {
 #[no_mangle]
 pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
     mmio::uart_ns16550::init();
-    kprintln!("Wari v0 build {} boot OK, hart {}", BUILD, hart_id);
+    boot::stage_banner(BUILD, hart_id);
 
     if let Err(e) = mem::kvm::init() {
         kprintln!("MMU init failed: {:?}", e);
