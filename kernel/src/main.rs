@@ -66,6 +66,15 @@ pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
     trap::install();
     kprintln!("mmu OK, traps installed");
 
+    if let Err(e) = cap::boot::init_root_caps() {
+        kprintln!("cap pools init failed: {:?}", e);
+        loop {
+            // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
+            unsafe { core::arch::asm!("wfi"); }
+        }
+    }
+    kprintln!("cap pools initialized");
+
     if let Err(e) = runtime::run_tier2_uart() {
         kprintln!("wari runtime: tier-2 load failed: {:?}", e);
         loop {

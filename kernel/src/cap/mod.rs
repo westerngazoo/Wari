@@ -39,14 +39,20 @@
 // or `cspace`, so the runtime path is unchanged.
 pub mod static_caps;
 
-// Phase-1b dynamic capability primitive. Pure types and pure
-// functions only — no syscall wiring, no boot-time integration.
-// The mint/copy/revoke/delete/lookup syscalls land in PR 3; the
-// kernel-object pools and boot-time root mint land in PR 2.
+// Phase-1b dynamic capability primitive. PR 1 landed the pure types
+// (Cap, CapId, ObjectKind) and per-process CSpace storage; PR 2
+// (this set of additions) lands the kernel-object kinds, the global
+// object pools, the static storage backing CSpaces and pools, and
+// the boot-time root-cap construction. PR 3 ships the
+// mint/copy/revoke/delete/lookup syscalls and IPC cap transfer.
 //
 // See `docs/cap-system-design.md` for the architectural contract
 // these modules implement.
+pub mod boot;
 pub mod cspace;
+pub mod objects;
+pub mod pool;
+pub mod storage;
 pub mod types;
 
 #[cfg(kani)]
@@ -58,8 +64,15 @@ pub use static_caps::{caps_for, Caps, ModuleId, Tier};
 // caller needs them.
 
 // Phase-1b dynamic re-exports. These are the userspace-facing names
-// for the new cap layer; downstream PRs (2, 3) build on top.
+// for the new cap layer; downstream PRs build on top.
 pub use cspace::{CSpace, CSPACE_SLOTS, MAX_PROCS};
+pub use objects::{
+    Endpoint, Frame, Notification, ObjectPools, TcbRef, Untyped,
+    ENDPOINT_POOL_CAPACITY, FRAME_POOL_CAPACITY, NOTIFICATION_POOL_CAPACITY,
+    UNTYPED_POOL_CAPACITY,
+};
+pub use pool::{BoundedQueue, Pool};
+pub use storage::{cspaces, object_pools};
 pub use types::{
     Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_GRANT,
     CAP_RIGHT_GRANT_REPLY, CAP_RIGHT_READ, CAP_RIGHT_WRITE,
