@@ -28,7 +28,8 @@ DEPLOY_FILES := $(KERNEL_BIN) kernel/ abi-shared/ wasi/ apps/ drivers/ \
                 platform/ scripts/ docs/ Makefile Cargo.toml Cargo.lock \
                 rust-toolchain.toml CLAUDE.md README.md .build_number
 
-.PHONY: help build build-hello build-uart-driver build-all test run debug objdump clean \
+.PHONY: help build build-hello build-uart-driver sign-uart-driver build-vf2 build-all \
+        test run debug objdump clean \
         kernel-vf2 flash-sd deploy \
         test-unit test-integration test-security test-fuzz \
         clippy fmt check audit
@@ -67,7 +68,7 @@ help:
 
 # ── Build ──────────────────────────────────────────────────────
 
-build: build-uart-driver build-hello
+build: sign-uart-driver build-hello
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) cargo build --release --features qemu
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 
@@ -80,18 +81,33 @@ build-hello:
 	cp target/wasm32-unknown-unknown/release/wari_hello.wasm \
 		build/apps/hello.wasm
 
-# Build + (manual) sign the Tier-2 UART driver.
-#
-# After this target the unsigned blob is at build/drivers/uart.wasm.
-# The parent agent runs the signer separately once the dev keypair is
-# generated; the kernel `include_bytes!`s build/drivers/uart.signed.wasm.
+# Build per-platform Tier-2 UART driver blobs (PR 9). The kernel
+# `include_bytes!`s the platform-matched signed blob — see
+# kernel/src/runtime/uart_blob.rs.
 build-uart-driver:
-	cd drivers/uart && cargo build --release
 	mkdir -p build/drivers
+	# QEMU variant
+	cd drivers/uart && cargo build --release --features qemu --no-default-features
 	cp target/wasm32-unknown-unknown/release/wari_driver_uart.wasm \
-		build/drivers/uart.wasm
-	@echo ">>> Now sign: cargo run --manifest-path scripts/Cargo.toml --bin sign-module -- \\"
-	@echo ">>>   build/drivers/uart.wasm build/drivers/uart.signed.wasm"
+		build/drivers/uart-qemu.wasm
+	# VF2 variant
+	cd drivers/uart && cargo build --release --features vf2 --no-default-features
+	cp target/wasm32-unknown-unknown/release/wari_driver_uart.wasm \
+		build/drivers/uart-vf2.wasm
+
+# Sign both Tier-2 UART driver variants. Required before the kernel
+# can `include_bytes!` either uart-qemu.signed.wasm (QEMU build) or
+# uart-vf2.signed.wasm (VF2 build).
+sign-uart-driver: build-uart-driver
+	cargo run --manifest-path scripts/Cargo.toml --bin sign-module -- \
+	  build/drivers/uart-qemu.wasm build/drivers/uart-qemu.signed.wasm
+	cargo run --manifest-path scripts/Cargo.toml --bin sign-module -- \
+	  build/drivers/uart-vf2.wasm  build/drivers/uart-vf2.signed.wasm
+
+# VF2 cross-compile sanity (no flash). Useful before PR 10 deploy.
+build-vf2: sign-uart-driver build-hello
+	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
+	  cargo build --release --features vf2 --no-default-features
 
 build-all: build build-hello
 
@@ -145,7 +161,7 @@ audit:
 
 kernel-vf2:
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
-	cd kernel && WARI_BUILD=$(NEXT_BUILD) RUSTFLAGS="-C link-arg=-Tlinker-vf2.ld" \
+	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
 	  cargo build --release --features vf2 --no-default-features
 	$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
 	@ls -lh $(KERNEL_BIN)
