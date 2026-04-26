@@ -1,54 +1,99 @@
+# EZLTN — Ejército Zapatista de Liberación Tecnológica Nacional
+
+**Un comunicado.**
+
+La nube no está en el cielo. Está en Virginia, en Dublín, en
+Singapur. Tiene dueños, tiene cercas, tiene aduanas. Cuando un
+hospital de Oaxaca guarda los expedientes de sus pacientes, los
+guarda en territorio que no es suyo, bajo leyes que no votó, en
+hardware que no puede abrir. Esto no es un detalle técnico. Es
+la forma del siglo XXI de una pelea vieja.
+
+En 1910 dijimos *tierra y libertad* porque la tierra era el medio
+de producción y nos la habían quitado. En 2026 decimos *soberanía
+tecnológica, tierra y libertad* porque el medio de producción
+ahora también es el datacenter, el kernel, el silicio, el modelo
+de IA que decide quién recibe crédito y quién no. Tres empresas
+hospedan la vida digital del sur global. Eso es colonialismo con
+mejor marketing.
+
+No estamos contra la tecnología. Estamos por quién la posee. Wari
+es una herramienta — un sistema operativo nativo de WASM para
+RISC-V, AGPL-3.0, sin telemetría, sin puertas traseras, sin
+permiso pedido a nadie. No es un producto. No se renta. No se
+vende. Se comparte, porque las herramientas se comparten — no se
+alquilan.
+
+No pedimos permiso. Construimos.
+
+— EZLTN
+
+---
+
+![Wari corriendo en silicio real — VisionFive 2, primer boot](docs/assets/first-boot-vf2.png)
+
+*Wari v0 build 12, booteando en una VisionFive 2 (JH7110, RISC-V RV64GC).
+Salida UART por COM7. Primer "Hello from Wari" sobre silicio real —
+abril 2026.*
+
+---
+
 # Wari
 
-A world-class, formally-verifiable, WASM-native operating system for
-RISC-V. Targeting sovereign cloud infrastructure in Latin America.
+Un sistema operativo nativo de WASM para RISC-V, formalmente
+verificable, dirigido a infraestructura cloud soberana en
+Latinoamérica.
 
-**Status:** Phase 0 kickoff. Foundation being cherry-picked from
-`../goose-os/`.
+**Estado:** Phase 1a cerrada. Booteando en silicio VisionFive 2.
+Phase 1b (capacidades + scheduler + IPC + driver Tier-2 de red)
+en planeación.
 
-## What makes Wari different
+## Qué hace a Wari diferente
 
-- **WASM-only process model.** No ELF in the customer ABI, ever.
-- **Two-tier sandbox.** Customer code (Tier 1, MMU + WASM) and drivers
-  (Tier 2, WASM-only) are both WASM modules, executed with different
-  privilege levels via capability grants.
-- **Tiny native kernel.** Tier 0 is ~5–10 KLOC of Rust, formal-
-  verification-scale.
-- **LATAM sovereignty.** Open hardware (RISC-V) + open drivers
-  (auditable `.wasm`) + confidential computing (CoVE, Phase 3) +
-  custom silicon (GAPU FPGA, Phase 3).
+- **Modelo de proceso WASM-only.** Nada de ELF en el ABI de cliente,
+  jamás.
+- **Sandbox de dos tiers.** Código de cliente (Tier 1, MMU + WASM) y
+  drivers (Tier 2, WASM-only) son ambos módulos WASM, ejecutados con
+  privilegios distintos vía grants de capacidades.
+- **Kernel nativo diminuto.** Tier 0 son ~5–10 KLOC de Rust, escala
+  de verificación formal.
+- **Soberanía LATAM.** Hardware abierto (RISC-V) + drivers abiertos
+  (`.wasm` auditable) + computación confidencial (CoVE, Phase 3) +
+  silicio custom (GAPU FPGA, Phase 3).
 
-See `docs/book/` for the narrative derivation.
+Ver `docs/book/` para la derivación narrativa (Volume 2 de
+*The Goose Factor*).
 
-## Running on VisionFive 2
+## Corriendo en VisionFive 2
 
-Phase-1a closes with a working deploy harness for real RISC-V silicon.
-The everyday flow is:
+Phase-1a cerró con un harness de deploy funcional para silicio
+RISC-V real. El flujo de día a día:
 
 ```bash
-make deploy                  # dev machine: build wari.bin, push to GitHub
-wari go                      # on the VF2: pull, copy to /boot/kernel.bin, reboot
+make deploy                  # máquina de dev: build wari.bin, push a GitHub
+wari go                      # en la VF2: pull, copiar a /boot/kernel.bin, reboot
 ```
 
-First-time bringup (clone the repo onto the device, install the
-`wari` shell function) is documented in
-[`docs/vf2-bringup.md`](docs/vf2-bringup.md). Boot output appears on
-the COM7 serial console — see the doc for the expected banner.
+El bringup inicial (clonar el repo en el dispositivo, instalar la
+función de shell `wari`) está documentado en
+[`docs/vf2-bringup.md`](docs/vf2-bringup.md). La salida de boot
+aparece en COM7 — ver el doc para el banner esperado.
 
-## Getting started
+## Empezando
 
-This project is Phase 0 scaffold. The execution agent populates it
-per the roadmap. If you're here to contribute, read in this order:
+Si llegaste a contribuir, leer en este orden:
 
-1. `CLAUDE.md` — rules, invariants, phases
-2. `docs/architecture.md` — current architecture
-3. `docs/prior-art.md` — what we inherit and what we reject
-4. `docs/invariants.md` — the `INV-N` catalog
-5. `docs/pr-workflow.md` — how to propose a change
-6. `docs/testing.md` — test layers + adversarial coverage
-7. `docs/security-model.md` — threat model
+1. `CLAUDE.md` — reglas, invariantes, fases
+2. `docs/architecture.md` — arquitectura actual
+3. `docs/prior-art.md` — qué heredamos y qué rechazamos
+4. `docs/invariants.md` — el catálogo `INV-N`
+5. `docs/pr-workflow.md` — cómo proponer un cambio
+6. `docs/testing.md` — capas de test + cobertura adversarial
+7. `docs/security-model.md` — modelo de amenazas
 8. `docs/book/` — Wari, Volume 2
 
-## License
+## Licencia
 
-TBD before first external release.
+AGPL-3.0-only. Ver [`LICENSE`](LICENSE).
+
+Las herramientas se comparten. No se alquilan.
