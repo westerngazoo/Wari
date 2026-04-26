@@ -1,6 +1,4 @@
-# EZLTN — Ejército Zapatista de Liberación Tecnológica Nacional
-
-**Un comunicado.**
+# Un comunicado de The Geese Collective
 
 La nube no está en el cielo. Está en Virginia, en Dublín, en
 Singapur. Tiene dueños, tiene cercas, tiene aduanas. Cuando un
@@ -26,7 +24,7 @@ alquilan.
 
 No pedimos permiso. Construimos.
 
-— EZLTN
+— The Geese Collective
 
 ---
 
