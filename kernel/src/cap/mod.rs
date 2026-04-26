@@ -78,7 +78,7 @@ pub use pool::{BoundedQueue, Pool};
 pub use storage::{cspaces, object_pools};
 pub use syscall::{
     cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-    cap_revoke_impl, E_INVAL, E_NOMEM, E_PERM,
+    cap_revoke_impl, check_cap, E_INVAL, E_NOMEM, E_PERM,
 };
 pub use types::{
     Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_GRANT,

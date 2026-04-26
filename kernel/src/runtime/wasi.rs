@@ -192,8 +192,17 @@ fn host_fd_write(
     iovs_len: u32,
     nwritten_ptr: u32,
 ) -> u32 {
-    // Capability gate.
-    if !caller.data().caps.stdout {
+    // PR 3b cap-mediated gate: Tier-1 holds an Endpoint cap with
+    // WRITE rights at slot 0 (the send side of uart_ipc_ep — the
+    // shape of "stdout" in Phase 1b's cap model). The legacy
+    // `caller.data().caps.stdout` boolean has been retired from the
+    // runtime path; the static `Caps` struct still exists in
+    // `cap::static_caps` as the input to `init_root_caps` but no
+    // longer gates host fns.
+    use crate::cap::{
+        check_cap, ObjectKind, CAP_RIGHT_WRITE, PROC_ID_TIER1_HELLO,
+    };
+    if check_cap(PROC_ID_TIER1_HELLO, 0, ObjectKind::Endpoint, CAP_RIGHT_WRITE).is_err() {
         return WASI_EPERM;
     }
     // Phase-0: only stdout (fd=1) is plumbed.
@@ -294,9 +303,14 @@ fn host_proc_exit(
     mut caller: Caller<'_, Tier1HostState>,
     code: u32,
 ) -> Result<(), Error> {
-    if !caller.data().caps.exit {
-        // Even on cap denial we must not return: WASI says proc_exit
-        // never returns. Trap with -1 so the kernel logs a denied exit.
+    // PR 3b cap-mediated gate: Tier-1 holds an Endpoint cap with
+    // WRITE rights at slot 1 (the send side of kernel_exit_ep).
+    // Without this cap the module cannot exit cleanly; we still
+    // trap-with-(-1) since WASI requires `proc_exit` to not return.
+    use crate::cap::{
+        check_cap, ObjectKind, CAP_RIGHT_WRITE, PROC_ID_TIER1_HELLO,
+    };
+    if check_cap(PROC_ID_TIER1_HELLO, 1, ObjectKind::Endpoint, CAP_RIGHT_WRITE).is_err() {
         caller.data_mut().exit_code = Some(u32::MAX);
         return Err(Error::i32_exit(-1));
     }

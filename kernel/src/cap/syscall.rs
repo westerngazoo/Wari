@@ -60,6 +60,53 @@ pub const E_INVAL: i32 = -2;
 pub const E_NOMEM: i32 = -3;
 
 // ─────────────────────────────────────────────────────────────────
+// check_cap — runtime permission gate
+// ─────────────────────────────────────────────────────────────────
+
+/// Verify that process `proc_id` holds a capability of `expected_kind`
+/// at `slot` with **all** of the bits in `required_rights` set.
+///
+/// Used by host functions on the runtime fast-path (PR 3b
+/// migration) to replace the legacy `host.caps.<bool>` pattern with
+/// a real cap lookup. Returns `Ok(())` on success; `Err(E_PERM)` on
+/// any failure. Bounds errors collapse into `E_PERM` so userspace
+/// cannot distinguish "I don't have the cap" from "I asked for a
+/// nonexistent slot" — both are caller errors with the same
+/// remediation (don't do that).
+///
+/// # Invariants
+///
+/// - **INV-18** (CSpace Slot Index Bounds): bounds-checks `proc_id <
+///   MAX_PROCS` and `slot < CSPACE_SLOTS` before any indexing.
+/// - **INV-15** (Forgery Prevention): only reads the cap; never
+///   constructs one.
+pub fn check_cap(
+    proc_id: u8,
+    slot: u8,
+    expected_kind: ObjectKind,
+    required_rights: u8,
+) -> Result<(), i32> {
+    if (proc_id as usize) >= MAX_PROCS {
+        return Err(E_PERM);
+    }
+    if (slot as usize) >= CSPACE_SLOTS {
+        return Err(E_PERM);
+    }
+    let cs = cspaces();
+    let cap = cs[proc_id as usize].slots[slot as usize];
+    if cap.is_empty() {
+        return Err(E_PERM);
+    }
+    if cap.kind != expected_kind {
+        return Err(E_PERM);
+    }
+    if cap.rights & required_rights != required_rights {
+        return Err(E_PERM);
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────
 // cap_mint
 // ─────────────────────────────────────────────────────────────────
 
