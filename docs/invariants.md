@@ -120,19 +120,160 @@ integrity, etc.).
 
 ---
 
-## Phase-1 invariants (added when capability system lands)
+## Phase-1b invariants (capability system)
 
-### INV-10 · Capability Monotonicity *(Phase 1)*
+These invariants govern the dynamic capability system introduced in
+Phase 1b (cap-primitive PR 1, kernel-objects PR 2, syscall-surface
+PR 3). Architectural contract in `docs/cap-system-design.md`.
 
-> A process's capability table is append-only within a single IPC
-> call. Capabilities are revoked only by explicit `SYS_CAP_REVOKE`,
-> never implicitly.
+### INV-10 · Capability Monotonicity *(Phase 1b)*
 
-### INV-11 · Tier-2 Grants Are Signed *(Phase 1)*
+> For any successful `Cap::derive` invocation that produces a child
+> cap from a parent, `child.rights & !parent.rights == 0`. The
+> kernel never produces a child cap with rights its parent does not
+> hold.
 
-> A Tier-2 module is loaded only with a matching signature on its
-> manifest. The signature is verified against a compiled-in public key
-> before any bytecode executes.
+**Consequence**: rights cannot be silently amplified through a chain
+of mints. The audit story for Phase 4: a static analysis of every
+mint site verifies the `requested & !parent.rights == 0` check.
+
+**Enforcement**: `kernel/src/cap/types.rs::Cap::derive` rejects
+violations with `KernelError::PermissionDenied`. Property-checked by
+`cap::proofs::derive_preserves_rights_monotonicity` and
+`derive_rejects_rights_amplification` (PR 1).
+
+**When this breaks**: never legitimately. Any code path that
+constructs a `Cap` value without going through the rights check is a
+soundness bug.
+
+### INV-11 · Tier-2 Grants Are Signed *(Phase 1b)*
+
+> A Tier-2 module's CSpace is populated only from caps declared in
+> its signed manifest (the existing `runtime::sign::verify` gate at
+> the binary level extends to the cap manifest in Phase 1b PR 2).
+> Tier-1 modules are similarly populated from compiled-in manifests
+> in Phase 1b; Phase 2+ moves Tier-1 manifests to signed
+> distribution.
+
+**Consequence**: every cap reachable by a Tier-2 instance traces
+back, via parent-chain or IPC delegation, to a kernel-issued root
+cap that was authorized by signature.
+
+**Enforcement**: PR 2's boot-time root-cap construction is the only
+producer of root caps and consults the signed manifest as input.
+
+### INV-15 · Capability Forgery Prevention *(Phase 1b)*
+
+> No userspace code path produces a `Cap` value that the kernel did
+> not construct. The `Cap` type's only public constructors are
+> `Cap::empty()` (for unused slots) and `Cap::derive()` (which
+> requires a parent and goes through the rights check). Userspace
+> WASM cannot construct a `Cap` value at all — it manipulates
+> capabilities only via syscall slot indices.
+
+**Consequence**: a Tier-1 or Tier-2 WASM module passing untrusted
+bytes to a syscall cannot smuggle a synthetic cap; the kernel only
+ever reads cap data from its own static memory, indexed by syscall
+arguments that are themselves bounds-checked.
+
+**Enforcement**: Rust privacy + an internal-use convention that
+never adds a public all-fields constructor. Property-checked by
+`cap::proofs::derive_rejects_reserved_rights_bits` (PR 1) and the
+Phase 1b PR 3 syscall trampoline tests.
+
+**When this breaks**: a `mem::transmute<[u8; 16], Cap>` or
+equivalent slipping past review. Caught by the `unsafe` audit — every
+`transmute` requires INV-N citation.
+
+### INV-16 · Derivation Chain Integrity *(Phase 1b)*
+
+> For every successful derivation, the child cap has the same
+> `kind` and `pool_index` as its parent. The mint operation never
+> retargets the underlying kernel object.
+>
+> Equivalently, after `child = Cap::derive(parent, parent_id, r,
+> b).unwrap()`, both `child.kind == parent.kind` and
+> `child.pool_index == parent.pool_index` hold.
+
+**Consequence**: revocation is sound. A depth-first walk from any
+cap following `parent`-equality finds every descendant; no
+descendant can escape revocation by claiming a different kernel
+object than its ancestor.
+
+**Enforcement**: `Cap::derive` (PR 1) copies `kind` and `pool_index`
+from the parent without modification. Property-checked by
+`cap::proofs::derive_preserves_kind_and_pool_index` and
+`derive_records_parent_id` (PR 1).
+
+**When this breaks**: SMP, where a mint and a revoke could race on
+the same parent slot. INV-1 covers Phase 1b's single-hart
+guarantee; the Phase 2+ SMP migration revisits this invariant.
+
+### INV-17 · Generation-Counter Anti-ABA *(Phase 1b)*
+
+> Every CSpace slot has a 16-bit generation counter that
+> monotonically increases on each transition occupied → empty →
+> occupied. A child cap whose `parent` field references generation
+> `N` of a slot becomes orphaned when the slot is reused at
+> generation `N+1`; the next revocation walk detects the mismatch
+> and clears the orphan.
+
+**Consequence**: a cap's parent reference is valid only as long as
+the slot it points to retains the same generation. ABA attacks
+(slot freed, refilled with an unrelated cap, child claims to be
+derived from the new occupant) are structurally impossible.
+
+**Enforcement**: `kernel/src/cap/cspace.rs::CSpace::bump_generation`
+uses `saturating_add` so the counter never wraps; PR 3's mint path
+refuses operations on a slot whose counter saturated at
+`u16::MAX`. Property-checked partially in PR 1
+(`cspace::tests::bump_generation_*`); fully proven in PR 3 once the
+mint syscall lands.
+
+**When this breaks**: a single slot is re-occupied 65,535 times in
+one boot. PR 3's mint path returns `KernelError::OutOfHandles` when
+this happens.
+
+### INV-18 · CSpace Slot Index Bounds *(Phase 1b)*
+
+> Every kernel access to a CSpace slot bounds-checks `slot <
+> CSPACE_SLOTS` before indexing. The two access paths
+> (`CSpace::lookup` and `CSpace::lookup_mut`) return `None` for
+> out-of-bounds; syscall trampolines map `None` to
+> `KernelError::InvalidArgument`.
+
+**Consequence**: `CSpace::slots[i]` is always sound (`i < 256`).
+No raw `slots[]` indexing exists outside `cap::cspace`.
+
+**Enforcement**: `cspace.rs` is the only module that directly
+indexes `CSpace.slots`; downstream consumers receive
+`Option<&Cap>` or `Option<&mut Cap>`. Currently checked at
+PR-1-test level (`cspace::tests::lookup_*`); will be Kani-proven
+once a slot-indexing fast path lands in PR 3.
+
+**When this breaks**: `CSPACE_SLOTS` ever increases past 256. Then
+the slot-index type widens past `u8`; ABI-breaking change requiring
+a versioned syscall set.
+
+### INV-19 · Tier-Shape Compatibility *(Phase 1b reserved)*
+
+> A Tier-1 process cannot hold a cap to a kernel-object kind that
+> is Tier-2-only. Phase 1b ships no Tier-2-only kinds (Endpoint,
+> Notification, Untyped, Frame are all kind-agnostic from a cap
+> perspective; Tier-2-ness applies to module loading, not to cap
+> objects). Reserved against Phase 2+ when Tier-2-only kinds appear
+> (`IrqHandler`, `MmioWindow`, etc.).
+
+**Consequence**: a Tier-1 module cannot, today or in the future,
+acquire a cap whose mint path is gated on "caller is Tier-2".
+
+**Enforcement**: per-kind mint paths inspect the caller's tier and
+refuse if the kind is incompatible. Phase 1b's mint path is
+uniform across the four kinds; the check is structurally a no-op
+today, shaped to grow.
+
+**When this breaks**: an attacker minting a Tier-2-only kind from a
+Tier-1 process. Caught structurally.
 
 ### INV-13 · Tier-2 Bytecode Is Signature-Verified Before Instantiation *(Phase 0; generalizes into INV-11 in Phase 1)*
 
@@ -201,6 +342,9 @@ contract: caller must guarantee one-time invocation pre-runtime use.
 | `kernel/src/runtime/sign.rs` (`verify`) | ed25519 verify of envelope vs. `ACCEPTED_PUBKEY`                   | INV-13       | First gate before any Tier-2 wasmi parse |
 | `kernel/src/runtime/host_fns.rs` (`host_mmio_write8`) | `core::ptr::write_volatile` byte write to MMIO       | INV-3        | Validator-narrowed: only `is_uart_mmio_addr` addresses reach the volatile write; capability gate (`mmio_uart`) precedes |
 | `kernel/src/cap/static_caps.rs`         | `Caps` construction + `caps_for` lookup                            | INV-1        | Plain-value caps; immutable post-load on a single-hart kernel |
+| `kernel/src/cap/types.rs` (`Cap::derive`) | Pure-function rights check + kind/pool preservation                | INV-10, INV-15, INV-16 | Mint primitive; no `unsafe`; Kani-proven in `cap::proofs` |
+| `kernel/src/cap/cspace.rs` (`lookup`, `lookup_mut`)  | Bounds-checked slot access                              | INV-18       | Single point of indexed access into `CSpace.slots[]` |
+| `kernel/src/cap/cspace.rs` (`bump_generation`) | `saturating_add` on per-slot generation counter             | INV-17       | Anti-ABA; saturates at `u16::MAX` so PR 3's mint can refuse |
 | `kernel/src/runtime/tier2_uart.rs` (`install`) | `addr_of_mut!(TIER2_UART)` write of the `Option<Tier2UartHandle>` singleton | INV-1, INV-8, INV-14 | One-time boot install of the Tier-2 UART driver handle, called from `runtime::run_tier2_uart` before any Tier-1 host fn dispatch |
 | `kernel/src/runtime/tier2_uart.rs` (`write`)   | `addr_of_mut!(TIER2_UART)` mutable read; `Memory::write` into driver lin-mem; `TypedFunc::call` into driver `write` export | INV-1, INV-8, INV-14 | Single-hart post-init access to the singleton; cross-tier marshaling is bounds-checked by wasmi |
 | `kernel/src/runtime/wasi.rs` (`host_fd_write`) | `unsafe { tier2_uart::write(&bytes[..n]) }` call from Tier-1 host fn dispatch | INV-1, INV-8, INV-14 | The Tier-1 → Tier-2 → MMIO marshaling chain; capability gate (`caps.stdout`) and fd validation precede |
