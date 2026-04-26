@@ -96,54 +96,72 @@ pub fn run_tier2_uart() -> Result<(), KernelError> {
     Ok(())
 }
 
-/// Boot the runtime: load the embedded Tier-1 hello blob, run its
-/// `_start` export, observe the `proc_exit` trap, and return.
+/// Run a Tier-1 instance to completion (clean `proc_exit` or trap).
+///
+/// Phase 1b's scheduler calls this once per registered Tier-1
+/// tenant. Each call:
+///
+/// 1. Loads the supplied WASM blob with the supplied `proc_id`
+///    baked into the host-fn closures (see
+///    `wasi::register_wasi_host_fns`), so `cap_*` and the
+///    cap-mediated WASI checks reach the right CSpace.
+/// 2. Resolves `_start` and calls it.
+/// 3. Returns `Ok(code)` on a clean `proc_exit(code)`, or `Err(...)`
+///    on any other wasmi error.
 ///
 /// # Contract
 ///
-/// - Precondition: `run_tier2_uart` has succeeded (so `tier2_uart`'s
-///   singleton is installed; otherwise `fd_write` would `EIO`).
-/// - On a clean `proc_exit(code)`, returns `Ok(())` and prints
-///   `[hello] exit(code)`.
-/// - On any other wasmi error (parse, instantiate, runtime trap),
-///   returns `KernelError::BadWasm`.
-///
-/// # Why catch `i32_exit_status` rather than treat it as an error
-///
-/// Picked: detect `wasmi::Error::i32_exit_status` and map to `Ok`.
-/// Considered: treat any `Error` as a kernel-side `BadWasm` (rejected
-/// — `proc_exit` is the *expected* termination path; conflating it
-/// with "module failed to validate" loses signal). Why this won:
-/// matches WASI semantics. Cost: one extra branch on the error path.
-pub fn run_tier1_hello() -> Result<(), KernelError> {
-    let tier1 =
-        loader::load_tier1(hello_blob::HELLO_WASM, ModuleId::Tier1Hello)?;
+/// - Precondition: `tier2_uart` is installed (Tier-1 `fd_write`
+///   marshals through it).
+/// - Precondition: `cap::boot::init_root_caps` has populated the
+///   `proc_id` CSpace with the caps the instance needs (UART send,
+///   exit). Without those caps the instance hits `WASI_EPERM` and
+///   exits with a -1 trap.
+/// - On clean exit returns `Ok(code)` and prints
+///   `[t1:proc_id] exit(code)` for boot-trace observability.
+/// - On other wasmi error returns `Err(KernelError::BadWasm)`.
+pub fn run_tier1(
+    proc_id: u8,
+    wasm_bytes: &[u8],
+    module_id: ModuleId,
+) -> Result<i32, KernelError> {
+    let tier1 = loader::load_tier1(wasm_bytes, module_id, proc_id)?;
     let loader::Tier1Instance { instance, mut store, .. } = tier1;
 
-    // Resolve `_start` — the hello module exports it as a typed
-    // `() -> ()` WASI entry. (It never *returns* — `proc_exit` traps —
-    // but the WASM-level signature is `() -> ()`.)
+    // Resolve `_start` — the Phase-1b Tier-1 modules export it as a
+    // typed `() -> ()` WASI entry. (It never *returns* —
+    // `proc_exit` traps — but the WASM-level signature is `() -> ()`.)
     let start = instance
         .get_typed_func::<(), ()>(&store, "_start")
         .map_err(|_| KernelError::BadWasm)?;
 
     match start.call(&mut store, ()) {
         Ok(()) => {
-            // Hello returned without calling proc_exit. This is a
-            // protocol violation by the module (Phase 0 hello always
-            // calls proc_exit) but not a kernel fault. Log and return
-            // Ok — the kernel halts in `kmain`'s wfi loop.
-            kprintln!("[hello] returned cleanly without proc_exit");
-            Ok(())
+            // Returned without calling proc_exit. Phase-1b modules
+            // are expected to call proc_exit; this is a protocol
+            // violation but not a kernel fault. Treat as exit(0).
+            kprintln!("[t1:{}] returned cleanly without proc_exit", proc_id);
+            Ok(0)
         }
         Err(e) => {
             if let Some(code) = e.i32_exit_status() {
-                kprintln!("[hello] exit({})", code);
-                Ok(())
+                kprintln!("[t1:{}] exit({})", proc_id, code);
+                Ok(code)
             } else {
-                kprintln!("[hello] runtime trap: {:?}", e.kind());
+                kprintln!("[t1:{}] runtime trap: {:?}", proc_id, e.kind());
                 Err(KernelError::BadWasm)
             }
         }
     }
+}
+
+/// Phase-0/1a back-compat wrapper: run the embedded hello blob with
+/// the default `PROC_ID_TIER1_HELLO`. Retained so PRs that have not
+/// yet migrated to the scheduler keep working.
+///
+/// New callers should go through `sched::run` instead.
+#[allow(dead_code)]
+pub fn run_tier1_hello() -> Result<(), KernelError> {
+    let proc_id = crate::cap::PROC_ID_TIER1_HELLO;
+    run_tier1(proc_id, hello_blob::HELLO_WASM, ModuleId::Tier1Hello).map(|_| ())
 }

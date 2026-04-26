@@ -174,12 +174,17 @@ pub fn load_tier2(
 pub fn load_tier1(
     wasm_bytes: &[u8],
     module_id: ModuleId,
+    proc_id: u8,
 ) -> Result<Tier1Instance, KernelError> {
     // Step 1 — parse + validate.
     let engine = Engine::default();
     let module = Module::new(&engine, wasm_bytes).map_err(|_| KernelError::BadWasm)?;
 
     // Step 2 — assign caps and build the per-instance store.
+    // The `caps` boolean struct is now legacy state on the runtime
+    // path (PR 3b retired its host-fn use); kept on the store for
+    // backward compat. The cap-mediated checks live in the cap
+    // host fns and use `proc_id` to reach the right CSpace.
     let caps = caps_for(Tier::One, module_id);
     let mut store = Store::new(
         &engine,
@@ -189,7 +194,7 @@ pub fn load_tier1(
         },
     );
     let mut linker = <Linker<Tier1HostState>>::new(&engine);
-    wasi::register_wasi_host_fns(&mut linker)?;
+    wasi::register_wasi_host_fns(&mut linker, proc_id)?;
 
     // Step 3 — instantiate. wasmi 1.0's `instantiate_and_start` runs the
     // WASM `(start ...)` section if any. Tier-1 hello has no WASM start
