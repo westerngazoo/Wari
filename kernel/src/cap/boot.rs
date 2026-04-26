@@ -72,6 +72,12 @@ pub const PROC_ID_TIER1_HELLO: u8 = 2;
 /// CSpace isolation between two instances of the same WASM blob.
 /// Phase 2+ replaces this hardcoded pair with a dynamic spawn API.
 pub const PROC_ID_TIER1_HELLO_B: u8 = 3;
+/// Process id reserved for the Phase-1b Tier-2 net driver
+/// (VirtIO-net on QEMU; JH7110 GMAC on VF2 in Phase 1c). The cap is
+/// installed by an extension to `init_root_caps` in PR Net-4 when the
+/// signed net driver blob lands. PR Net-3 reserves the proc_id so
+/// the host-fn closures can bake it in.
+pub const PROC_ID_TIER2_NET: u8 = 4;
 
 /// Slot index for a module's primary cap (UART receive on Tier-2,
 /// stdout on Tier-1).

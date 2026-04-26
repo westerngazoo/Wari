@@ -27,6 +27,28 @@ pub const UART_MMIO_BASE: usize = 0x1000_0000;
 /// QEMU `virt` NS16550 register window — length in bytes.
 pub const UART_MMIO_LEN: usize = 0x8;
 
+// ── Net MMIO windows (Phase 1b PR Net-3) ─────────────────────────
+//
+// Per `docs/net-driver-design.md` §4: Phase-1b targets QEMU
+// VirtIO-net only (VF2 GMAC is Phase 1c). The validator's accepted
+// range cfg-gates per platform.
+
+/// QEMU virt VirtIO-net MMIO base. The Phase-1b demo uses the 4th
+/// VirtIO MMIO slot at `0x10008000`; 0x100-byte window covers the
+/// VirtIO MMIO transport register set.
+#[cfg(feature = "qemu")]
+pub const NET_MMIO_BASE: usize = 0x1000_8000;
+#[cfg(feature = "qemu")]
+pub const NET_MMIO_LEN:  usize = 0x100;
+
+/// JH7110 GMAC eth0 register window. Phase-1c will land the real
+/// GMAC driver; Phase-1b ships the validator with the right range
+/// so the cfg-feature switch compiles for both targets.
+#[cfg(feature = "vf2")]
+pub const NET_MMIO_BASE: usize = 0x1603_0000;
+#[cfg(feature = "vf2")]
+pub const NET_MMIO_LEN:  usize = 0x1_0000;
+
 /// User-mappable VA range. Below `USER_VA_START` is MMIO; at or above
 /// `USER_VA_END` is kernel space. Phase-0 scaffold — revisit when the
 /// capability system gates mappings per-module.
@@ -73,6 +95,22 @@ pub const fn is_valid_irq(irq: usize) -> bool {
 #[inline]
 pub const fn is_uart_mmio_addr(addr: usize) -> bool {
     addr >= UART_MMIO_BASE && addr < UART_MMIO_BASE + UART_MMIO_LEN
+}
+
+/// Is `addr` inside the NIC register window for the active platform?
+///
+/// Sister to `is_uart_mmio_addr`. Phase 1b grants the `Net` cap
+/// exclusively to the Tier-2 net driver; this validator narrows
+/// INV-3 (MMIO address validity) and the new INV-20 (NIC MMIO
+/// Window Validity) to the exact register set the driver is
+/// licensed to touch.
+///
+/// Phase 1b QEMU range: `[0x10008000, 0x10008100)` — VirtIO-net
+/// MMIO transport.
+/// Phase 1c VF2 range:  `[0x16030000, 0x16040000)` — JH7110 GMAC eth0.
+#[inline]
+pub const fn is_net_mmio_addr(addr: usize) -> bool {
+    addr >= NET_MMIO_BASE && addr < NET_MMIO_BASE + NET_MMIO_LEN
 }
 
 #[cfg(test)]

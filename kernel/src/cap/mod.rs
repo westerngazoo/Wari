@@ -69,7 +69,7 @@ pub use static_caps::{caps_for, Caps, ModuleId, Tier};
 // for the new cap layer; downstream PRs build on top.
 pub use boot::{
     PROC_ID_RESERVED, PROC_ID_TIER1_HELLO, PROC_ID_TIER1_HELLO_B,
-    PROC_ID_TIER2_UART,
+    PROC_ID_TIER2_NET, PROC_ID_TIER2_UART,
 };
 pub use cspace::{CSpace, CSPACE_SLOTS, MAX_PROCS};
 pub use objects::{

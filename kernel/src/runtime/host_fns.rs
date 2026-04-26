@@ -211,3 +211,162 @@ fn host_mmio_read8(_caller: Caller<'_, Tier2HostState>, addr: u32) -> u32 {
     let byte = unsafe { core::ptr::read_volatile(addr as usize as *const u8) };
     byte as u32
 }
+
+// ─────────────────────────────────────────────────────────────────
+// PR Net-3 — net driver host fns
+// ─────────────────────────────────────────────────────────────────
+//
+// The Tier-2 net driver (PR Net-4 onward) gets its own set of host
+// fns: 32-bit NIC register access (NICs use 32-bit-aligned regs)
+// gated by the driver's `Net` cap, plus the cap-management +
+// notification host fns shared with the UART driver.
+//
+// `register_net_host_fns(linker, proc_id)` is a parametrised
+// registration helper called by the net driver's loader path
+// (lands in PR Net-4). It bakes proc_id = `PROC_ID_TIER2_NET` into
+// every closure so cap checks reach the net driver's CSpace.
+//
+// The legacy `register_host_fns` (above) keeps PROC_ID_TIER2_UART
+// hardcoded — the UART driver doesn't need parametrisation since
+// it remains a singleton in Phase 1b.
+
+/// `wari::net_mmio_write32(addr: u32, val: u32) -> i32` — write a
+/// 32-bit value to a NIC register, gated by the driver's `Net` cap
+/// (slot 0 in its CSpace) and the validator's range check.
+///
+/// Returns 0 on success, `E_PERM` if cap denied, `E_INVAL` if the
+/// address is outside the NIC register window for the active
+/// platform.
+fn host_net_mmio_write32(_caller: Caller<'_, Tier2HostState>, addr: u32, val: u32) -> i32 {
+    use crate::cap::{check_cap, ObjectKind, CAP_RIGHT_WRITE, PROC_ID_TIER2_NET};
+    if check_cap(PROC_ID_TIER2_NET, 0, ObjectKind::Net, CAP_RIGHT_WRITE).is_err() {
+        return E_PERM;
+    }
+    if !validate::is_net_mmio_addr(addr as usize) {
+        return E_INVAL;
+    }
+    // SAFETY: INV-3 + INV-20 (NIC MMIO Window Validity, validator-
+    // narrowed). Cap gate above ensures only the signed Tier-2 net
+    // driver reaches this point. NIC registers are 32-bit-aligned
+    // by hardware spec; the driver presents 32-bit-aligned offsets
+    // from the NIC base.
+    unsafe {
+        core::ptr::write_volatile(addr as usize as *mut u32, val);
+    }
+    0
+}
+
+/// `wari::net_mmio_read32(addr: u32) -> u32` — read a 32-bit NIC
+/// register, gated as above. Returns `u32::MAX` sentinel on
+/// permission or range failure (same convention as `mmio_read8`).
+fn host_net_mmio_read32(_caller: Caller<'_, Tier2HostState>, addr: u32) -> u32 {
+    use crate::cap::{check_cap, ObjectKind, CAP_RIGHT_READ, PROC_ID_TIER2_NET};
+    if check_cap(PROC_ID_TIER2_NET, 0, ObjectKind::Net, CAP_RIGHT_READ).is_err() {
+        return u32::MAX;
+    }
+    if !validate::is_net_mmio_addr(addr as usize) {
+        return u32::MAX;
+    }
+    // SAFETY: INV-3 + INV-20 + cap gate above.
+    unsafe { core::ptr::read_volatile(addr as usize as *const u32) }
+}
+
+/// Register the net driver's host fn surface into a fresh linker.
+///
+/// Called by the net-driver loader path (PR Net-4) with `proc_id =
+/// PROC_ID_TIER2_NET`. Registers:
+///
+/// - `wari::net_mmio_read32` / `net_mmio_write32` — gated by `Net`
+///   cap with READ / WRITE
+/// - `wari::cap_mint` / `cap_copy` / `cap_revoke` / `cap_delete` /
+///   `cap_lookup` — same cap-management surface the UART driver gets
+/// - `wari::notification_wait` / `notification_ack` — for IRQ-bound
+///   notification polling (PR Net-1 infrastructure)
+///
+/// Errors: `KernelError::BadWasm` if wasmi rejects any binding.
+pub fn register_net_host_fns(
+    linker: &mut Linker<Tier2HostState>,
+    proc_id: u8,
+) -> Result<(), KernelError> {
+    let pid = proc_id;
+
+    // Net-specific MMIO host fns.
+    linker
+        .func_wrap("wari", "net_mmio_write32", host_net_mmio_write32)
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap("wari", "net_mmio_read32", host_net_mmio_read32)
+        .map_err(|_| KernelError::BadWasm)?;
+
+    // Shared cap-management + notification surface, with the net
+    // driver's proc_id baked into each closure.
+    use crate::cap::{
+        cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
+        cap_revoke_impl, notification_ack_impl, notification_wait_impl,
+    };
+    linker
+        .func_wrap(
+            "wari",
+            "cap_mint",
+            move |_: Caller<'_, Tier2HostState>, ps: u32, ts: u32, r: u32, b: u32| -> i32 {
+                cap_mint_impl(pid, ps, ts, r, b)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_copy",
+            move |_: Caller<'_, Tier2HostState>, src: u32, tgt: u32| -> i32 {
+                cap_copy_impl(pid, src, tgt)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_revoke",
+            move |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 {
+                cap_revoke_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_delete",
+            move |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 {
+                cap_delete_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_lookup",
+            move |mut caller: Caller<'_, Tier2HostState>, slot: u32, out_buf: u32| -> i32 {
+                cap_lookup_impl(&mut caller, pid, slot, out_buf)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "notification_wait",
+            move |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 {
+                notification_wait_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "notification_ack",
+            move |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 {
+                notification_ack_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
+    Ok(())
+}
