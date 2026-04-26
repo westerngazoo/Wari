@@ -85,7 +85,7 @@ Privilege level is a per-module capability, not a language barrier.
 |---|---|---|
 | ISA | RISC-V RV64GC | Open spec, no licensing, no proprietary blobs |
 | Language | Rust stable, `no_std` | Memory safety + small TCB |
-| WASM runtime | `wasmi` (no_std interpreter) | RISC-V ready today; JIT deferred |
+| WASM runtime | `wasmi` (Phase 0-1) → `Wasm3` port (Phase 2) → `Wasm3` + Zwari hardware (Phase 3+) | Interpreter-only trajectory. **No JIT, ever** — preserves auditable-TCB thesis (`docs/zwari-extension.md`) |
 | Drivers | WASM modules (Tier 2) | Auditable, sandboxed, signed |
 | Boot chain | OpenSBI → U-Boot → Wari | Open, transparent |
 | Target HW (Phase 0) | StarFive VisionFive 2 (JH7110) | Affordable, well-documented |
@@ -96,37 +96,74 @@ Privilege level is a per-module capability, not a language barrier.
 
 ## Phase roadmap
 
+The trajectory is **deliberately interpreter-first → hardware-accelerated**,
+explicitly rejecting the JIT shortcut. Each phase preserves the
+auditable-TCB thesis. The performance gap to native closes through
+hardware (Phase 3+), not through runtime code generation. See
+`docs/zwari-extension.md` for the architectural justification.
+
 ```
-Phase 0  — Cloudflare-on-RISC-V demo
+Phase 0  — QEMU demo                                       ✓ closed
            Hello.wasm at boot. wasmi runtime. Tier-2 UART driver.
-           Kernel < 5 KLOC, no scheduler, no IPC.
-           Exit: signed .wasm prints to UART, halts, no kernel panic
-           under adversarial inputs.
+           Kernel ~5 KLOC, no scheduler, no IPC.
+           Exit gate: signed .wasm prints to UART, halts, no kernel
+           panic under adversarial inputs. (`docs/audits/phase-0.md`)
 
-Phase 1  — Two-tier with capabilities
+Phase 1a — RISC-V silicon bringup                          ✓ closed
+           Cross-compile to VisionFive 2 (JH7110). Per-platform
+           Tier-2 UART driver (NS16550 vs DW8250). Deploy harness
+           via GitHub pull on the device. First "Hello from Wari"
+           on real silicon (build 12, April 2026).
+
+Phase 1b — Multi-tenant + load story                       · in planning
            Capability system (cap table, mint, grant, revoke).
-           Tier-2 net driver (smoltcp-in-wasm). Module attestation.
            Multi-tenant scheduler + synchronous IPC.
+           Tier-2 net driver (smoltcp-in-wasm).
+           Cluster of 3 VF2 + REST-API workload + chaos test
+           (yank a node mid-load, traffic survives).
+           Exit gate: external prospect demo with k6 load numbers.
 
-Phase 2  — Sovereign AI + Docker ingress
-           WASI-NN host functions. Tier-2 GPU driver over PCIe.
-           Hardware crypto (Zkn/Zks). tools/oci2wasm — Docker→WASM
-           compiler for Rust/Go/Python/Node workloads.
+Phase 2  — Interpreter optimization                        · planned
+           Swap wasmi → Wasm3 ported to no_std S-mode.
+           Move spec validation to sign time (already partially
+           done in `runtime::sign`).
+           Target: 3-10× slowdown vs native (down from current
+           10-50×). TCB stays the same size or smaller.
+           NO JIT. (`docs/research/wasm3-port-evaluation.md`)
 
-Phase 3  — Confidential compute + GAPU
+Phase 3a — Zwari extension, software-first                 · planned
+           RISC-V custom extension defined and emitted by Wasm3
+           interpreter as inline assembly with software fallback.
+           Zero perf gain on stock silicon (fallback runs);
+           drop-in win when hardware lands. Public RFC + paper.
+
+Phase 3b — Zwari FPGA prototype + sovereign AI track       · planned
+           LiteX-based FPGA implementation (Lattice ECP5 or
+           Xilinx Artix-7). Cycle-accurate simulation against
+           software fallback, bit-identical results required.
+           In parallel: WASI-NN host functions, Tier-2 GPU
+           driver over PCIe, Hardware crypto (Zkn/Zks),
+           `tools/oci2wasm` Docker→WASM compiler.
+
+Phase 4  — Confidential compute + immutable kernel         · planned
            RISC-V CoVE integration (ciphertext RAM per tenant).
-           GAPU FPGA Tier-2 driver. Per-module formal verification.
-           Multi-board clustering. External security audit.
+           Per-module formal verification. Multi-board clustering.
+           External security audit. Functional-core / imperative-
+           shell refactor of Tier 0. Kani proofs for capability +
+           scheduler. Hash-attested ROM kernel.
 
-Phase 4  — Immutable kernel + custom silicon
-           Functional-core / imperative-shell refactor of Tier 0.
-           Kani proofs for capability + scheduler. wasmi correctness
-           proof (academic collaboration). Hash-attested ROM kernel.
-           Optional MMU-free SoC variant.
+Phase 5  — Sovereign silicon                               · long horizon
+           Zwari ASIC tapeout. SkyWater 130 nm or partnership
+           foundry. Likely funded via LATAM government / academic
+           consortium (Argentina Sadosky, Brazil CTI Renato
+           Archer, Mexico CINVESTAV). 3-5 year horizon.
 ```
 
-Phase 0 is in execution. Each phase has numbered, testable exit
-criteria — see `CLAUDE.md` §Phase 0 Exit Criteria for the template.
+Each phase has numbered, testable exit criteria — see
+`CLAUDE.md` §Phase Exit Criteria template. Phase 0 and Phase 1a are
+closed; Phase 1b in planning. The Phase 2 → Phase 3 transition is
+the architectural bet that distinguishes Wari from every other WASM
+runtime in the market.
 
 ---
 
@@ -193,12 +230,11 @@ merge, and every non-obvious decision is documented in the PR body.
 
 ## Status today
 
-Phase 0 in execution. Boot bringup PR (PR #1) open. Subsequent PRs
-land memory primitives, MMU enable, wasmi embedding, Tier-2 UART
-driver, Tier-1 hello module, and the Phase-0 audit gate.
+Phase 0 closed (QEMU demo, audited). Phase 1a closed (booting on
+real VisionFive 2 silicon — see `docs/assets/first-boot-vf2.png`).
+Phase 1b in planning, target start: this week.
 
-Repo: `https://github.com/westerngazoo/Wari`. Private until Phase 0
-demo lands.
+Repo: `https://github.com/westerngazoo/Wari`. AGPL-3.0-only.
 
 ---
 
