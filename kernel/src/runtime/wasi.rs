@@ -85,23 +85,100 @@ pub struct Tier1HostState {
     pub exit_code: Option<u32>,
 }
 
-/// Register Phase-0 Tier-1 WASI host fns into a fresh linker.
+/// Register Tier-1 WASI host fns into a fresh linker, with the
+/// caller's `proc_id` baked into each closure via `move`.
 ///
 /// # Contract
 ///
 /// - Precondition: `linker` is freshly constructed.
-/// - Postcondition: `wasi_snapshot_preview1::fd_write` and
-///   `wasi_snapshot_preview1::proc_exit` are bound.
-/// - Errors: `KernelError::BadWasm` if wasmi rejects either binding.
+/// - Postcondition: `wasi_snapshot_preview1::{fd_write, proc_exit}`
+///   plus the cap-management `wari::cap_*` host fns are bound, all
+///   carrying `proc_id` so cap checks reach the calling instance's
+///   CSpace.
+/// - Errors: `KernelError::BadWasm` if wasmi rejects any binding.
 pub fn register_wasi_host_fns(
     linker: &mut Linker<Tier1HostState>,
+    proc_id: u8,
 ) -> Result<(), KernelError> {
+    let pid = proc_id;
+
     linker
-        .func_wrap("wasi_snapshot_preview1", "fd_write", host_fd_write)
+        .func_wrap(
+            "wasi_snapshot_preview1",
+            "fd_write",
+            move |caller: Caller<'_, Tier1HostState>,
+                  fd: u32,
+                  iovs_ptr: u32,
+                  iovs_len: u32,
+                  nwritten_ptr: u32|
+                  -> u32 {
+                host_fd_write(caller, pid, fd, iovs_ptr, iovs_len, nwritten_ptr)
+            },
+        )
         .map_err(|_| KernelError::BadWasm)?;
     linker
-        .func_wrap("wasi_snapshot_preview1", "proc_exit", host_proc_exit)
+        .func_wrap(
+            "wasi_snapshot_preview1",
+            "proc_exit",
+            move |caller: Caller<'_, Tier1HostState>, code: u32|
+                  -> Result<(), Error> {
+                host_proc_exit(caller, pid, code)
+            },
+        )
         .map_err(|_| KernelError::BadWasm)?;
+
+    // Phase-1b cap-management host fns. proc_id is captured by each
+    // closure so each Tier-1 instance touches its own CSpace.
+    use crate::cap::{
+        cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
+        cap_revoke_impl,
+    };
+    linker
+        .func_wrap(
+            "wari",
+            "cap_mint",
+            move |_: Caller<'_, Tier1HostState>, ps: u32, ts: u32, r: u32, b: u32| -> i32 {
+                cap_mint_impl(pid, ps, ts, r, b)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_copy",
+            move |_: Caller<'_, Tier1HostState>, src: u32, tgt: u32| -> i32 {
+                cap_copy_impl(pid, src, tgt)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_revoke",
+            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
+                cap_revoke_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_delete",
+            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
+                cap_delete_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_lookup",
+            move |mut caller: Caller<'_, Tier1HostState>, slot: u32, out_buf: u32| -> i32 {
+                cap_lookup_impl(&mut caller, pid, slot, out_buf)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
     Ok(())
 }
 
@@ -133,13 +210,20 @@ const FD_WRITE_MAX: usize = 256;
 /// `EFAULT` rather than panicking (R5).
 fn host_fd_write(
     mut caller: Caller<'_, Tier1HostState>,
+    proc_id: u8,
     fd: u32,
     iovs_ptr: u32,
     iovs_len: u32,
     nwritten_ptr: u32,
 ) -> u32 {
-    // Capability gate.
-    if !caller.data().caps.stdout {
+    // PR 3b cap-mediated gate: Tier-1 holds an Endpoint cap with
+    // WRITE rights at slot 0 (the send side of uart_ipc_ep — the
+    // shape of "stdout" in Phase 1b's cap model). With the
+    // scheduler's multi-instance support, `proc_id` is passed in
+    // by the closure so each Tier-1 instance consults its own
+    // CSpace.
+    use crate::cap::{check_cap, ObjectKind, CAP_RIGHT_WRITE};
+    if check_cap(proc_id, 0, ObjectKind::Endpoint, CAP_RIGHT_WRITE).is_err() {
         return WASI_EPERM;
     }
     // Phase-0: only stdout (fd=1) is plumbed.
@@ -238,11 +322,15 @@ fn write_nwritten(
 /// "does not return" contract.
 fn host_proc_exit(
     mut caller: Caller<'_, Tier1HostState>,
+    proc_id: u8,
     code: u32,
 ) -> Result<(), Error> {
-    if !caller.data().caps.exit {
-        // Even on cap denial we must not return: WASI says proc_exit
-        // never returns. Trap with -1 so the kernel logs a denied exit.
+    // PR 3b cap-mediated gate: Tier-1 holds an Endpoint cap with
+    // WRITE rights at slot 1 (the send side of kernel_exit_ep).
+    // Without this cap the module cannot exit cleanly; we still
+    // trap-with-(-1) since WASI requires `proc_exit` to not return.
+    use crate::cap::{check_cap, ObjectKind, CAP_RIGHT_WRITE};
+    if check_cap(proc_id, 1, ObjectKind::Endpoint, CAP_RIGHT_WRITE).is_err() {
         caller.data_mut().exit_code = Some(u32::MAX);
         return Err(Error::i32_exit(-1));
     }

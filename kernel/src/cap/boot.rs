@@ -66,8 +66,12 @@ use super::types::{
 pub const PROC_ID_RESERVED: u8 = 0;
 /// Process id assigned to the signed Tier-2 UART driver.
 pub const PROC_ID_TIER2_UART: u8 = 1;
-/// Process id assigned to the Tier-1 hello app.
+/// Process id assigned to the first Tier-1 hello instance.
 pub const PROC_ID_TIER1_HELLO: u8 = 2;
+/// Process id assigned to the second Tier-1 hello instance — proves
+/// CSpace isolation between two instances of the same WASM blob.
+/// Phase 2+ replaces this hardcoded pair with a dynamic spawn API.
+pub const PROC_ID_TIER1_HELLO_B: u8 = 3;
 
 /// Slot index for a module's primary cap (UART receive on Tier-2,
 /// stdout on Tier-1).
@@ -139,10 +143,60 @@ pub fn init_root_caps() -> Result<(), KernelError> {
         );
     }
 
-    // 3. Tier-1 hello: send cap on uart_ipc_ep (stdout) + send cap
-    //    on kernel_exit_ep (exit).
+    // 3. Tier-1 hello (instance A, proc_id=2): send cap on
+    //    uart_ipc_ep (stdout) + send cap on kernel_exit_ep (exit).
     let tier1_caps = caps_for(Tier::One, ModuleId::Tier1Hello);
-    let tier1_cs = &mut cs[PROC_ID_TIER1_HELLO as usize];
+    install_tier1_caps(
+        cs,
+        PROC_ID_TIER1_HELLO,
+        &tier1_caps,
+        uart_ipc_ep,
+        kernel_exit_ep,
+    );
+
+    // 4. Tier-1 hello (instance B, proc_id=3): identical caps as
+    //    instance A but in a separate CSpace. The two instances run
+    //    sequentially under the Phase-1b scheduler; they share the
+    //    same WASM blob but their cap state is isolated.
+    install_tier1_caps(
+        cs,
+        PROC_ID_TIER1_HELLO_B,
+        &tier1_caps,
+        uart_ipc_ep,
+        kernel_exit_ep,
+    );
+
+    // 5. Bump refcounts on each endpoint to reflect ALL caps now
+    //    pointing at them. We re-take the pools borrow now that
+    //    we're done with cspaces.
+    let _ = cs;
+    let pools = object_pools();
+    // UART ep refs: 1 for Tier-2 (if mmio_uart), plus 1 per Tier-1
+    // instance (if stdout).
+    let uart_refs = (tier2_caps.mmio_uart as u16)
+        + 2 * (tier1_caps.stdout as u16);
+    // Exit ep refs: 1 per Tier-1 instance (if exit).
+    let exit_refs = 2 * (tier1_caps.exit as u16);
+    if let Some(ep) = pools.endpoints.get_mut(uart_ipc_ep) {
+        ep.refcount = ep.refcount.saturating_add(uart_refs);
+    }
+    if let Some(ep) = pools.endpoints.get_mut(kernel_exit_ep) {
+        ep.refcount = ep.refcount.saturating_add(exit_refs);
+    }
+
+    Ok(())
+}
+
+/// Install Tier-1 stdout + exit root caps into the CSpace at
+/// `proc_id`, reading the on/off flags from `tier1_caps`.
+fn install_tier1_caps(
+    cs: &mut [super::cspace::CSpace],
+    proc_id: u8,
+    tier1_caps: &super::Caps,
+    uart_ipc_ep: u16,
+    kernel_exit_ep: u16,
+) {
+    let tier1_cs = &mut cs[proc_id as usize];
     if tier1_caps.stdout {
         install_root_cap(
             tier1_cs,
@@ -161,22 +215,6 @@ pub fn init_root_caps() -> Result<(), KernelError> {
             CAP_RIGHT_WRITE,
         );
     }
-
-    // 4. Bump refcounts on each endpoint to reflect the caps now
-    //    pointing at them. We re-take the pools borrow now that we're
-    //    done with cspaces.
-    let _ = cs;
-    let pools = object_pools();
-    let uart_refs = (tier2_caps.mmio_uart as u16) + (tier1_caps.stdout as u16);
-    let exit_refs = tier1_caps.exit as u16;
-    if let Some(ep) = pools.endpoints.get_mut(uart_ipc_ep) {
-        ep.refcount = ep.refcount.saturating_add(uart_refs);
-    }
-    if let Some(ep) = pools.endpoints.get_mut(kernel_exit_ep) {
-        ep.refcount = ep.refcount.saturating_add(exit_refs);
-    }
-
-    Ok(())
 }
 
 /// Install a root cap (no parent — `parent = CapId::ROOT`) into a

@@ -52,7 +52,9 @@ pub mod boot;
 pub mod cspace;
 pub mod objects;
 pub mod pool;
+pub mod revoke;
 pub mod storage;
+pub mod syscall;
 pub mod types;
 
 #[cfg(kani)]
@@ -65,6 +67,10 @@ pub use static_caps::{caps_for, Caps, ModuleId, Tier};
 
 // Phase-1b dynamic re-exports. These are the userspace-facing names
 // for the new cap layer; downstream PRs build on top.
+pub use boot::{
+    PROC_ID_RESERVED, PROC_ID_TIER1_HELLO, PROC_ID_TIER1_HELLO_B,
+    PROC_ID_TIER2_UART,
+};
 pub use cspace::{CSpace, CSPACE_SLOTS, MAX_PROCS};
 pub use objects::{
     Endpoint, Frame, Notification, ObjectPools, TcbRef, Untyped,
@@ -73,6 +79,10 @@ pub use objects::{
 };
 pub use pool::{BoundedQueue, Pool};
 pub use storage::{cspaces, object_pools};
+pub use syscall::{
+    cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
+    cap_revoke_impl, check_cap, E_INVAL, E_NOMEM, E_PERM,
+};
 pub use types::{
     Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_GRANT,
     CAP_RIGHT_GRANT_REPLY, CAP_RIGHT_READ, CAP_RIGHT_WRITE,

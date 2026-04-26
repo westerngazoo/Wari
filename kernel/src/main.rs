@@ -32,6 +32,7 @@ mod kputc;
 mod mem;
 mod mmio;
 mod runtime;
+mod sched;
 mod trap;
 mod validate;
 
@@ -84,13 +85,52 @@ pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
     }
     kprintln!("tier-2 uart driver loaded");
 
-    if let Err(e) = runtime::run_tier1_hello() {
-        kprintln!("wari runtime: tier-1 hello failed: {:?}", e);
+    // Register the Tier-2 driver as a "library" process and the
+    // two Tier-1 hello instances as Ready tenants, then hand off
+    // to the scheduler. The scheduler runs each Tier-1 in proc_id
+    // order; cap isolation between them is enforced by the
+    // per-instance CSpaces populated in `cap::boot::init_root_caps`.
+    if let Err(e) = sched::register_library(
+        cap::PROC_ID_TIER2_UART,
+        cap::Tier::Two,
+        cap::ModuleId::Tier2Uart,
+    ) {
+        kprintln!("wari sched: tier-2 register failed: {:?}", e);
         loop {
-            // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
+            // SAFETY: INV-7 — wfi is S-mode.
             unsafe { core::arch::asm!("wfi"); }
         }
     }
+    if let Err(e) = sched::register_tenant(
+        cap::PROC_ID_TIER1_HELLO,
+        cap::Tier::One,
+        cap::ModuleId::Tier1Hello,
+    ) {
+        kprintln!("wari sched: tier-1 A register failed: {:?}", e);
+        loop {
+            // SAFETY: INV-7 — wfi is S-mode.
+            unsafe { core::arch::asm!("wfi"); }
+        }
+    }
+    if let Err(e) = sched::register_tenant(
+        cap::PROC_ID_TIER1_HELLO_B,
+        cap::Tier::One,
+        cap::ModuleId::Tier1Hello,
+    ) {
+        kprintln!("wari sched: tier-1 B register failed: {:?}", e);
+        loop {
+            // SAFETY: INV-7 — wfi is S-mode.
+            unsafe { core::arch::asm!("wfi"); }
+        }
+    }
+    if let Err(e) = sched::run() {
+        kprintln!("wari sched: run failed: {:?}", e);
+        loop {
+            // SAFETY: INV-7 — wfi is S-mode.
+            unsafe { core::arch::asm!("wfi"); }
+        }
+    }
+    kprintln!("[sched] all tenants exited, halting");
 
     loop {
         // SAFETY: INV-7 — wfi is an S-mode instruction; we are in S-mode.
