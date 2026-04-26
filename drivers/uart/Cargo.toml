@@ -12,6 +12,21 @@ crate-type = ["cdylib"]
 
 [dependencies]
 
+# Per-platform feature gate. Exactly one of `qemu` / `vf2` must be active
+# at build time; both bake the platform's MMIO base + register stride
+# into the .wasm as constants. The kernel `include_bytes!`s the matching
+# signed blob (see kernel/src/runtime/uart_blob.rs).
+#
+# `default = ["qemu"]` mirrors the kernel crate's pattern (PR 8): the
+# workspace's `cargo test --workspace` / `cargo clippy --workspace`
+# need a feature active to dodge the `compile_error!` in `lib.rs`. The
+# Makefile's real per-platform builds use `--no-default-features
+# --features qemu` or `--features vf2` explicitly.
+[features]
+default = ["qemu"]
+qemu = []
+vf2  = []
+
 [profile.release]
 panic = "abort"
 opt-level = "s"

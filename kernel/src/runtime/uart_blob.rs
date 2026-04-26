@@ -1,19 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Embedded signed Tier-2 UART driver blob.
+//! Embedded signed Tier-2 UART driver — platform-conditional.
 //!
-//! The bytes are produced by the parent build pipeline:
+//! PR 9 split the single `uart.signed.wasm` into two per-platform
+//! variants: `uart-qemu.signed.wasm` and `uart-vf2.signed.wasm`. The
+//! kernel `include_bytes!`s the platform-matched blob at compile time
+//! via the `qemu` / `vf2` cargo features.
+//!
+//! Build pipeline (per `Makefile::sign-uart-driver`):
 //!
 //! ```text
-//! 1. cargo build --release  →  drivers/uart/target/.../wari_driver_uart.wasm
-//! 2. cp …                    →  build/drivers/uart.wasm
-//! 3. sign-module             →  build/drivers/uart.signed.wasm
+//! 1. cargo build --release --features qemu  → wari_driver_uart.wasm
+//!    cp …                                    → build/drivers/uart-qemu.wasm
+//! 2. cargo build --release --features vf2   → wari_driver_uart.wasm
+//!    cp …                                    → build/drivers/uart-vf2.wasm
+//! 3. sign-module qemu  → build/drivers/uart-qemu.signed.wasm
+//! 4. sign-module vf2   → build/drivers/uart-vf2.signed.wasm
 //! ```
-//!
-//! `make build-uart-driver` performs steps 1–2; the parent agent runs
-//! step 3 once the dev keypair has been generated. The kernel
-//! `include_bytes!`s the result here so the entire Tier-2 trust base is
-//! in the kernel image (R8: reproducible build, no filesystem).
 
-/// Signed envelope: `pubkey (32) || signature (64) || wasm_bytes (..)`.
+#[cfg(feature = "qemu")]
 pub static UART_DRIVER_SIGNED: &[u8] =
-    include_bytes!("../../../build/drivers/uart.signed.wasm");
+    include_bytes!("../../../build/drivers/uart-qemu.signed.wasm");
+
+#[cfg(feature = "vf2")]
+pub static UART_DRIVER_SIGNED: &[u8] =
+    include_bytes!("../../../build/drivers/uart-vf2.signed.wasm");

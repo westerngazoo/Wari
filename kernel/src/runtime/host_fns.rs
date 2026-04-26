@@ -64,6 +64,9 @@ pub fn register_host_fns(linker: &mut Linker<Tier2HostState>) -> Result<(), Kern
     linker
         .func_wrap("wari", "mmio_write8", host_mmio_write8)
         .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap("wari", "mmio_read8", host_mmio_read8)
+        .map_err(|_| KernelError::BadWasm)?;
     Ok(())
 }
 
@@ -90,4 +93,30 @@ fn host_mmio_write8(caller: Caller<'_, Tier2HostState>, addr: u32, val: u32) -> 
         core::ptr::write_volatile(addr as usize as *mut u8, val as u8);
     }
     0
+}
+
+/// `wari::mmio_read8(addr: u32) -> u32` — read a byte from the MMIO
+/// register at `addr` (zero-extended in the `u32` return). Same gating
+/// as `mmio_write8`. Needed by the Phase-1a UART driver's LSR-poll loop.
+///
+/// **Sentinel**: returns `u32::MAX` on permission or range failure. A
+/// legitimate UART status read would not produce `0xFFFFFFFF`, but the
+/// driver should treat this value as "stop polling" defensively. A
+/// richer error encoding lands when the ABI gains result-tuple shapes
+/// (Phase 2+).
+fn host_mmio_read8(caller: Caller<'_, Tier2HostState>, addr: u32) -> u32 {
+    let host = caller.data();
+
+    if !host.caps.mmio_uart {
+        return u32::MAX;
+    }
+    if !validate::is_uart_mmio_addr(addr as usize) {
+        return u32::MAX;
+    }
+
+    // SAFETY: INV-3 (validator-narrowed MMIO address) + capability
+    // check above. The 8-bit read of a UART register is non-mutating
+    // and well-defined for the entire NS16550/DW8250 register window.
+    let byte = unsafe { core::ptr::read_volatile(addr as usize as *const u8) };
+    byte as u32
 }

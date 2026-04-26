@@ -20,6 +20,21 @@ RISC-V. Targeting sovereign cloud infrastructure in Latin America.
 
 See `docs/book/` for the narrative derivation.
 
+## Running on VisionFive 2
+
+Phase-1a closes with a working deploy harness for real RISC-V silicon.
+The everyday flow is:
+
+```bash
+make deploy                  # dev machine: build wari.bin, push to GitHub
+wari go                      # on the VF2: pull, copy to /boot/kernel.bin, reboot
+```
+
+First-time bringup (clone the repo onto the device, install the
+`wari` shell function) is documented in
+[`docs/vf2-bringup.md`](docs/vf2-bringup.md). Boot output appears on
+the COM7 serial console — see the doc for the expected banner.
+
 ## Getting started
 
 This project is Phase 0 scaffold. The execution agent populates it
