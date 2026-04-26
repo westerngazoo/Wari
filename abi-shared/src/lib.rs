@@ -76,14 +76,35 @@ pub const SYS_IRQ_ACK:      usize = 15;
 /// Request a system reboot (capability-gated in Phase 1).
 pub const SYS_REBOOT:       usize = 16;
 
+// ── Capability-management syscalls (Phase 1b) ─────────────────────
+//
+// These are documentary sysnum constants. Phase 1b's actual ABI
+// carrier for these operations is the **WASM host-function set**
+// registered in `kernel/src/runtime/{host_fns,wasi}.rs` under the
+// `wari::*` import module (`wari::cap_mint`, `wari::cap_copy`, etc.).
+// The host fns are the live path; the sysnums below match the
+// design contract in `docs/cap-system-design.md` §5 for the day a
+// non-WASM userspace ever appears (per CLAUDE R7 it shouldn't, but
+// the contract pins the numbering).
+
+/// Derive a child capability from a parent slot.
+pub const SYS_CAP_MINT:     usize = 17;
+/// Same-rights duplicate of a capability into another slot.
+pub const SYS_CAP_COPY:     usize = 18;
+/// Revoke a capability and every descendant in the derivation tree.
+pub const SYS_CAP_REVOKE:   usize = 19;
+/// Delete a single capability without cascading.
+pub const SYS_CAP_DELETE:   usize = 20;
+/// Read metadata for a capability (kind, rights, badge).
+pub const SYS_CAP_LOOKUP:   usize = 21;
+
 /// Highest syscall number currently defined. Used for bounds checks
 /// in the dispatch path and for the size of any dispatch table.
 ///
 /// Note: slot 10 is **retired** (formerly `SYS_SPAWN_ELF`, see Wari
-/// R7). The live syscalls are 0..=9 and 11..=16, so `SYS_MAX` remains
-/// `SYS_REBOOT == 16`. The retired slot leaves a hole in the numbering
-/// that must never be reused.
-pub const SYS_MAX: usize = SYS_REBOOT;
+/// R7). The live syscalls are 0..=9, 11..=16, and 17..=21 (Phase 1b
+/// cap-management).
+pub const SYS_MAX: usize = SYS_CAP_LOOKUP;
 
 // ── Error codes ────────────────────────────────────────────────
 //
@@ -227,8 +248,27 @@ mod tests {
 
     #[test]
     fn sys_max_matches_highest_syscall() {
-        assert_eq!(SYS_MAX, SYS_REBOOT);
-        assert_eq!(SYS_MAX, 16);
+        // Phase 1b extended the syscall range to include the
+        // capability-management ops; SYS_MAX therefore moved from
+        // SYS_REBOOT (16) to SYS_CAP_LOOKUP (21). The test pins
+        // both the symbolic and numeric value.
+        assert_eq!(SYS_MAX, SYS_CAP_LOOKUP);
+        assert_eq!(SYS_MAX, 21);
+    }
+
+    #[test]
+    fn cap_syscalls_are_distinct_and_contiguous() {
+        // Phase 1b added 5 cap-management sysnums (17..=21) above
+        // the previous SYS_REBOOT (16). Nothing in this range should
+        // collide; the contiguous block makes the dispatch table
+        // simpler downstream.
+        assert_eq!(SYS_CAP_MINT,    17);
+        assert_eq!(SYS_CAP_COPY,    18);
+        assert_eq!(SYS_CAP_REVOKE,  19);
+        assert_eq!(SYS_CAP_DELETE,  20);
+        assert_eq!(SYS_CAP_LOOKUP,  21);
+        // And not stepping on SYS_REBOOT.
+        assert_ne!(SYS_CAP_MINT, SYS_REBOOT);
     }
 
     #[test]

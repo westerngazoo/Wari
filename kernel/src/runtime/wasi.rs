@@ -102,6 +102,60 @@ pub fn register_wasi_host_fns(
     linker
         .func_wrap("wasi_snapshot_preview1", "proc_exit", host_proc_exit)
         .map_err(|_| KernelError::BadWasm)?;
+
+    // Phase-1b cap-management host fns. Registered for Tier-1 with
+    // `proc_id = PROC_ID_TIER1_HELLO` baked in. The implementations
+    // live in `cap::syscall`; we just bind them to the linker here.
+    use crate::cap::{
+        cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
+        cap_revoke_impl, PROC_ID_TIER1_HELLO,
+    };
+    linker
+        .func_wrap(
+            "wari",
+            "cap_mint",
+            |_: Caller<'_, Tier1HostState>, ps: u32, ts: u32, r: u32, b: u32| -> i32 {
+                cap_mint_impl(PROC_ID_TIER1_HELLO, ps, ts, r, b)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_copy",
+            |_: Caller<'_, Tier1HostState>, src: u32, tgt: u32| -> i32 {
+                cap_copy_impl(PROC_ID_TIER1_HELLO, src, tgt)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_revoke",
+            |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
+                cap_revoke_impl(PROC_ID_TIER1_HELLO, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_delete",
+            |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
+                cap_delete_impl(PROC_ID_TIER1_HELLO, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_lookup",
+            |mut caller: Caller<'_, Tier1HostState>, slot: u32, out_buf: u32| -> i32 {
+                cap_lookup_impl(&mut caller, PROC_ID_TIER1_HELLO, slot, out_buf)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
     Ok(())
 }
 
