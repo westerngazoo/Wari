@@ -2,6 +2,9 @@
 **/target/
 /build/*
 !/build/.gitkeep
+# Exception: the deploy artifact must be committed so the VF2 can pull
+# it via `wari go` (matches goose-os's deploy pattern).
+!/build/wari.bin
 
 # rustc crash dumps — R8 says reproducible builds, ICE dumps are not
 rustc-ice-*.txt
