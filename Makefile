@@ -21,7 +21,7 @@ BUILD_NUM  := $(shell cat $(BUILD_FILE) 2>/dev/null || echo 0)
 NEXT_BUILD := $(shell echo $$(($(BUILD_NUM) + 1)))
 
 # VF2 deploy target (IP of VisionFive 2 on local network — inherited from goose-os)
-VF2_IP ?= 192.168.86.237
+VF2_IP ?= 192.168.86.236
 
 # File sets committed by each deploy target
 DEPLOY_FILES := $(KERNEL_BIN) kernel/ abi-shared/ wasi/ apps/ drivers/ \
@@ -159,7 +159,7 @@ audit:
 
 # ── VisionFive 2 ───────────────────────────────────────────────
 
-kernel-vf2:
+kernel-vf2: sign-uart-driver
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
 	  cargo build --release --features vf2 --no-default-features
@@ -177,7 +177,10 @@ deploy: kernel-vf2
 	@echo "========================================="
 	@echo "  DEPLOYED: build $(NEXT_BUILD)"
 	@echo "========================================="
-	@echo "  On VF2, run:   wari go"
+	@echo "  On the VF2 ($(VF2_IP)), run:"
+	@echo "      wari go"
+	@echo "  Then watch the COM7 serial console for:"
+	@echo "      Wari v0 build $(NEXT_BUILD) boot OK, hart 1"
 	@echo "========================================="
 
 flash-sd: kernel-vf2

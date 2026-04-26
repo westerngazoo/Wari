@@ -179,9 +179,9 @@ contract: caller must guarantee one-time invocation pre-runtime use.
 |-----------------------------------------|------------------------------------|-----------|-----------|
 | `kernel/src/main.rs` (`kmain` wfi loop) | `wfi` after banner, pre-runtime    | INV-7     | S-mode WFI |
 | `kernel/src/main.rs` (`panic` handler)  | `wfi` in panic halt loop           | INV-7     | S-mode WFI |
-| `kernel/src/boot.S`                     | Boot asm: `.bss` zero, stack setup, call into `kmain`, `wfi` park | INV-7 | Privileged asm in S-mode |
+| `kernel/src/boot.S`                     | Boot asm: hart-id select via `auipc`+`ld` of `_boot_hart_id_addr` (PC-relative `.dword` of linker-defined `_boot_hart_id`), `.bss` zero, stack setup, call into `kmain`, `wfi` park | INV-7 | Privileged asm in S-mode; `R_RISCV_64` reach lets the hart-id constant address absolute-0/1 symbols where `la` would overflow |
 | `kernel/src/mmio/volatile.rs`           | `VolatilePtr::new` construction; `read` / `write` volatile ops    | INV-3 | Typed MMIO access — the one module where raw volatile lives (R3) |
-| `kernel/src/mmio/uart_ns16550.rs`       | `VolatilePtr::new` calls for THR / LSR at `0x1000_0000`            | INV-3 | NS16550 UART registers on QEMU virt |
+| `kernel/src/mmio/uart_ns16550.rs`       | `VolatilePtr::new` calls for THR / IER / FCR / LCR / MCR / LSR via `reg(index)` (`UART_BASE + index * UART_REG_STRIDE`); `init()` writes IER/LCR/FCR/MCR to bring the device up | INV-3 | NS16550 (QEMU, stride 1) / DW8250 (VF2, stride 4) UART registers; init sequence required by JH7110, no-op-safe on QEMU |
 | `wari-mem/src/page_alloc.rs` (`get`)    | `&mut *addr_of_mut!(ALLOC)` returns global allocator               | INV-1, INV-8 | Single-hart kernel + post-init accessor |
 | `wari-mem/src/page_alloc.rs` (`install`)| `addr_of_mut!(ALLOC).write(..)` boot-time install                  | INV-1, INV-8 | Called once during boot, interrupts off |
 | `wari-mem/src/page_alloc.rs` (`zero_page`) | `write_volatile` over a 4 KiB page                              | INV-5 | Allocator-returned PA is identity-mapped RW |

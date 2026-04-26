@@ -83,6 +83,11 @@ SECTIONS {
     . += 0x400000;  /* 4 MiB — wasmi linear memory + state for one Tier-2 instance */
     _runtime_heap_end = .;
 
+    /* QEMU boots on hart 0. boot.S compares a0 against this symbol
+     * (loaded via PC-relative .dword) and parks every non-matching
+     * hart. Parallel to linker-vf2.ld's `_boot_hart_id = 1;`. */
+    _boot_hart_id = 0;
+
     /DISCARD/ : {
         *(.eh_frame)
         *(.comment)
