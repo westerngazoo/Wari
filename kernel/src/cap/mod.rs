@@ -29,11 +29,38 @@
 //! Cost accepted: Phase 1 will rewrite this module wholesale.
 
 #![allow(dead_code)]
+#![allow(unused_imports)] // PR 1 re-exports types consumed by PR 2/3 only
 #![allow(clippy::doc_lazy_continuation)]
 
+// Phase-0 static capability table. Kept until PR 2 retires it in
+// favour of boot-time root-cap construction over the new dynamic
+// types (`types::Cap` + `cspace::CSpace`). Both subsystems coexist
+// during PR 1: nothing in this module currently calls into `types`
+// or `cspace`, so the runtime path is unchanged.
 pub mod static_caps;
+
+// Phase-1b dynamic capability primitive. Pure types and pure
+// functions only — no syscall wiring, no boot-time integration.
+// The mint/copy/revoke/delete/lookup syscalls land in PR 3; the
+// kernel-object pools and boot-time root mint land in PR 2.
+//
+// See `docs/cap-system-design.md` for the architectural contract
+// these modules implement.
+pub mod cspace;
+pub mod types;
+
+#[cfg(kani)]
+pub mod proofs;
 
 pub use static_caps::{caps_for, Caps, ModuleId, Tier};
 // `TIER1_DEFAULT_CAPS` / `TIER2_UART_DRIVER_CAPS` are referenced only
 // from `static_caps::caps_for`; kept module-private until a future
 // caller needs them.
+
+// Phase-1b dynamic re-exports. These are the userspace-facing names
+// for the new cap layer; downstream PRs (2, 3) build on top.
+pub use cspace::{CSpace, CSPACE_SLOTS, MAX_PROCS};
+pub use types::{
+    Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_GRANT,
+    CAP_RIGHT_GRANT_REPLY, CAP_RIGHT_READ, CAP_RIGHT_WRITE,
+};

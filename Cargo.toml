@@ -47,6 +47,10 @@ repository = "https://github.com/westerngazoo/goose-os"
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 missing_docs           = "warn"
+# `kani` is a recognized cfg for Kani harnesses (gated #[cfg(kani)]
+# in cap::proofs and elsewhere). Without this declaration, rustc
+# emits an `unexpected_cfgs` warning under `cargo check`.
+unexpected_cfgs        = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.lints.clippy]
 # Tier 0 rules — enforced workspace-wide. See CLAUDE.md R1–R8.
