@@ -165,6 +165,22 @@ pub fn dec_refcount(kind: ObjectKind, pool_index: u16) {
                 }
             }
         }
+        ObjectKind::Net => {
+            if let Some(obj) = pools.nets.get_mut(pool_index) {
+                obj.refcount = obj.refcount.saturating_sub(1);
+                if obj.refcount == 0 {
+                    let _ = pools.nets.dealloc(pool_index);
+                }
+            }
+        }
+        ObjectKind::Socket => {
+            if let Some(obj) = pools.sockets.get_mut(pool_index) {
+                obj.refcount = obj.refcount.saturating_sub(1);
+                if obj.refcount == 0 {
+                    let _ = pools.sockets.dealloc(pool_index);
+                }
+            }
+        }
     }
 }
 
@@ -191,6 +207,16 @@ pub fn inc_refcount(kind: ObjectKind, pool_index: u16) {
         }
         ObjectKind::Frame => {
             if let Some(obj) = pools.frames.get_mut(pool_index) {
+                obj.refcount = obj.refcount.saturating_add(1);
+            }
+        }
+        ObjectKind::Net => {
+            if let Some(obj) = pools.nets.get_mut(pool_index) {
+                obj.refcount = obj.refcount.saturating_add(1);
+            }
+        }
+        ObjectKind::Socket => {
+            if let Some(obj) = pools.sockets.get_mut(pool_index) {
                 obj.refcount = obj.refcount.saturating_add(1);
             }
         }

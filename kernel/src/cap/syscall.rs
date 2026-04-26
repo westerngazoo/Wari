@@ -62,6 +62,13 @@ pub const E_NOMEM: i32 = -3;
 /// Returned to WASM when an operation would block (no IRQ pending,
 /// recv buffer empty, etc.). Phase-1b polling primitive.
 pub const E_AGAIN: i32 = -4;
+/// Returned to WASM when a TCP socket op is attempted on a socket
+/// that is not in the connected state. Added in PR Net-2 for the
+/// upcoming socket host fns; consumed by PR Net-6.
+pub const E_NOTCONN: i32 = -5;
+/// Returned to WASM when a TCP connect attempt is rejected by the
+/// peer (RST). Added in PR Net-2; consumed by PR Net-6.
+pub const E_REFUSED: i32 = -6;
 
 // ─────────────────────────────────────────────────────────────────
 // check_cap — runtime permission gate

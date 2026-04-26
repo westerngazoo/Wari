@@ -88,7 +88,15 @@ pub enum ObjectKind {
     Untyped = 3,
     /// A 4 KiB physical page, mappable into a virtual address space.
     Frame = 4,
-    // Reserved Phase 2+: Tcb = 5, AsidPool = 6, IrqHandler = 7, ...
+    /// NIC handle. **Driver-only** in Phase 1b — INV-19 enforces
+    /// that Tier-1 cannot mint or hold a Net cap. Added in PR Net-2
+    /// per `docs/net-driver-design.md` §6.1.
+    Net = 5,
+    /// Per-tenant TCP/UDP socket. Minted from a `Net` cap by the
+    /// Tier-2 net driver and granted to the calling Tier-1 tenant
+    /// via cap-IPC. Added in PR Net-2.
+    Socket = 6,
+    // Reserved Phase 2+: Tcb = 7, AsidPool = 8, IrqHandler = 9, ...
 }
 
 // ─────────────────────────────────────────────────────────────────
