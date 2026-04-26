@@ -73,7 +73,8 @@ pub fn register_host_fns(linker: &mut Linker<Tier2HostState>) -> Result<(), Kern
     // live in `cap::syscall`; we just bind them to the linker here.
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-        cap_revoke_impl, PROC_ID_TIER2_UART,
+        cap_revoke_impl, notification_ack_impl, notification_wait_impl,
+        PROC_ID_TIER2_UART,
     };
     linker
         .func_wrap(
@@ -117,6 +118,28 @@ pub fn register_host_fns(linker: &mut Linker<Tier2HostState>) -> Result<(), Kern
             "cap_lookup",
             |mut caller: Caller<'_, Tier2HostState>, slot: u32, out_buf: u32| -> i32 {
                 cap_lookup_impl(&mut caller, PROC_ID_TIER2_UART, slot, out_buf)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
+    // PR Net-1 notification host fns. Drivers wait on IRQ-bound
+    // notifications via these primitives; Phase-1b polling-only
+    // (returns immediately with 0 if signaled, E_AGAIN otherwise).
+    linker
+        .func_wrap(
+            "wari",
+            "notification_wait",
+            |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 {
+                notification_wait_impl(PROC_ID_TIER2_UART, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "notification_ack",
+            |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 {
+                notification_ack_impl(PROC_ID_TIER2_UART, slot)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;

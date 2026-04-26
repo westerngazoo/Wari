@@ -104,6 +104,9 @@ const SCAUSE_INTERRUPT_BIT: usize = 1 << 63;
 /// scause code for supervisor timer interrupt.
 const SCAUSE_S_TIMER: usize = 5;
 
+/// scause code for supervisor external interrupt (PLIC-routed).
+const SCAUSE_S_EXT: usize = 9;
+
 /// Rust-side trap dispatcher, called from `_trap_entry` with
 /// `a0 = &mut TrapFrame` pointing at the saved frame on the stack.
 ///
@@ -128,6 +131,11 @@ pub extern "C" fn handle_trap(frame: &mut TrapFrame) {
                 // Phase 0 has no scheduler — just clear the pending bit
                 // so the timer doesn't re-fire immediately, then return.
                 ack_timer();
+            }
+            SCAUSE_S_EXT => {
+                // PLIC-routed external interrupt (Phase 1b PR Net-1).
+                // Claim → signal-bound-notification → complete.
+                crate::mmio::plic::dispatch();
             }
             _ => {
                 kprintln!(
