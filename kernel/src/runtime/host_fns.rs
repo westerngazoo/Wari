@@ -302,7 +302,8 @@ pub fn register_net_host_fns(
     // driver's proc_id baked into each closure.
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-        cap_revoke_impl, notification_ack_impl, notification_wait_impl,
+        cap_revoke_impl, nic_set_mac_impl, notification_ack_impl,
+        notification_wait_impl,
     };
     linker
         .func_wrap(
@@ -364,6 +365,19 @@ pub fn register_net_host_fns(
             "notification_ack",
             move |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 {
                 notification_ack_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
+    // PR Net-4b — net-driver-only signaling host fn so the driver
+    // can communicate "I finished VirtIO init, here's the MAC" back
+    // to the kernel.
+    linker
+        .func_wrap(
+            "wari",
+            "nic_set_mac",
+            move |_: Caller<'_, Tier2HostState>, mac_low: u32, mac_high: u32| -> i32 {
+                nic_set_mac_impl(pid, mac_low, mac_high)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;

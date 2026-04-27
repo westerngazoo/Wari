@@ -305,6 +305,63 @@ pub fn cap_delete_impl(proc_id: u8, slot: u32) -> i32 {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// nic_set_mac — driver → kernel "I'm initialized, here's the MAC"
+// ─────────────────────────────────────────────────────────────────
+
+/// `wari::nic_set_mac(mac_low: u32, mac_high: u32) -> i32`.
+///
+/// PR Net-4b — the Tier-2 net driver calls this after it has
+/// successfully completed the VirtIO device init sequence and read
+/// the MAC from device config space. The kernel stores the MAC in
+/// the driver's `Net` pool entry and flips `initialized = true` so
+/// `runtime::run_tier2_net` can observe driver readiness.
+///
+/// Argument encoding: 6-byte MAC packed little-endian as
+/// `mac_low = mac[0..4]` and `mac_high = mac[4..6]` (high 16 bits of
+/// `mac_high` ignored). VirtIO 1.2 §5.1.4 says the MAC bytes are
+/// "the device's MAC address. The mac field is only valid if
+/// VIRTIO_NET_F_MAC has been negotiated" — driver is responsible
+/// for that gate.
+///
+/// Cap-gated by `Net` cap with WRITE rights at slot 0 (the driver's
+/// root cap from `init_root_caps`).
+pub fn nic_set_mac_impl(proc_id: u8, mac_low: u32, mac_high: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_PERM;
+    }
+    // Cap check: driver holds Net + WRITE at slot 0.
+    let cap = {
+        let cs = cspaces();
+        cs[proc_id as usize].slots[0]
+    };
+    if cap.is_empty() {
+        return E_PERM;
+    }
+    if !matches!(cap.kind, ObjectKind::Net) {
+        return E_PERM;
+    }
+    if cap.rights & CAP_RIGHT_WRITE == 0 {
+        return E_PERM;
+    }
+
+    // Update the Net pool entry.
+    let pool_index = cap.pool_index;
+    let pools = object_pools();
+    if let Some(net) = pools.nets.get_mut(pool_index) {
+        net.mac[0] = (mac_low & 0xFF) as u8;
+        net.mac[1] = ((mac_low >> 8) & 0xFF) as u8;
+        net.mac[2] = ((mac_low >> 16) & 0xFF) as u8;
+        net.mac[3] = ((mac_low >> 24) & 0xFF) as u8;
+        net.mac[4] = (mac_high & 0xFF) as u8;
+        net.mac[5] = ((mac_high >> 8) & 0xFF) as u8;
+        net.initialized = true;
+        0
+    } else {
+        E_INVAL
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
 // notification_wait / notification_ack
 // ─────────────────────────────────────────────────────────────────
 

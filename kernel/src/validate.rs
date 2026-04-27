@@ -34,12 +34,16 @@ pub const UART_MMIO_LEN: usize = 0x8;
 // range cfg-gates per platform.
 
 /// QEMU virt VirtIO-net MMIO base. The Phase-1b demo uses the 4th
-/// VirtIO MMIO slot at `0x10008000`; 0x100-byte window covers the
-/// VirtIO MMIO transport register set.
+/// VirtIO MMIO slot at `0x10008000`. The 0x200-byte window covers
+/// both the VirtIO MMIO transport register set (offsets 0x000..0x100,
+/// per VirtIO 1.2 §4.2.2) and the device-specific config region
+/// (offsets 0x100..0x200, where VirtIO-net's MAC + status + MTU
+/// live per VirtIO 1.2 §5.1.4). PR Net-4b widens this from 0x100 to
+/// 0x200 so the driver can read the MAC.
 #[cfg(feature = "qemu")]
 pub const NET_MMIO_BASE: usize = 0x1000_8000;
 #[cfg(feature = "qemu")]
-pub const NET_MMIO_LEN:  usize = 0x100;
+pub const NET_MMIO_LEN:  usize = 0x200;
 
 /// JH7110 GMAC eth0 register window. Phase-1c will land the real
 /// GMAC driver; Phase-1b ships the validator with the right range
