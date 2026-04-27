@@ -78,13 +78,22 @@ pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
     kprintln!("cap pools initialized");
 
     if let Err(e) = runtime::run_tier2_uart() {
-        kprintln!("wari runtime: tier-2 load failed: {:?}", e);
+        kprintln!("wari runtime: tier-2 uart load failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
             unsafe { core::arch::asm!("wfi"); }
         }
     }
     kprintln!("tier-2 uart driver loaded");
+
+    if let Err(e) = runtime::run_tier2_net() {
+        kprintln!("wari runtime: tier-2 net load failed: {:?}", e);
+        loop {
+            // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
+            unsafe { core::arch::asm!("wfi"); }
+        }
+    }
+    kprintln!("tier-2 net driver loaded");
 
     // Register the Tier-2 driver as a "library" process and the
     // two Tier-1 hello instances as Ready tenants, then hand off
@@ -96,7 +105,18 @@ pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
         cap::Tier::Two,
         cap::ModuleId::Tier2Uart,
     ) {
-        kprintln!("wari sched: tier-2 register failed: {:?}", e);
+        kprintln!("wari sched: tier-2 uart register failed: {:?}", e);
+        loop {
+            // SAFETY: INV-7 — wfi is S-mode.
+            unsafe { core::arch::asm!("wfi"); }
+        }
+    }
+    if let Err(e) = sched::register_library(
+        cap::PROC_ID_TIER2_NET,
+        cap::Tier::Two,
+        cap::ModuleId::Tier2Net,
+    ) {
+        kprintln!("wari sched: tier-2 net register failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is S-mode.
             unsafe { core::arch::asm!("wfi"); }

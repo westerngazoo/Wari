@@ -56,6 +56,14 @@ use crate::runtime::host_fns::{self, Tier2HostState};
 use crate::runtime::sign;
 use crate::runtime::wasi::{self, Tier1HostState};
 
+// Phase-1b PR Net-4a: a second Tier-2 loader path for the net
+// driver. Mirrors `load_tier2` (signature verify → parse →
+// instantiate) but uses `register_net_host_fns` so the driver gets
+// `wari::net_mmio_*` plus the cap/notification surface with its own
+// `proc_id` baked in. `load_tier2` (UART path) and `load_tier2_net`
+// share signature verification (INV-13) and the wasmi pipeline; the
+// only difference is which set of host fns the linker carries.
+
 /// A live Tier-2 WASM instance plus the per-instance state the kernel
 /// keeps next to it (capabilities, tier, owning store).
 ///
@@ -129,6 +137,49 @@ pub fn load_tier2(
     // start function if one exists; the UART driver has none, so this is
     // structurally a validate + link step. If a future Tier-2 module
     // ships with a start fn it runs here under wasmi's default budget.
+    let instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .map_err(|_| KernelError::BadWasm)?;
+
+    Ok(Tier2Instance {
+        instance,
+        store,
+        caps,
+        tier: Tier::Two,
+    })
+}
+
+/// Load + verify + instantiate a Tier-2 net driver envelope.
+///
+/// Parallels `load_tier2`, but registers the net driver host fn
+/// surface (`wari::net_mmio_*` + cap/notification surface) instead
+/// of the UART surface. `proc_id` is baked into each cap closure
+/// via `register_net_host_fns`; for Phase 1b this is always
+/// `PROC_ID_TIER2_NET`.
+///
+/// # Contract
+///
+/// - Precondition: `runtime::heap` initialized.
+/// - Precondition: single-hart boot (INV-1).
+/// - On success returns a `Tier2Instance` with caps =
+///   `caps_for(Tier::Two, module_id)`.
+/// - On failure returns `KernelError::BadWasm`.
+pub fn load_tier2_net(
+    envelope: &[u8],
+    module_id: ModuleId,
+    proc_id: u8,
+) -> Result<Tier2Instance, KernelError> {
+    // INV-13: signature verification before parse.
+    let wasm_bytes = sign::verify(envelope)?;
+
+    let engine = Engine::default();
+    let module = Module::new(&engine, wasm_bytes).map_err(|_| KernelError::BadWasm)?;
+
+    let caps = caps_for(Tier::Two, module_id);
+    let mut store = Store::new(&engine, Tier2HostState { caps });
+    let mut linker = <Linker<Tier2HostState>>::new(&engine);
+    host_fns::register_net_host_fns(&mut linker, proc_id)?;
+
     let instance = linker
         .instantiate_and_start(&mut store, &module)
         .map_err(|_| KernelError::BadWasm)?;

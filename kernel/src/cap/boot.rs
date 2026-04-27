@@ -172,10 +172,43 @@ pub fn init_root_caps() -> Result<(), KernelError> {
         kernel_exit_ep,
     );
 
-    // 5. Bump refcounts on each endpoint to reflect ALL caps now
-    //    pointing at them. We re-take the pools borrow now that
+    // 5. Bump refcounts on the endpoints, allocate the Net pool
+    //    entry for the NIC, install the Net cap in the net
+    //    driver's CSpace. We re-take the pools borrow now that
     //    we're done with cspaces.
     let _ = cs;
+    let pools = object_pools();
+
+    // 5a. Allocate the NIC kernel object (Phase 1b QEMU = VirtIO,
+    //     nic_kind=0; VF2 = GMAC, nic_kind=1). The driver will
+    //     set initialized=true after PR Net-4b's NIC bring-up.
+    #[cfg(feature = "qemu")]
+    let nic_kind = 0u8;
+    #[cfg(feature = "vf2")]
+    let nic_kind = 1u8;
+    let net_pool_idx = pools.nets.alloc(super::objects::Net::new(nic_kind))?;
+    if let Some(net) = pools.nets.get_mut(net_pool_idx) {
+        net.refcount = 1; // the Tier-2 net driver's root cap
+    }
+
+    // 5b. Install the Net cap (READ + WRITE) at the net driver's
+    //     CSpace slot 0. PR Net-4b will use this to drive the NIC
+    //     via wari::net_mmio_*. The driver running with no Net cap
+    //     (e.g., if the alloc above OOMs) hits E_PERM on its first
+    //     MMIO call, which is the safe failure mode.
+    {
+        let _ = pools; // drop pools borrow before re-acquiring cspaces
+        let cs = cspaces();
+        let net_cs = &mut cs[PROC_ID_TIER2_NET as usize];
+        net_cs.slots[SLOT_PRIMARY as usize] = Cap {
+            badge: 0,
+            parent: CapId::ROOT,
+            generation: 0,
+            pool_index: net_pool_idx,
+            kind: ObjectKind::Net,
+            rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
+        };
+    }
     let pools = object_pools();
     // UART ep refs: 1 for Tier-2 (if mmio_uart), plus 1 per Tier-1
     // instance (if stdout).
