@@ -275,6 +275,31 @@ today, shaped to grow.
 **When this breaks**: an attacker minting a Tier-2-only kind from a
 Tier-1 process. Caught structurally.
 
+### INV-23 · IRQ Routing Determinism *(Phase 1b PR Net-1)*
+
+> The PLIC dispatcher reads the static array
+> `IRQ_NOTIFICATION_BINDINGS: [Option<u16>; MAX_BOUND_IRQS]` to map
+> a hardware IRQ source to the kernel `Notification` pool index it
+> should signal. Phase 1b binds at boot only (via
+> `mmio::plic::bind_irq_to_notification`); after the kernel finishes
+> initialization, no path mutates the bindings. The trap handler's
+> claim → signal-notification → complete cycle is therefore
+> deterministic and read-only after init.
+
+**Consequence**: a reader of the trap path can verify "every IRQ
+that fires routes to one specific notification, the same way every
+time" by inspecting the static binding table. No race, no dynamic
+re-binding mid-flight.
+
+**Enforcement**: `IRQ_NOTIFICATION_BINDINGS` is `static mut` but
+the only writer is `bind_irq_to_notification`, called exclusively
+from boot-time setup paths (`cap::boot::init_root_caps` extends to
+this in PR Net-3). The trap handler's `dispatch()` only reads.
+
+**When this breaks**: Phase 1c when a `sys_irq_bind` syscall lands
+to allow drivers to register IRQs at runtime. INV-23 is then
+replaced by INV-1 (single-hart) covering the binding write path.
+
 ### INV-13 · Tier-2 Bytecode Is Signature-Verified Before Instantiation *(Phase 0; generalizes into INV-11 in Phase 1)*
 
 > Any `.wasm` bytecode loaded at Tier 2 passes signature verification
@@ -345,6 +370,9 @@ contract: caller must guarantee one-time invocation pre-runtime use.
 | `kernel/src/cap/types.rs` (`Cap::derive`) | Pure-function rights check + kind/pool preservation                | INV-10, INV-15, INV-16 | Mint primitive; no `unsafe`; Kani-proven in `cap::proofs` |
 | `kernel/src/cap/cspace.rs` (`lookup`, `lookup_mut`)  | Bounds-checked slot access                              | INV-18       | Single point of indexed access into `CSpace.slots[]` |
 | `kernel/src/cap/cspace.rs` (`bump_generation`) | `saturating_add` on per-slot generation counter             | INV-17       | Anti-ABA; saturates at `u16::MAX` so PR 3's mint can refuse |
+| `kernel/src/mmio/plic.rs` (`init`)             | `csrs sie` to enable S-mode external interrupts             | INV-7        | Privileged S-mode CSR write; matches `trap::install` pattern |
+| `kernel/src/mmio/plic.rs` (priority/enable/threshold/claim/complete) | `VolatilePtr<u32>::new` over PLIC_BASE-derived addresses | INV-3 | PLIC at fixed RV64 base 0x0c000000 |
+| `kernel/src/mmio/plic.rs` (`bind_irq_to_notification`, `notification_for_irq`, `dispatch`) | `addr_of[_mut]!(IRQ_NOTIFICATION_BINDINGS)` static-mut access | INV-1, INV-8, INV-23 | Single-hart, post-init, read-only-after-bind boot table |
 | `kernel/src/runtime/tier2_uart.rs` (`install`) | `addr_of_mut!(TIER2_UART)` write of the `Option<Tier2UartHandle>` singleton | INV-1, INV-8, INV-14 | One-time boot install of the Tier-2 UART driver handle, called from `runtime::run_tier2_uart` before any Tier-1 host fn dispatch |
 | `kernel/src/runtime/tier2_uart.rs` (`write`)   | `addr_of_mut!(TIER2_UART)` mutable read; `Memory::write` into driver lin-mem; `TypedFunc::call` into driver `write` export | INV-1, INV-8, INV-14 | Single-hart post-init access to the singleton; cross-tier marshaling is bounds-checked by wasmi |
 | `kernel/src/runtime/wasi.rs` (`host_fd_write`) | `unsafe { tier2_uart::write(&bytes[..n]) }` call from Tier-1 host fn dispatch | INV-1, INV-8, INV-14 | The Tier-1 → Tier-2 → MMIO marshaling chain; capability gate (`caps.stdout`) and fd validation precede |

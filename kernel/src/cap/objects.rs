@@ -223,6 +223,92 @@ pub const NOTIFICATION_POOL_CAPACITY: usize = 64;
 pub const FRAME_POOL_CAPACITY: usize = 1024;
 /// Maximum number of `Untyped` objects in the global pool.
 pub const UNTYPED_POOL_CAPACITY: usize = 16;
+/// Maximum number of `Net` objects (NIC handles). Sized for two
+/// NICs × generation headroom; per net-driver-design.md §6.2.
+pub const NET_POOL_CAPACITY: usize = 4;
+/// Maximum number of `Socket` objects. Sized for a meaningful
+/// concurrent-connection demo; per net-driver-design.md §6.3.
+pub const SOCKET_POOL_CAPACITY: usize = 256;
+
+// ─────────────────────────────────────────────────────────────────
+// Net — NIC handle (driver-only)
+// ─────────────────────────────────────────────────────────────────
+
+/// NIC handle. Held by the Tier-2 net driver as a root cap;
+/// Tier-1 tenants cannot hold this kind (INV-19).
+///
+/// `nic_kind`: 0 = VirtIO-net (QEMU), 1 = JH7110 GMAC eth0,
+/// 2 = JH7110 GMAC eth1.
+#[repr(C)]
+pub struct Net {
+    /// Hardware target (see above).
+    pub nic_kind: u8,
+    /// Whether the driver has finished bringing the NIC up.
+    pub initialized: bool,
+    /// Number of `Socket` objects currently associated with this NIC.
+    pub socket_count: u16,
+    /// Cap refcount.
+    pub refcount: u16,
+}
+
+impl Net {
+    pub const fn new(nic_kind: u8) -> Self {
+        Self {
+            nic_kind,
+            initialized: false,
+            socket_count: 0,
+            refcount: 0,
+        }
+    }
+}
+
+impl Default for Net {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Socket — per-tenant TCP/UDP socket
+// ─────────────────────────────────────────────────────────────────
+
+/// Per-tenant TCP/UDP socket. Minted from a `Net` cap by the
+/// driver in response to `wari::net_socket_create`; granted to the
+/// calling Tier-1 tenant via cap-IPC.
+#[repr(C)]
+pub struct Socket {
+    /// Pool index of the parent `Net` this socket lives on.
+    pub net_idx: u16,
+    /// Opaque smoltcp socket handle (kernel does not interpret).
+    pub smoltcp_handle: u32,
+    /// Local 4-tuple (big-endian IPv4; 0 fields = unbound).
+    pub local_ip: u32,
+    pub local_port: u16,
+    pub peer_ip: u32,
+    pub peer_port: u16,
+    /// Cap refcount.
+    pub refcount: u16,
+}
+
+impl Socket {
+    pub const fn new(net_idx: u16, smoltcp_handle: u32) -> Self {
+        Self {
+            net_idx,
+            smoltcp_handle,
+            local_ip: 0,
+            local_port: 0,
+            peer_ip: 0,
+            peer_port: 0,
+            refcount: 0,
+        }
+    }
+}
+
+impl Default for Socket {
+    fn default() -> Self {
+        Self::new(0, 0)
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────
 // ObjectPools
@@ -237,6 +323,8 @@ pub struct ObjectPools {
     pub notifications: Pool<Notification, NOTIFICATION_POOL_CAPACITY>,
     pub frames: Pool<Frame, FRAME_POOL_CAPACITY>,
     pub untypeds: Pool<Untyped, UNTYPED_POOL_CAPACITY>,
+    pub nets: Pool<Net, NET_POOL_CAPACITY>,
+    pub sockets: Pool<Socket, SOCKET_POOL_CAPACITY>,
 }
 
 impl ObjectPools {
@@ -246,6 +334,8 @@ impl ObjectPools {
             notifications: Pool::new(),
             frames: Pool::new(),
             untypeds: Pool::new(),
+            nets: Pool::new(),
+            sockets: Pool::new(),
         }
     }
 }

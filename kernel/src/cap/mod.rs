@@ -73,15 +73,16 @@ pub use boot::{
 };
 pub use cspace::{CSpace, CSPACE_SLOTS, MAX_PROCS};
 pub use objects::{
-    Endpoint, Frame, Notification, ObjectPools, TcbRef, Untyped,
-    ENDPOINT_POOL_CAPACITY, FRAME_POOL_CAPACITY, NOTIFICATION_POOL_CAPACITY,
-    UNTYPED_POOL_CAPACITY,
+    Endpoint, Frame, Net, Notification, ObjectPools, Socket, TcbRef, Untyped,
+    ENDPOINT_POOL_CAPACITY, FRAME_POOL_CAPACITY, NET_POOL_CAPACITY,
+    NOTIFICATION_POOL_CAPACITY, SOCKET_POOL_CAPACITY, UNTYPED_POOL_CAPACITY,
 };
 pub use pool::{BoundedQueue, Pool};
 pub use storage::{cspaces, object_pools};
 pub use syscall::{
     cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-    cap_revoke_impl, check_cap, E_INVAL, E_NOMEM, E_PERM,
+    cap_revoke_impl, check_cap, notification_ack_impl, notification_wait_impl,
+    E_AGAIN, E_INVAL, E_NOMEM, E_NOTCONN, E_PERM, E_REFUSED,
 };
 pub use types::{
     Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_GRANT,

@@ -64,10 +64,13 @@ SECTIONS {
     . = ALIGN(4K);
     _heap_end = .;
 
-    /* Runtime bump-allocator arena — 4 MiB, same as QEMU layout. */
+    /* Runtime bump-allocator arena — 16 MiB, parallels QEMU layout
+     * (was 4 MiB pre-Net-2). Sized for UART driver + net driver
+     * (~4 MiB smoltcp buffers) + 2 Tier-1 instances per
+     * docs/net-driver-design.md §7.5. */
     . = ALIGN(4K);
     _runtime_heap_start = .;
-    . += 0x400000;
+    . += 0x1000000;
     _runtime_heap_end = .;
 
     /* VF2 boots on hart 1 (not hart 0 like QEMU). PR 8's boot.S loads

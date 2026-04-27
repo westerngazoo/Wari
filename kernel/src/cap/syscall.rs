@@ -43,9 +43,10 @@ use wasmi::Caller;
 
 use super::cspace::{CSPACE_SLOTS, MAX_PROCS};
 use super::revoke::{dec_refcount, inc_refcount, revoke};
-use super::storage::cspaces;
+use super::storage::{cspaces, object_pools};
 use super::types::{
-    Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_WRITE,
+    Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_READ,
+    CAP_RIGHT_WRITE,
 };
 
 // ─────────────────────────────────────────────────────────────────
@@ -58,6 +59,16 @@ pub const E_PERM: i32 = -1;
 pub const E_INVAL: i32 = -2;
 /// Returned to WASM when a pool is full or memory write fails.
 pub const E_NOMEM: i32 = -3;
+/// Returned to WASM when an operation would block (no IRQ pending,
+/// recv buffer empty, etc.). Phase-1b polling primitive.
+pub const E_AGAIN: i32 = -4;
+/// Returned to WASM when a TCP socket op is attempted on a socket
+/// that is not in the connected state. Added in PR Net-2 for the
+/// upcoming socket host fns; consumed by PR Net-6.
+pub const E_NOTCONN: i32 = -5;
+/// Returned to WASM when a TCP connect attempt is rejected by the
+/// peer (RST). Added in PR Net-2; consumed by PR Net-6.
+pub const E_REFUSED: i32 = -6;
 
 // ─────────────────────────────────────────────────────────────────
 // check_cap — runtime permission gate
@@ -291,6 +302,99 @@ pub fn cap_delete_impl(proc_id: u8, slot: u32) -> i32 {
     dec_refcount(kind, pool_index);
 
     0
+}
+
+// ─────────────────────────────────────────────────────────────────
+// notification_wait / notification_ack
+// ─────────────────────────────────────────────────────────────────
+
+/// `wari::notification_wait(slot) -> i32`.
+///
+/// Phase-1b **polling** primitive: returns `0` immediately if any
+/// signal bit is set on the Notification at `slot`, `E_AGAIN` if
+/// the bitmap is zero, `E_PERM` if the slot doesn't hold a
+/// Notification cap with READ rights.
+///
+/// Drivers that need IRQ-driven processing call this in a loop
+/// (yielding via `cap_lookup` or arbitrary host fns until the
+/// kernel's trap dispatcher signals the bound IRQ).
+///
+/// Phase 2+ extends this to a real blocking primitive backed by a
+/// scheduler wait queue; for Phase 1b polling is acceptable
+/// because (a) the only caller is the net driver which is
+/// re-entered by every Tier-1 socket call anyway, (b) we have no
+/// preemption so a busy-wait blocks the system — by design,
+/// drivers must check this once per dispatch and return.
+pub fn notification_wait_impl(proc_id: u8, slot: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_INVAL;
+    }
+    if slot >= CSPACE_SLOTS as u32 {
+        return E_INVAL;
+    }
+    let slot = slot as u8;
+    let cap = {
+        let cs = cspaces();
+        cs[proc_id as usize].slots[slot as usize]
+    };
+    if cap.is_empty() {
+        return E_PERM;
+    }
+    if !matches!(cap.kind, ObjectKind::Notification) {
+        return E_PERM;
+    }
+    if cap.rights & CAP_RIGHT_READ == 0 {
+        return E_PERM;
+    }
+    let pools = object_pools();
+    if let Some(notif) = pools.notifications.get(cap.pool_index) {
+        if notif.signals != 0 {
+            0
+        } else {
+            E_AGAIN
+        }
+    } else {
+        E_INVAL
+    }
+}
+
+/// `wari::notification_ack(slot) -> i32`.
+///
+/// Clears all signal bits on the Notification at `slot`. Used by
+/// drivers after they have processed the IRQ work and want to
+/// re-arm for the next signal.
+///
+/// Phase 1b clears all bits at once (doesn't accept a per-bit
+/// mask); the only caller is the single-IRQ-per-driver pattern
+/// where there's nothing finer to ack.
+pub fn notification_ack_impl(proc_id: u8, slot: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_INVAL;
+    }
+    if slot >= CSPACE_SLOTS as u32 {
+        return E_INVAL;
+    }
+    let slot = slot as u8;
+    let cap = {
+        let cs = cspaces();
+        cs[proc_id as usize].slots[slot as usize]
+    };
+    if cap.is_empty() {
+        return E_PERM;
+    }
+    if !matches!(cap.kind, ObjectKind::Notification) {
+        return E_PERM;
+    }
+    if cap.rights & CAP_RIGHT_READ == 0 {
+        return E_PERM;
+    }
+    let pools = object_pools();
+    if let Some(notif) = pools.notifications.get_mut(cap.pool_index) {
+        notif.signals = 0;
+        0
+    } else {
+        E_INVAL
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────

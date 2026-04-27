@@ -80,7 +80,10 @@ SECTIONS {
      */
     . = ALIGN(4K);
     _runtime_heap_start = .;
-    . += 0x400000;  /* 4 MiB — wasmi linear memory + state for one Tier-2 instance */
+    . += 0x1000000;  /* 16 MiB — wasmi linear memory for UART driver +
+                      * net driver (~4 MiB smoltcp buffers) + 2 Tier-1
+                      * hello instances. Sized per net-driver-design.md
+                      * §7.5 prerequisite. Was 4 MiB pre-Net-2. */
     _runtime_heap_end = .;
 
     /* QEMU boots on hart 0. boot.S compares a0 against this symbol

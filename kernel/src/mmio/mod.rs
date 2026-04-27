@@ -16,5 +16,6 @@
 //!     panic path). NOT the customer UART driver; the Tier-2 WASM
 //!     driver lands in PR 5.
 
+pub mod plic;
 pub mod uart_ns16550;
 pub mod volatile;

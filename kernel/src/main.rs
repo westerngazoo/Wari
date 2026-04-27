@@ -65,7 +65,8 @@ pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
         }
     }
     trap::install();
-    kprintln!("mmu OK, traps installed");
+    mmio::plic::init();
+    kprintln!("mmu OK, traps installed, plic up");
 
     if let Err(e) = cap::boot::init_root_caps() {
         kprintln!("cap pools init failed: {:?}", e);
