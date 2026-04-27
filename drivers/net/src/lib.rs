@@ -606,6 +606,190 @@ pub extern "C" fn rx_recycle(desc_idx: u32) -> i32 {
     unsafe { wari_nic_queue_notify(0) }
 }
 
+// ── smoltcp Device trait impl (PR Net-5a) ────────────────────────
+//
+// `NicDevice` is a zero-sized handle wrapping the static rx/tx
+// state above. smoltcp's `Interface` calls into it via the
+// `Device`/`RxToken`/`TxToken` traits to drain incoming packets and
+// publish outgoing ones. PR Net-5a defines the trait impl; PR
+// Net-5b will instantiate `Interface` and wire `poll` into the
+// kernel idle loop.
+//
+// VirtIO-net §5.1.6 prepends a 12-byte header to every packet on
+// rx and expects one on tx. We negotiated zero protocol features
+// so the header is always 12 zero bytes; smoltcp does not see it
+// (the `consume` closures get a slice that skips past the header).
+
+#[cfg(feature = "qemu")]
+pub mod phy {
+    use core::sync::atomic::{compiler_fence, Ordering};
+
+    use super::{
+        rx_pop, rx_recycle, tx_send, ETH_FRAME_MAX, RX_BUFS, TX_BUF,
+        VIRTIO_NET_HDR_LEN,
+    };
+    use smoltcp::phy::{
+        Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken,
+    };
+    use smoltcp::time::Instant;
+
+    /// Zero-sized Device handle. All state lives in `super`'s
+    /// static muts; constructing a `NicDevice` is just naming the
+    /// driver's NIC-state sandbox.
+    pub struct NicDevice;
+
+    impl NicDevice {
+        pub const fn new() -> Self {
+            Self
+        }
+    }
+
+    impl Default for NicDevice {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// MTU minus the VirtIO-net header (smoltcp doesn't see header
+    /// bytes). Phase 1b's MTU is the standard Ethernet 1500.
+    const SMOLTCP_MTU: usize = 1500;
+
+    impl Device for NicDevice {
+        type RxToken<'a> = NicRxToken;
+        type TxToken<'a> = NicTxToken;
+
+        fn capabilities(&self) -> DeviceCapabilities {
+            let mut caps = DeviceCapabilities::default();
+            caps.medium = Medium::Ethernet;
+            caps.max_transmission_unit = SMOLTCP_MTU;
+            // Phase-1b doesn't negotiate VIRTIO_NET_F_GUEST_CSUM,
+            // so the device hands us full Ethernet+IP+TCP frames
+            // with valid checksums; smoltcp must verify on rx and
+            // emit on tx itself. Default = both sides verify/emit.
+            caps.checksum.ipv4 = Checksum::Both;
+            caps.checksum.tcp = Checksum::Both;
+            caps.checksum.udp = Checksum::Both;
+            caps.checksum.icmpv4 = Checksum::Both;
+            caps
+        }
+
+        fn receive(
+            &mut self,
+            _timestamp: Instant,
+        ) -> Option<(NicRxToken, NicTxToken)> {
+            let packed = rx_pop();
+            if packed == 0 {
+                return None;
+            }
+            let buf_off = (packed & 0xFFFF_FFFF) as u32;
+            let used_len = (packed >> 32) as u32;
+
+            // Recover desc_idx from buf_off. RX_BUFS[i] is at
+            // a fixed offset; (buf_off - rx_buf0_off) /
+            // sizeof(buf) gives the index. SAFETY: addr_of_mut!
+            // over indexed-into static needs the unsafe gate even
+            // though it doesn't deref.
+            let rx_buf0_off =
+                unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
+            let desc_idx = (buf_off - rx_buf0_off) / (ETH_FRAME_MAX as u32);
+
+            let rx = NicRxToken {
+                buf_off,
+                used_len,
+                desc_idx,
+            };
+            let tx = NicTxToken;
+            Some((rx, tx))
+        }
+
+        fn transmit(&mut self, _timestamp: Instant) -> Option<NicTxToken> {
+            // Phase 1b uses a single TX_BUF; smoltcp can always
+            // get a tx token. Future PRs may add tx-ring
+            // back-pressure (return None when tx queue saturated).
+            Some(NicTxToken)
+        }
+    }
+
+    /// Holds the lin-mem offset + length of one received packet
+    /// plus the desc index for recycle on consume.
+    pub struct NicRxToken {
+        buf_off: u32,
+        used_len: u32,
+        desc_idx: u32,
+    }
+
+    impl RxToken for NicRxToken {
+        fn consume<R, F>(self, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            // Skip the 12-byte VirtIO-net header to expose the raw
+            // Ethernet frame to smoltcp.
+            let frame_off = self.buf_off + VIRTIO_NET_HDR_LEN as u32;
+            let frame_len = self
+                .used_len
+                .saturating_sub(VIRTIO_NET_HDR_LEN as u32) as usize;
+            // SAFETY: buf_off is the offset of an entry of RX_BUFS
+            // (each ETH_FRAME_MAX bytes long); used_len ≤
+            // ETH_FRAME_MAX (device wrote ≤ that many bytes,
+            // checked at attach time). Single-threaded. smoltcp
+            // 0.11 takes &mut [u8] to allow in-place processing.
+            let slice = unsafe {
+                core::slice::from_raw_parts_mut(frame_off as *mut u8, frame_len)
+            };
+            let r = f(slice);
+
+            // After the closure runs, recycle the buffer back to
+            // the device. compiler_fence guards against wasmi
+            // reordering between the read and the host-fn call.
+            compiler_fence(Ordering::SeqCst);
+            let _ = rx_recycle(self.desc_idx);
+            r
+        }
+    }
+
+    /// Zero-sized TxToken. Phase-1b uses a single shared
+    /// `TX_BUF`; future PRs add a real tx descriptor pool.
+    pub struct NicTxToken;
+
+    impl TxToken for NicTxToken {
+        fn consume<R, F>(self, len: usize, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            // Frame goes after the 12-byte VirtIO-net header.
+            let total_len = len + VIRTIO_NET_HDR_LEN;
+            let tx_buf_off =
+                core::ptr::addr_of_mut!(TX_BUF) as u32;
+            let frame_off = tx_buf_off + VIRTIO_NET_HDR_LEN as u32;
+            // SAFETY: TX_BUF is ETH_FRAME_MAX bytes; total_len ≤
+            // SMOLTCP_MTU + 12 < ETH_FRAME_MAX. Single-threaded.
+            let slice = unsafe {
+                core::slice::from_raw_parts_mut(frame_off as *mut u8, len)
+            };
+
+            // Zero the VirtIO-net header (no protocol features
+            // negotiated → 12 zero bytes).
+            // SAFETY: TX_BUF is owned, header is in-bounds.
+            unsafe {
+                core::ptr::write_bytes(
+                    tx_buf_off as *mut u8,
+                    0,
+                    VIRTIO_NET_HDR_LEN,
+                );
+            }
+
+            let r = f(slice);
+
+            // Memory barrier before the host-fn boundary, then
+            // hand off to the device.
+            compiler_fence(Ordering::SeqCst);
+            let _ = tx_send(tx_buf_off, total_len as u32);
+            r
+        }
+    }
+}
+
 // ── Register access helpers ──────────────────────────────────────
 
 /// Read a 32-bit NIC register at `offset` from `NIC_BASE`. Returns
