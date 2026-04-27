@@ -27,6 +27,7 @@ pub mod heap;
 pub mod hello_blob;
 pub mod host_fns;
 pub mod loader;
+pub mod net_blob;
 pub mod noop_blob;
 pub mod sign;
 pub mod tier2_uart;
@@ -70,6 +71,32 @@ pub fn run_noop() -> Result<(), KernelError> {
 /// `KernelError::BadWasm` for any verification, parse, link, or
 /// instantiate failure (R5). `KernelError::DriverError` if the driver
 /// is missing the expected `write(buf_ptr, len) -> i32` export.
+/// Boot the Tier-2 net driver: load the embedded signed blob and
+/// run its `_start`. Phase-1b PR Net-4a's driver `_start` is a
+/// stub (returns immediately); the instance is dropped after this
+/// call, but the driver's `Net` cap (installed by
+/// `cap::boot::init_root_caps`) persists in
+/// `cspaces[PROC_ID_TIER2_NET]` for use by future PRs (Net-4b will
+/// install the instance as a singleton and bring up the NIC).
+///
+/// # Errors
+///
+/// `KernelError::BadWasm` for any verification, parse, link, or
+/// instantiate failure (R5).
+pub fn run_tier2_net() -> Result<(), KernelError> {
+    use crate::cap::PROC_ID_TIER2_NET;
+    let _net = loader::load_tier2_net(
+        net_blob::NET_DRIVER_SIGNED,
+        ModuleId::Tier2Net,
+        PROC_ID_TIER2_NET,
+    )?;
+    // PR Net-4a: instance dropped on return — the driver's `_start`
+    // is a stub, no exports need resolving yet. PR Net-4b installs
+    // a `tier2_net::Tier2NetHandle` singleton so future Tier-1
+    // socket calls can re-enter the driver via host fns.
+    Ok(())
+}
+
 pub fn run_tier2_uart() -> Result<(), KernelError> {
     let tier2 =
         loader::load_tier2(uart_blob::UART_DRIVER_SIGNED, ModuleId::Tier2Uart)?;

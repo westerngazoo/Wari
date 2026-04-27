@@ -24,6 +24,7 @@ members = [
     "kernel",
     "apps/hello",
     "drivers/uart",
+    "drivers/net",
     "tests/integration",
     "tests/security",
     # tools/*    — populated as needed

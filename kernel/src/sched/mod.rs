@@ -225,10 +225,10 @@ fn pick_next_tenant() -> Option<u8> {
 fn blob_for(module_id: ModuleId) -> &'static [u8] {
     match module_id {
         ModuleId::Tier1Hello => runtime::hello_blob::HELLO_WASM,
-        // Tier2Uart is a library, not run via run_tier1; this match
-        // arm should never fire in the current scheduler. Returning
-        // an empty slice is the safest fallback for an unreachable
-        // case (R5: no panics).
-        ModuleId::Tier2Uart => &[],
+        // Tier2 drivers are libraries, not run via run_tier1; the
+        // match arms should never fire from the scheduler. Returning
+        // an empty slice is the safest fallback for unreachable
+        // cases (R5: no panics).
+        ModuleId::Tier2Uart | ModuleId::Tier2Net => &[],
     }
 }

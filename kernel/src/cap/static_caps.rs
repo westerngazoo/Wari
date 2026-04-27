@@ -44,6 +44,10 @@ pub enum ModuleId {
     Tier2Uart,
     /// The Tier-1 hello app (PR 6).
     Tier1Hello,
+    /// The Tier-2 net driver (PR Net-4a). Cap authority lives in
+    /// the new `ObjectKind::Net`, not in the legacy boolean `Caps`,
+    /// so `caps_for(Tier::Two, Tier2Net)` returns `Caps::empty()`.
+    Tier2Net,
 }
 
 /// Per-instance capability set.
@@ -107,6 +111,12 @@ pub const fn caps_for(tier: Tier, module_id: ModuleId) -> Caps {
     match (tier, module_id) {
         (Tier::Two, ModuleId::Tier2Uart) => TIER2_UART_DRIVER_CAPS,
         (Tier::One, ModuleId::Tier1Hello) => TIER1_DEFAULT_CAPS,
+        // Tier2Net has no legacy boolean caps — its authority is
+        // the `ObjectKind::Net` cap installed by
+        // `cap::boot::init_root_caps`. Returning empty here is
+        // correct; the runtime cap-mediated path doesn't read this
+        // anyway (PR 3b retired host-fn use of the boolean caps).
+        (Tier::Two, ModuleId::Tier2Net) => Caps::empty(),
         _ => Caps::empty(),
     }
 }

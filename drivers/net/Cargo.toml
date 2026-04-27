@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "wari-driver-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+
+# Per-platform feature gate, mirrors `wari-driver-uart`. Phase 1b ships
+# the qemu (VirtIO-net) variant only; the vf2 (JH7110 GMAC) variant
+# compiles but its `_start` is a stub `loop {}` until PR Net-9
+# (Phase 1c) lands the GMAC implementation.
+#
+# `default = ["qemu"]` so workspace-wide builds (cargo check / clippy /
+# test) compile without tripping the `compile_error!` in `lib.rs`.
+[features]
+default = ["qemu"]
+qemu = []
+vf2  = []
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

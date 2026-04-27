@@ -28,7 +28,8 @@ DEPLOY_FILES := $(KERNEL_BIN) kernel/ abi-shared/ wasi/ apps/ drivers/ \
                 platform/ scripts/ docs/ Makefile Cargo.toml Cargo.lock \
                 rust-toolchain.toml CLAUDE.md README.md .build_number
 
-.PHONY: help build build-hello build-uart-driver sign-uart-driver build-vf2 build-all \
+.PHONY: help build build-hello build-uart-driver sign-uart-driver \
+        build-net-driver sign-net-driver build-vf2 build-all \
         test run debug objdump clean \
         kernel-vf2 flash-sd deploy \
         test-unit test-integration test-security test-fuzz \
@@ -68,7 +69,7 @@ help:
 
 # ── Build ──────────────────────────────────────────────────────
 
-build: sign-uart-driver build-hello
+build: sign-uart-driver sign-net-driver build-hello
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) cargo build --release --features qemu
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 
@@ -104,8 +105,31 @@ sign-uart-driver: build-uart-driver
 	cargo run --manifest-path scripts/Cargo.toml --bin sign-module -- \
 	  build/drivers/uart-vf2.wasm  build/drivers/uart-vf2.signed.wasm
 
+# Build per-platform Tier-2 net driver blobs (PR Net-4a). The kernel
+# `include_bytes!`s the platform-matched signed blob — see
+# kernel/src/runtime/net_blob.rs.
+build-net-driver:
+	mkdir -p build/drivers
+	# QEMU variant (VirtIO-net)
+	cd drivers/net && cargo build --release --features qemu --no-default-features
+	cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
+		build/drivers/net-qemu.wasm
+	# VF2 variant (JH7110 GMAC — Phase 1c stub)
+	cd drivers/net && cargo build --release --features vf2 --no-default-features
+	cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
+		build/drivers/net-vf2.wasm
+
+# Sign both Tier-2 net driver variants. Required before the kernel
+# can `include_bytes!` either net-qemu.signed.wasm or
+# net-vf2.signed.wasm.
+sign-net-driver: build-net-driver
+	cargo run --manifest-path scripts/Cargo.toml --bin sign-module -- \
+	  build/drivers/net-qemu.wasm build/drivers/net-qemu.signed.wasm
+	cargo run --manifest-path scripts/Cargo.toml --bin sign-module -- \
+	  build/drivers/net-vf2.wasm  build/drivers/net-vf2.signed.wasm
+
 # VF2 cross-compile sanity (no flash). Useful before PR 10 deploy.
-build-vf2: sign-uart-driver build-hello
+build-vf2: sign-uart-driver sign-net-driver build-hello
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
 	  cargo build --release --features vf2 --no-default-features
 
@@ -159,7 +183,7 @@ audit:
 
 # ── VisionFive 2 ───────────────────────────────────────────────
 
-kernel-vf2: sign-uart-driver
+kernel-vf2: sign-uart-driver sign-net-driver
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
 	  cargo build --release --features vf2 --no-default-features
