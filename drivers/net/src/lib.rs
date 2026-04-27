@@ -49,6 +49,11 @@
 
 #![no_std]
 #![no_main]
+// VF2 builds gate everything VirtIO-related behind cfg(feature =
+// "qemu"); vf2's _start is a Phase-1c stub. Suppress dead-code
+// noise on vf2 builds — the items are used on qemu, this is the
+// expected shape of "two cfg-gated platforms in one crate".
+#![cfg_attr(feature = "vf2", allow(dead_code))]
 
 #[cfg(not(any(feature = "qemu", feature = "vf2")))]
 compile_error!("wari-driver-net requires --features qemu or --features vf2.");
@@ -166,6 +171,100 @@ extern "C" {
     #[allow(dead_code)]
     #[link_name = "notification_ack"]
     fn wari_notification_ack(slot: u32) -> i32;
+
+    /// Driver → kernel: bind a virtqueue's three rings (descriptor
+    /// table, available ring, used ring) to the NIC. The driver
+    /// passes lin-mem offsets; the kernel translates to physical
+    /// addresses and writes the VirtIO MMIO queue config registers.
+    /// PR Net-4c host fn.
+    ///
+    /// Returns 0 on success, negative errno on failure.
+    #[link_name = "nic_attach_queue"]
+    fn wari_nic_attach_queue(
+        queue_idx: u32,
+        desc_off: u32,
+        avail_off: u32,
+        used_off: u32,
+        queue_size: u32,
+    ) -> i32;
+}
+
+// ── Virtqueue ring storage (PR Net-4c) ───────────────────────────
+//
+// Phase-1b queue size is 8 — small enough that two queues
+// (rx + tx) plus their rings fit in well under 1 KiB. Each ring's
+// alignment is enforced by `#[repr(align(N))]` on its wrapper
+// struct.
+//
+// The `static mut` pattern is the standard way to give wasmi a
+// known lin-mem offset without runtime allocation. `addr_of_mut!`
+// returns the offset.
+
+const QUEUE_SIZE: u32 = 8;
+
+/// Descriptor table — `virtq_desc[QUEUE_SIZE]`. Each desc is 16
+/// bytes; alignment 16 (VirtIO 1.2 §2.6).
+#[repr(C, align(16))]
+struct DescTable {
+    bytes: [u8; 16 * QUEUE_SIZE as usize],
+}
+
+/// Available ring — `flags : u16, idx : u16, ring : u16[QUEUE_SIZE]`.
+/// 4 + 2*8 = 20 bytes. Alignment 2.
+#[repr(C, align(2))]
+struct AvailRing {
+    bytes: [u8; 4 + 2 * QUEUE_SIZE as usize],
+}
+
+/// Used ring — `flags : u16, idx : u16, ring : virtq_used_elem[QUEUE_SIZE]`.
+/// virtq_used_elem is { id : u32, len : u32 } = 8 bytes.
+/// Total 4 + 8*8 = 68 bytes. Alignment 4.
+#[repr(C, align(4))]
+struct UsedRing {
+    bytes: [u8; 4 + 8 * QUEUE_SIZE as usize],
+}
+
+static mut RX_DESC: DescTable = DescTable {
+    bytes: [0; 16 * QUEUE_SIZE as usize],
+};
+static mut RX_AVAIL: AvailRing = AvailRing {
+    bytes: [0; 4 + 2 * QUEUE_SIZE as usize],
+};
+static mut RX_USED: UsedRing = UsedRing {
+    bytes: [0; 4 + 8 * QUEUE_SIZE as usize],
+};
+
+static mut TX_DESC: DescTable = DescTable {
+    bytes: [0; 16 * QUEUE_SIZE as usize],
+};
+static mut TX_AVAIL: AvailRing = AvailRing {
+    bytes: [0; 4 + 2 * QUEUE_SIZE as usize],
+};
+static mut TX_USED: UsedRing = UsedRing {
+    bytes: [0; 4 + 8 * QUEUE_SIZE as usize],
+};
+
+/// Set up one virtqueue: select it on the device, choose queue size,
+/// hand the kernel offsets for the three rings via `nic_attach_queue`
+/// (which writes the VirtIO MMIO queue-config registers).
+///
+/// `queue_idx`: 0 = rx, 1 = tx (VirtIO-net §5.1.6.1 convention).
+fn attach_queue(
+    queue_idx: u32,
+    desc_off: u32,
+    avail_off: u32,
+    used_off: u32,
+) -> Result<(), ()> {
+    // SAFETY: extern host-fn call. Kernel does cap check + bounds
+    // check on the offsets, then writes VirtIO MMIO queue regs.
+    let r = unsafe {
+        wari_nic_attach_queue(queue_idx, desc_off, avail_off, used_off, QUEUE_SIZE)
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 // ── Register access helpers ──────────────────────────────────────
@@ -274,14 +373,35 @@ fn init_virtio() -> Result<[u8; 6], ()> {
         return Err(());
     }
 
-    // §3.1.1 step 7 — virtqueue setup. **DEFERRED to PR Net-4c.**
-    // Phase-1b PR Net-4b leaves queues unconfigured; the device
-    // is configured but no packets exchange.
+    // §3.1.1 step 7 — virtqueue setup (PR Net-4c).
+    //
+    // Compute lin-mem offsets of the static-mut ring storage. These
+    // are the wasm32 lin-mem addresses; the kernel's
+    // `nic_attach_queue` host fn translates them to physical
+    // addresses for VirtIO.
+    //
+    // SAFETY: addr_of_mut! returns a raw pointer without aliasing;
+    // we only convert to u32 (lin-mem offset) and pass to the
+    // kernel, never dereference here. The kernel accesses the
+    // memory via the wasmi Memory abstraction (bounds-checked).
+    let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
+    let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
+    let rx_used_off = core::ptr::addr_of_mut!(RX_USED) as u32;
+    let tx_desc_off = core::ptr::addr_of_mut!(TX_DESC) as u32;
+    let tx_avail_off = core::ptr::addr_of_mut!(TX_AVAIL) as u32;
+    let tx_used_off = core::ptr::addr_of_mut!(TX_USED) as u32;
+
+    // VirtIO-net §5.1.6.1: queue 0 is receiveq[0], queue 1 is
+    // transmitq[0]. Phase-1b uses one rx + one tx queue, no
+    // controlq (didn't negotiate VIRTIO_NET_F_CTRL_VQ).
+    attach_queue(0, rx_desc_off, rx_avail_off, rx_used_off)?;
+    attach_queue(1, tx_desc_off, tx_avail_off, tx_used_off)?;
 
     // §3.1.1 step 8 — set DRIVER_OK. Device now considers the
-    // driver ready (even though we have no queues yet — VirtIO
-    // allows a driver with zero queues; the device just won't
-    // send/receive packets).
+    // driver ready and starts honoring the queues. PR Net-4c does
+    // NOT yet add buffers to the rx queue, so incoming packets
+    // are dropped by the device until PR Net-4d populates rx
+    // descriptors.
     nic_write32(
         VIRTIO_MMIO_STATUS,
         VIRTIO_STATUS_ACKNOWLEDGE

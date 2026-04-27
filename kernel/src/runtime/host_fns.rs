@@ -302,8 +302,8 @@ pub fn register_net_host_fns(
     // driver's proc_id baked into each closure.
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-        cap_revoke_impl, nic_set_mac_impl, notification_ack_impl,
-        notification_wait_impl,
+        cap_revoke_impl, nic_attach_queue_impl, nic_set_mac_impl,
+        notification_ack_impl, notification_wait_impl,
     };
     linker
         .func_wrap(
@@ -378,6 +378,28 @@ pub fn register_net_host_fns(
             "nic_set_mac",
             move |_: Caller<'_, Tier2HostState>, mac_low: u32, mac_high: u32| -> i32 {
                 nic_set_mac_impl(pid, mac_low, mac_high)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
+    // PR Net-4c — virtqueue attach. Driver passes lin-mem offsets;
+    // kernel translates to PAs and writes the VirtIO MMIO queue
+    // config registers.
+    linker
+        .func_wrap(
+            "wari",
+            "nic_attach_queue",
+            move |mut caller: Caller<'_, Tier2HostState>,
+                  queue_idx: u32,
+                  desc_off: u32,
+                  avail_off: u32,
+                  used_off: u32,
+                  queue_size: u32|
+                  -> i32 {
+                nic_attach_queue_impl(
+                    &mut caller, pid, queue_idx, desc_off, avail_off,
+                    used_off, queue_size,
+                )
             },
         )
         .map_err(|_| KernelError::BadWasm)?;
