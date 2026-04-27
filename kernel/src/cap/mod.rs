@@ -81,8 +81,9 @@ pub use pool::{BoundedQueue, Pool};
 pub use storage::{cspaces, object_pools};
 pub use syscall::{
     cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-    cap_revoke_impl, check_cap, notification_ack_impl, notification_wait_impl,
-    E_AGAIN, E_INVAL, E_NOMEM, E_NOTCONN, E_PERM, E_REFUSED,
+    cap_revoke_impl, check_cap, nic_attach_queue_impl, nic_set_mac_impl,
+    notification_ack_impl, notification_wait_impl, E_AGAIN, E_INVAL, E_NOMEM,
+    E_NOTCONN, E_PERM, E_REFUSED,
 };
 pub use types::{
     Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_GRANT,

@@ -239,12 +239,18 @@ pub const SOCKET_POOL_CAPACITY: usize = 256;
 ///
 /// `nic_kind`: 0 = VirtIO-net (QEMU), 1 = JH7110 GMAC eth0,
 /// 2 = JH7110 GMAC eth1.
+///
+/// `mac` is populated by the driver via `wari::nic_set_mac` after
+/// it reads the MAC from VirtIO config space (PR Net-4b). Until
+/// `initialized = true`, the MAC field is zeroes.
 #[repr(C)]
 pub struct Net {
     /// Hardware target (see above).
     pub nic_kind: u8,
     /// Whether the driver has finished bringing the NIC up.
     pub initialized: bool,
+    /// MAC address read from device config space at NIC bring-up.
+    pub mac: [u8; 6],
     /// Number of `Socket` objects currently associated with this NIC.
     pub socket_count: u16,
     /// Cap refcount.
@@ -256,6 +262,7 @@ impl Net {
         Self {
             nic_kind,
             initialized: false,
+            mac: [0; 6],
             socket_count: 0,
             refcount: 0,
         }

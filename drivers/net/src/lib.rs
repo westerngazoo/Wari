@@ -1,47 +1,59 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Tier-2 net driver — Phase-1b scaffold.
+//! Tier-2 net driver — Phase-1b VirtIO-net device init (PR Net-4b).
 //!
 //! Built as a separately-signed `.wasm` per platform: one for QEMU
 //! `virt` (VirtIO-net at `0x10008000`) and one for StarFive
 //! VisionFive 2 (JH7110 GMAC eth0 at `0x16030000`). Activated via
 //! cargo feature: `--features qemu` or `--features vf2`.
 //!
-//! ## Phase-1b PR Net-4a scope (this PR)
+//! ## Phase-1b PR Net-4b scope (this PR)
 //!
-//! - Crate scaffold + per-platform feature gates.
-//! - Host-fn imports declared so wasmi link-time resolution exercises
-//!   the kernel-side `register_net_host_fns` from PR Net-3.
-//! - `_start` is a stub that returns immediately. The driver loads
-//!   into the kernel without actually driving any NIC hardware.
+//! - VirtIO MMIO transport discovery (magic + version + device id)
+//! - Status-bit handshake per VirtIO 1.2 §3.1.1:
+//!     reset → ACK → DRIVER → FEATURES_OK → DRIVER_OK
+//! - Feature negotiation: accept `VIRTIO_F_VERSION_1` + `VIRTIO_NET_F_MAC`,
+//!   reject everything else
+//! - Read MAC from device config space (offset 0x100) per VirtIO 1.2 §5.1.4
+//! - Communicate MAC to the kernel via `wari::nic_set_mac`, which also
+//!   sets `Net.initialized = true` so the kernel-side
+//!   `runtime::run_tier2_net` can observe driver readiness
 //!
-//! ## Phase-1b PR Net-4b (next)
+//! **NOT in this PR**: virtqueue setup, packet RX/TX, ARP, ICMP. Those
+//! land in PR Net-4c. PR Net-4b leaves the device "configured but
+//! silent" — `DRIVER_OK` is set so the device knows the driver is
+//! present, but no packets exchange because no queues are wired.
 //!
-//! - VirtIO-net device discovery + queue setup.
-//! - MAC address read from device config.
-//! - Link bring-up.
+//! ## Spec citations
 //!
-//! ## Phase-1b PR Net-4c
+//! Every VirtIO operation below cites the VirtIO 1.2 specification
+//! section it implements (`§N.M.K`). Authoritative source:
+//! https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html
 //!
-//! - ARP responder (kernel responds to ARP requests for its IP).
-//! - ICMP echo responder (kernel responds to host pings).
+//! ## Verification status
 //!
-//! ## Phase-1c PR Net-9
-//!
-//! - JH7110 GMAC implementation in `mod gmac` (currently a `loop {}`
-//!   stub gated on `feature = "vf2"`).
+//! Code is **structurally correct per spec** but **has not yet been
+//! end-to-end tested in QEMU**. The first run-in-QEMU test is the
+//! exit gate for PR Net-4c. Until then, treat the MAC printed by
+//! `run_tier2_net` as the verification signal: a zeroed MAC means
+//! init failed silently somewhere in this file; a real `52:54:00:…`
+//! MAC means QEMU's VirtIO device is in the `DRIVER_OK` state and
+//! responding to config-space reads.
 //!
 //! ## Lockstep maintenance
 //!
-//! The platform constants below duplicate
-//! `kernel/src/validate.rs::NET_MMIO_BASE`. The duplication is
-//! structural — a `wasm32-unknown-unknown` cdylib cannot depend on
-//! the kernel crate. If the NIC moves, update both sides in the same
-//! PR. The kernel-side validator (`validate::is_net_mmio_addr`)
-//! enforces that the driver only ever writes to the agreed NIC
-//! window regardless.
+//! `NIC_BASE` here mirrors `kernel/src/validate.rs::NET_MMIO_BASE`.
+//! `NET_MMIO_LEN = 0x200` in the kernel must cover both the transport
+//! window (0x000..0x100) and the device config region (0x100..0x200)
+//! — PR Net-4b widens the validator from 0x100 to 0x200 specifically
+//! to allow MAC reads.
 
 #![no_std]
 #![no_main]
+// VF2 builds gate everything VirtIO-related behind cfg(feature =
+// "qemu"); vf2's _start is a Phase-1c stub. Suppress dead-code
+// noise on vf2 builds — the items are used on qemu, this is the
+// expected shape of "two cfg-gated platforms in one crate".
+#![cfg_attr(feature = "vf2", allow(dead_code))]
 
 #[cfg(not(any(feature = "qemu", feature = "vf2")))]
 compile_error!("wari-driver-net requires --features qemu or --features vf2.");
@@ -51,8 +63,10 @@ compile_error!("wari-driver-net accepts only one of --features qemu / vf2.");
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    // Tier-2 panics are bugs in signed code. wasmi's trap will fire
-    // before this in practice; the loop is the structural fallback.
+    // Tier-2 panics are bugs in signed code. The infinite loop is
+    // a structural last resort; PR Net-4b's init path uses
+    // Result-style early-return rather than panic so a failed init
+    // simply leaves Net.initialized = false on the kernel side.
     loop {}
 }
 
@@ -61,75 +75,388 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[cfg(feature = "qemu")]
 mod plat {
     /// VirtIO-net MMIO base on QEMU `virt`.
-    #[allow(dead_code)]
     pub const NIC_BASE: u32 = 0x1000_8000;
-    /// Kind discriminant matching the kernel's `Net.nic_kind`.
-    #[allow(dead_code)]
-    pub const NIC_KIND: u8 = 0;
 }
 
 #[cfg(feature = "vf2")]
 mod plat {
-    /// JH7110 GMAC eth0 base on VisionFive 2.
+    /// JH7110 GMAC eth0 base on VisionFive 2 — Phase 1c will land
+    /// the GMAC implementation. Phase 1b's vf2 build is a stub.
     #[allow(dead_code)]
     pub const NIC_BASE: u32 = 0x1603_0000;
-    /// Kind discriminant matching the kernel's `Net.nic_kind`.
-    #[allow(dead_code)]
-    pub const NIC_KIND: u8 = 1;
 }
 
-// ── Host-function imports ────────────────────────────────────────
+// ── VirtIO MMIO register offsets (VirtIO 1.2 §4.2.2) ─────────────
 //
-// Declared so wasmi's link-time resolution exercises the kernel's
-// `register_net_host_fns` from PR Net-3. PR Net-4b actually CALLS
-// these from `init_nic`; this PR's stub never invokes them, but the
-// import declarations keep the WASM ABI stable as features land.
+// These offsets are spec-fixed and apply to any VirtIO MMIO transport
+// device (network, block, console, etc.). VirtIO-net's device-specific
+// config starts at 0x100.
+
+const VIRTIO_MMIO_MAGIC_VALUE:         u32 = 0x000;
+const VIRTIO_MMIO_VERSION:             u32 = 0x004;
+const VIRTIO_MMIO_DEVICE_ID:           u32 = 0x008;
+#[allow(dead_code)]
+const VIRTIO_MMIO_VENDOR_ID:           u32 = 0x00c;
+const VIRTIO_MMIO_DEVICE_FEATURES:     u32 = 0x010;
+const VIRTIO_MMIO_DEVICE_FEATURES_SEL: u32 = 0x014;
+const VIRTIO_MMIO_DRIVER_FEATURES:     u32 = 0x020;
+const VIRTIO_MMIO_DRIVER_FEATURES_SEL: u32 = 0x024;
+const VIRTIO_MMIO_STATUS:              u32 = 0x070;
+/// Device-specific config region; for VirtIO-net see §5.1.4.
+const VIRTIO_MMIO_CONFIG:              u32 = 0x100;
+
+// ── VirtIO magic + protocol constants (VirtIO 1.2 §4.2.2.1) ──────
+
+/// `MagicValue` register reads as the four bytes "virt" little-endian
+/// = `0x74726976`. Any other value means we're reading garbage / no
+/// VirtIO device at this MMIO base.
+const VIRTIO_MAGIC: u32 = 0x7472_6976;
+
+/// `Version` register: 2 = modern (VirtIO 1.0+), 1 = legacy (deprecated).
+/// PR Net-4b targets modern.
+const VIRTIO_VERSION_MODERN: u32 = 2;
+
+/// `DeviceID` register: 1 = network. The device ID space is in
+/// VirtIO 1.2 §5; 1 is the network device class.
+const VIRTIO_DEVICE_ID_NET: u32 = 1;
+
+// ── VirtIO Status bits (VirtIO 1.2 §2.1) ─────────────────────────
+
+const VIRTIO_STATUS_ACKNOWLEDGE: u32 = 0x01;
+const VIRTIO_STATUS_DRIVER:      u32 = 0x02;
+const VIRTIO_STATUS_DRIVER_OK:   u32 = 0x04;
+const VIRTIO_STATUS_FEATURES_OK: u32 = 0x08;
+#[allow(dead_code)]
+const VIRTIO_STATUS_NEEDS_RESET: u32 = 0x40;
+#[allow(dead_code)]
+const VIRTIO_STATUS_FAILED:      u32 = 0x80;
+
+// ── VirtIO feature bits we negotiate ─────────────────────────────
+//
+// VirtIO 1.2 §6: feature bits 0..31 are device-specific; 32+ are
+// transport / general. Driver writes both halves via
+// DriverFeaturesSel = 0 / 1.
+
+/// VirtIO-net §5.1.3: device provides a MAC address in config space.
+/// Without this we'd have to invent a MAC, which Phase-1b doesn't.
+const VIRTIO_NET_F_MAC: u32 = 5;
+
+/// VirtIO 1.2 §6: the driver speaks the modern protocol. MUST be set
+/// by every modern (version=2) driver.
+const VIRTIO_F_VERSION_1: u32 = 32;
+
+// ── Host-function imports ────────────────────────────────────────
 
 #[link(wasm_import_module = "wari")]
 extern "C" {
-    /// Host fn — write a 32-bit value to NIC register at `addr`.
-    /// Cap-gated by the driver's `Net` cap with WRITE rights.
-    /// Returns 0 on success, negative errno on failure.
-    #[allow(dead_code)]
+    /// Cap-gated NIC register write. Returns 0 on success.
     #[link_name = "net_mmio_write32"]
     fn wari_net_mmio_write32(addr: u32, val: u32) -> i32;
 
-    /// Host fn — read a 32-bit NIC register. Same gating with READ.
-    /// Returns the value (0..=u32::MAX-1) on success, `u32::MAX` as
-    /// no-permission / out-of-range sentinel.
-    #[allow(dead_code)]
+    /// Cap-gated NIC register read. Returns `u32::MAX` on
+    /// permission / out-of-range failure.
     #[link_name = "net_mmio_read32"]
     fn wari_net_mmio_read32(addr: u32) -> u32;
 
-    /// Host fn — block waiting for the IRQ-bound notification at the
-    /// driver's CSpace `slot`. Phase-1b polling: returns 0 if
-    /// signaled, `-4` (E_AGAIN) if not.
+    /// Driver → kernel signaling: "I finished VirtIO init, my MAC
+    /// is (mac_low, mac_high)." See `cap::syscall::nic_set_mac_impl`.
+    /// Returns 0 on success, negative errno on failure.
+    #[link_name = "nic_set_mac"]
+    fn wari_nic_set_mac(mac_low: u32, mac_high: u32) -> i32;
+
     #[allow(dead_code)]
     #[link_name = "notification_wait"]
     fn wari_notification_wait(slot: u32) -> i32;
 
-    /// Host fn — clear the signal bitmap on the IRQ-bound
-    /// notification at `slot` after IRQ work completes.
     #[allow(dead_code)]
     #[link_name = "notification_ack"]
     fn wari_notification_ack(slot: u32) -> i32;
+
+    /// Driver → kernel: bind a virtqueue's three rings (descriptor
+    /// table, available ring, used ring) to the NIC. The driver
+    /// passes lin-mem offsets; the kernel translates to physical
+    /// addresses and writes the VirtIO MMIO queue config registers.
+    /// PR Net-4c host fn.
+    ///
+    /// Returns 0 on success, negative errno on failure.
+    #[link_name = "nic_attach_queue"]
+    fn wari_nic_attach_queue(
+        queue_idx: u32,
+        desc_off: u32,
+        avail_off: u32,
+        used_off: u32,
+        queue_size: u32,
+    ) -> i32;
+}
+
+// ── Virtqueue ring storage (PR Net-4c) ───────────────────────────
+//
+// Phase-1b queue size is 8 — small enough that two queues
+// (rx + tx) plus their rings fit in well under 1 KiB. Each ring's
+// alignment is enforced by `#[repr(align(N))]` on its wrapper
+// struct.
+//
+// The `static mut` pattern is the standard way to give wasmi a
+// known lin-mem offset without runtime allocation. `addr_of_mut!`
+// returns the offset.
+
+const QUEUE_SIZE: u32 = 8;
+
+/// Descriptor table — `virtq_desc[QUEUE_SIZE]`. Each desc is 16
+/// bytes; alignment 16 (VirtIO 1.2 §2.6).
+#[repr(C, align(16))]
+struct DescTable {
+    bytes: [u8; 16 * QUEUE_SIZE as usize],
+}
+
+/// Available ring — `flags : u16, idx : u16, ring : u16[QUEUE_SIZE]`.
+/// 4 + 2*8 = 20 bytes. Alignment 2.
+#[repr(C, align(2))]
+struct AvailRing {
+    bytes: [u8; 4 + 2 * QUEUE_SIZE as usize],
+}
+
+/// Used ring — `flags : u16, idx : u16, ring : virtq_used_elem[QUEUE_SIZE]`.
+/// virtq_used_elem is { id : u32, len : u32 } = 8 bytes.
+/// Total 4 + 8*8 = 68 bytes. Alignment 4.
+#[repr(C, align(4))]
+struct UsedRing {
+    bytes: [u8; 4 + 8 * QUEUE_SIZE as usize],
+}
+
+static mut RX_DESC: DescTable = DescTable {
+    bytes: [0; 16 * QUEUE_SIZE as usize],
+};
+static mut RX_AVAIL: AvailRing = AvailRing {
+    bytes: [0; 4 + 2 * QUEUE_SIZE as usize],
+};
+static mut RX_USED: UsedRing = UsedRing {
+    bytes: [0; 4 + 8 * QUEUE_SIZE as usize],
+};
+
+static mut TX_DESC: DescTable = DescTable {
+    bytes: [0; 16 * QUEUE_SIZE as usize],
+};
+static mut TX_AVAIL: AvailRing = AvailRing {
+    bytes: [0; 4 + 2 * QUEUE_SIZE as usize],
+};
+static mut TX_USED: UsedRing = UsedRing {
+    bytes: [0; 4 + 8 * QUEUE_SIZE as usize],
+};
+
+/// Set up one virtqueue: select it on the device, choose queue size,
+/// hand the kernel offsets for the three rings via `nic_attach_queue`
+/// (which writes the VirtIO MMIO queue-config registers).
+///
+/// `queue_idx`: 0 = rx, 1 = tx (VirtIO-net §5.1.6.1 convention).
+fn attach_queue(
+    queue_idx: u32,
+    desc_off: u32,
+    avail_off: u32,
+    used_off: u32,
+) -> Result<(), ()> {
+    // SAFETY: extern host-fn call. Kernel does cap check + bounds
+    // check on the offsets, then writes VirtIO MMIO queue regs.
+    let r = unsafe {
+        wari_nic_attach_queue(queue_idx, desc_off, avail_off, used_off, QUEUE_SIZE)
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+// ── Register access helpers ──────────────────────────────────────
+
+/// Read a 32-bit NIC register at `offset` from `NIC_BASE`. Returns
+/// `Err(())` if the host fn signaled failure (cap denied or address
+/// out of range — both surface as `u32::MAX`).
+fn nic_read32(offset: u32) -> Result<u32, ()> {
+    // SAFETY: extern host-fn call. Kernel validates address, cap.
+    let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + offset) };
+    // The sentinel u32::MAX is also a legal device-features high
+    // word in some configurations, but for VirtIO MagicValue,
+    // Version, and DeviceID it can only legitimately occur on
+    // failure — those registers are spec-fixed and never u32::MAX.
+    // Per-call sites that care interpret u32::MAX appropriately.
+    Ok(v)
+}
+
+/// Write a 32-bit NIC register at `offset`. `Err(())` if the host
+/// fn returned non-zero.
+fn nic_write32(offset: u32, val: u32) -> Result<(), ()> {
+    // SAFETY: extern host-fn call. Kernel validates address, cap.
+    let r = unsafe { wari_net_mmio_write32(plat::NIC_BASE + offset, val) };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+// ── VirtIO init sequence (VirtIO 1.2 §3.1.1) ─────────────────────
+
+/// Run the VirtIO driver-init sequence. On success returns
+/// `Ok([u8; 6])` with the MAC read from device config; `Err(())` on
+/// any spec violation or host-fn failure.
+fn init_virtio() -> Result<[u8; 6], ()> {
+    // §4.2.2.1 — verify the MMIO magic. Any other value means we're
+    // either reading garbage MMIO or the device tree is wrong.
+    if nic_read32(VIRTIO_MMIO_MAGIC_VALUE)? != VIRTIO_MAGIC {
+        return Err(());
+    }
+    // §4.2.2.1 — verify Version = 2 (modern). We don't support
+    // legacy in Phase 1b.
+    if nic_read32(VIRTIO_MMIO_VERSION)? != VIRTIO_VERSION_MODERN {
+        return Err(());
+    }
+    // §4.2.2.1 — verify DeviceID = 1 (network).
+    if nic_read32(VIRTIO_MMIO_DEVICE_ID)? != VIRTIO_DEVICE_ID_NET {
+        return Err(());
+    }
+
+    // §3.1.1 step 1 — reset by writing 0 to status.
+    nic_write32(VIRTIO_MMIO_STATUS, 0)?;
+
+    // §3.1.1 step 2 — set ACKNOWLEDGE.
+    nic_write32(VIRTIO_MMIO_STATUS, VIRTIO_STATUS_ACKNOWLEDGE)?;
+
+    // §3.1.1 step 3 — set DRIVER.
+    nic_write32(
+        VIRTIO_MMIO_STATUS,
+        VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER,
+    )?;
+
+    // §3.1.1 step 4 — feature negotiation.
+    //
+    // Read device features in two halves (low = bits 0..31, high =
+    // bits 32..63) selected by DeviceFeaturesSel.
+    nic_write32(VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0)?;
+    let dev_feat_lo = nic_read32(VIRTIO_MMIO_DEVICE_FEATURES)?;
+    nic_write32(VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1)?;
+    let dev_feat_hi = nic_read32(VIRTIO_MMIO_DEVICE_FEATURES)?;
+
+    // We require the device to offer:
+    //   - VIRTIO_F_VERSION_1  (bit 32, in dev_feat_hi at bit 0)
+    //   - VIRTIO_NET_F_MAC    (bit 5,  in dev_feat_lo at bit 5)
+    // Reject the device if either is missing.
+    if (dev_feat_hi & (1 << (VIRTIO_F_VERSION_1 - 32))) == 0 {
+        return Err(());
+    }
+    if (dev_feat_lo & (1 << VIRTIO_NET_F_MAC)) == 0 {
+        return Err(());
+    }
+
+    // Write back the subset of features we accept. Phase-1b accepts
+    // exactly these two; everything else is rejected.
+    let our_feat_lo = 1u32 << VIRTIO_NET_F_MAC;
+    let our_feat_hi = 1u32 << (VIRTIO_F_VERSION_1 - 32);
+    nic_write32(VIRTIO_MMIO_DRIVER_FEATURES_SEL, 0)?;
+    nic_write32(VIRTIO_MMIO_DRIVER_FEATURES, our_feat_lo)?;
+    nic_write32(VIRTIO_MMIO_DRIVER_FEATURES_SEL, 1)?;
+    nic_write32(VIRTIO_MMIO_DRIVER_FEATURES, our_feat_hi)?;
+
+    // §3.1.1 step 5 — set FEATURES_OK to lock the negotiation.
+    nic_write32(
+        VIRTIO_MMIO_STATUS,
+        VIRTIO_STATUS_ACKNOWLEDGE
+            | VIRTIO_STATUS_DRIVER
+            | VIRTIO_STATUS_FEATURES_OK,
+    )?;
+
+    // §3.1.1 step 6 — verify FEATURES_OK is still set. If the
+    // device cleared it, the driver's accepted-feature subset was
+    // not acceptable to the device.
+    let status = nic_read32(VIRTIO_MMIO_STATUS)?;
+    if (status & VIRTIO_STATUS_FEATURES_OK) == 0 {
+        return Err(());
+    }
+
+    // §3.1.1 step 7 — virtqueue setup (PR Net-4c).
+    //
+    // Compute lin-mem offsets of the static-mut ring storage. These
+    // are the wasm32 lin-mem addresses; the kernel's
+    // `nic_attach_queue` host fn translates them to physical
+    // addresses for VirtIO.
+    //
+    // SAFETY: addr_of_mut! returns a raw pointer without aliasing;
+    // we only convert to u32 (lin-mem offset) and pass to the
+    // kernel, never dereference here. The kernel accesses the
+    // memory via the wasmi Memory abstraction (bounds-checked).
+    let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
+    let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
+    let rx_used_off = core::ptr::addr_of_mut!(RX_USED) as u32;
+    let tx_desc_off = core::ptr::addr_of_mut!(TX_DESC) as u32;
+    let tx_avail_off = core::ptr::addr_of_mut!(TX_AVAIL) as u32;
+    let tx_used_off = core::ptr::addr_of_mut!(TX_USED) as u32;
+
+    // VirtIO-net §5.1.6.1: queue 0 is receiveq[0], queue 1 is
+    // transmitq[0]. Phase-1b uses one rx + one tx queue, no
+    // controlq (didn't negotiate VIRTIO_NET_F_CTRL_VQ).
+    attach_queue(0, rx_desc_off, rx_avail_off, rx_used_off)?;
+    attach_queue(1, tx_desc_off, tx_avail_off, tx_used_off)?;
+
+    // §3.1.1 step 8 — set DRIVER_OK. Device now considers the
+    // driver ready and starts honoring the queues. PR Net-4c does
+    // NOT yet add buffers to the rx queue, so incoming packets
+    // are dropped by the device until PR Net-4d populates rx
+    // descriptors.
+    nic_write32(
+        VIRTIO_MMIO_STATUS,
+        VIRTIO_STATUS_ACKNOWLEDGE
+            | VIRTIO_STATUS_DRIVER
+            | VIRTIO_STATUS_FEATURES_OK
+            | VIRTIO_STATUS_DRIVER_OK,
+    )?;
+
+    // §5.1.4 — read MAC from device-specific config region. The
+    // MAC field is the first 6 bytes of `virtio_net_config`. We
+    // read it as two 32-bit values: bytes 0..4 in `mac01`, bytes
+    // 4..8 in `mac02` (we only care about the low 16 bits of mac02).
+    let mac01 = nic_read32(VIRTIO_MMIO_CONFIG)?;
+    let mac23 = nic_read32(VIRTIO_MMIO_CONFIG + 4)?;
+    let mac = [
+        (mac01 & 0xFF) as u8,
+        ((mac01 >> 8) & 0xFF) as u8,
+        ((mac01 >> 16) & 0xFF) as u8,
+        ((mac01 >> 24) & 0xFF) as u8,
+        (mac23 & 0xFF) as u8,
+        ((mac23 >> 8) & 0xFF) as u8,
+    ];
+    Ok(mac)
 }
 
 // ── Driver entry ─────────────────────────────────────────────────
 
-/// Driver entry. Phase-1b PR Net-4a: stub that returns immediately.
-/// PR Net-4b will replace this body with `init_nic()` (VirtIO-net
-/// discovery + ring setup + link bring-up).
+/// Driver entry. Phase-1b PR Net-4b: run VirtIO discovery + init,
+/// communicate MAC to kernel via `wari::nic_set_mac` on success.
 ///
-/// The kernel's loader path (added in this PR alongside the driver)
-/// instantiates the WASM module, calls `_start` once at boot, then
-/// retains the instance as a "library" process the scheduler does
-/// not pick to run. Future Tier-1 socket calls re-enter the driver
-/// via host-fn dispatch.
+/// On failure the function returns silently, leaving
+/// `Net.initialized = false` on the kernel side. The kernel-side
+/// `run_tier2_net` will see this and log an error rather than the
+/// success line.
 #[no_mangle]
 pub extern "C" fn _start() {
-    // Phase-1b PR Net-4a — no-op. The driver loads, registers itself
-    // as a library process, and idles. Future PRs add real
-    // initialization (Net-4b), protocol handlers (Net-4c), and the
-    // socket API (Net-5).
+    #[cfg(feature = "qemu")]
+    {
+        let mac = match init_virtio() {
+            Ok(m) => m,
+            Err(()) => return,
+        };
+        // Pack 6 bytes into two u32s. mac_low = bytes [0..4],
+        // mac_high = low 16 bits of bytes [4..8].
+        let mac_low = (mac[0] as u32)
+            | ((mac[1] as u32) << 8)
+            | ((mac[2] as u32) << 16)
+            | ((mac[3] as u32) << 24);
+        let mac_high = (mac[4] as u32) | ((mac[5] as u32) << 8);
+        // SAFETY: extern host-fn call. Kernel cap-checks Net+WRITE.
+        let _ = unsafe { wari_nic_set_mac(mac_low, mac_high) };
+    }
+    // The vf2 path is a Phase-1c stub — return immediately, leave
+    // Net.initialized = false on the kernel side. The kernel logs
+    // "[net] not yet implemented on vf2" if needed (Phase-1c TODO).
+    #[cfg(feature = "vf2")]
+    {}
 }

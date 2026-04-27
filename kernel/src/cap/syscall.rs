@@ -305,6 +305,281 @@ pub fn cap_delete_impl(proc_id: u8, slot: u32) -> i32 {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// nic_attach_queue — driver → kernel: bind a virtqueue's rings to
+// the NIC. PR Net-4c.
+// ─────────────────────────────────────────────────────────────────
+
+use crate::validate::is_net_mmio_addr;
+
+/// VirtIO MMIO transport register offsets used by the queue-attach
+/// host fn. Must match the driver's view of the register set
+/// (`drivers/net/src/lib.rs::VIRTIO_MMIO_*`).
+const VIRTIO_MMIO_QUEUE_SEL:        u32 = 0x030;
+const VIRTIO_MMIO_QUEUE_NUM_MAX:    u32 = 0x034;
+const VIRTIO_MMIO_QUEUE_NUM:        u32 = 0x038;
+const VIRTIO_MMIO_QUEUE_READY:      u32 = 0x044;
+const VIRTIO_MMIO_QUEUE_DESC_LOW:   u32 = 0x080;
+const VIRTIO_MMIO_QUEUE_DESC_HIGH:  u32 = 0x084;
+const VIRTIO_MMIO_QUEUE_DRIVER_LOW: u32 = 0x090;
+const VIRTIO_MMIO_QUEUE_DRIVER_HIGH:u32 = 0x094;
+const VIRTIO_MMIO_QUEUE_DEVICE_LOW: u32 = 0x0a0;
+const VIRTIO_MMIO_QUEUE_DEVICE_HIGH:u32 = 0x0a4;
+
+/// QEMU virt VirtIO-net MMIO base (lockstep with `validate.rs` and
+/// `drivers/net/src/lib.rs`). For Phase 1b VF2 builds, the host
+/// fn returns `E_INVAL` — GMAC has a different setup pipeline.
+#[cfg(feature = "qemu")]
+const NIC_BASE_FOR_QUEUE_ATTACH: u32 = 0x1000_8000;
+
+/// `wari::nic_attach_queue(queue_idx, desc_off, avail_off, used_off,
+///                         queue_size) -> i32`.
+///
+/// PR Net-4c — the Tier-2 net driver calls this once per virtqueue
+/// (rx then tx) after `FEATURES_OK` and before `DRIVER_OK`. The
+/// kernel:
+///
+/// 1. Cap-checks `Net + WRITE` at slot 0 (the driver's root cap).
+/// 2. Resolves the calling instance's WASM linear memory.
+/// 3. Translates the three lin-mem offsets to physical addresses
+///    (Phase-1b's bump-allocator arena is identity-mapped, so
+///    kernel-virtual = physical for everything wasmi allocates).
+/// 4. Bounds-checks every offset against the lin-mem size and the
+///    queue-size requirements (descriptor 16-byte aligned, ring
+///    2-byte aligned).
+/// 5. Writes the VirtIO MMIO queue-config registers per VirtIO 1.2
+///    §4.2.2.2: `QueueSel`, `QueueNum`, `QueueDescLow/High`,
+///    `QueueDriverLow/High`, `QueueDeviceLow/High`, `QueueReady`.
+///
+/// Returns 0 on success, `E_PERM` on cap denial, `E_INVAL` on bad
+/// arguments, `E_NOMEM` if the caller has no exported `memory`.
+///
+/// # Why this lives in the kernel and not the driver
+///
+/// The driver doesn't know its own physical address — that's a
+/// kernel-side fact. Letting the driver compute PAs would require
+/// exposing `lin_mem_base()` which leaks kernel memory layout to
+/// signed user code. Doing the translation kernel-side keeps the
+/// PA leak inside Tier 0 (the audit story stays clean).
+pub fn nic_attach_queue_impl<T>(
+    caller: &mut wasmi::Caller<'_, T>,
+    proc_id: u8,
+    queue_idx: u32,
+    desc_off: u32,
+    avail_off: u32,
+    used_off: u32,
+    queue_size: u32,
+) -> i32 {
+    // Cap check: driver holds Net + WRITE at slot 0.
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_PERM;
+    }
+    let cap = {
+        let cs = cspaces();
+        cs[proc_id as usize].slots[0]
+    };
+    if cap.is_empty()
+        || !matches!(cap.kind, ObjectKind::Net)
+        || cap.rights & CAP_RIGHT_WRITE == 0
+    {
+        return E_PERM;
+    }
+
+    // Argument validation.
+    // - queue_idx: 0 = rx, 1 = tx for VirtIO-net
+    // - queue_size: power of 2, ≤ 256 (VirtIO 1.2 §2.6 caps at 32768
+    //   but Phase 1b uses much smaller; we cap conservatively)
+    if queue_idx > 1 {
+        return E_INVAL;
+    }
+    if queue_size == 0
+        || queue_size > 256
+        || !queue_size.is_power_of_two()
+    {
+        return E_INVAL;
+    }
+    // VirtIO 1.2 §2.6 alignment: descriptor table 16-byte, available
+    // ring 2-byte, used ring 4-byte. Reject misaligned offsets.
+    if desc_off & 0xF != 0 {
+        return E_INVAL;
+    }
+    if avail_off & 0x1 != 0 {
+        return E_INVAL;
+    }
+    if used_off & 0x3 != 0 {
+        return E_INVAL;
+    }
+
+    // Resolve the caller's linear memory + compute physical addresses.
+    let memory = match caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+    {
+        Some(m) => m,
+        None => return E_NOMEM,
+    };
+    let mem_data = memory.data(&*caller);
+    let mem_base = mem_data.as_ptr() as usize;
+    let mem_len = mem_data.len();
+
+    // Bounds check: every offset + the ring size it implies must fit
+    // entirely within lin-mem.
+    let desc_size = 16usize * queue_size as usize;
+    let avail_size = 4usize + 2 * queue_size as usize;
+    let used_size = 4usize + 8 * queue_size as usize;
+    if (desc_off as usize)
+        .checked_add(desc_size)
+        .map_or(true, |end| end > mem_len)
+    {
+        return E_INVAL;
+    }
+    if (avail_off as usize)
+        .checked_add(avail_size)
+        .map_or(true, |end| end > mem_len)
+    {
+        return E_INVAL;
+    }
+    if (used_off as usize)
+        .checked_add(used_size)
+        .map_or(true, |end| end > mem_len)
+    {
+        return E_INVAL;
+    }
+
+    let desc_pa = mem_base + desc_off as usize;
+    let avail_pa = mem_base + avail_off as usize;
+    let used_pa = mem_base + used_off as usize;
+
+    // Write VirtIO MMIO queue config. Phase-1b QEMU only — VF2
+    // GMAC has a different ring layout, so this host fn returns
+    // E_INVAL on vf2 builds.
+    #[cfg(feature = "qemu")]
+    {
+        let base = NIC_BASE_FOR_QUEUE_ATTACH;
+
+        // Defensive: validator-narrowed range. The kernel already
+        // gates net_mmio_* host fns, but this path bypasses the
+        // host fn (writes happen directly inside the kernel) — so
+        // the validator narrows here too.
+        if !is_net_mmio_addr((base + VIRTIO_MMIO_QUEUE_SEL) as usize) {
+            return E_INVAL;
+        }
+
+        // Step 1 — select the queue we're configuring (§4.2.2.2).
+        write32(base + VIRTIO_MMIO_QUEUE_SEL, queue_idx);
+
+        // Step 2 — verify QueueNumMax ≥ our queue_size.
+        let qmax = read32(base + VIRTIO_MMIO_QUEUE_NUM_MAX);
+        if qmax < queue_size {
+            return E_INVAL;
+        }
+
+        // Step 3 — set queue size.
+        write32(base + VIRTIO_MMIO_QUEUE_NUM, queue_size);
+
+        // Step 4 — write the three ring physical addresses.
+        // Note: VirtIO 1.0+ uses 64-bit addresses split as Low/High.
+        write32(base + VIRTIO_MMIO_QUEUE_DESC_LOW, desc_pa as u32);
+        write32(base + VIRTIO_MMIO_QUEUE_DESC_HIGH, (desc_pa >> 32) as u32);
+        write32(base + VIRTIO_MMIO_QUEUE_DRIVER_LOW, avail_pa as u32);
+        write32(base + VIRTIO_MMIO_QUEUE_DRIVER_HIGH, (avail_pa >> 32) as u32);
+        write32(base + VIRTIO_MMIO_QUEUE_DEVICE_LOW, used_pa as u32);
+        write32(base + VIRTIO_MMIO_QUEUE_DEVICE_HIGH, (used_pa >> 32) as u32);
+
+        // Step 5 — set QueueReady. Device starts using the queue.
+        write32(base + VIRTIO_MMIO_QUEUE_READY, 1);
+
+        0
+    }
+    #[cfg(feature = "vf2")]
+    {
+        // GMAC has a different ring setup pipeline (DMA descriptors,
+        // not VirtIO virtqueues). Phase 1c will introduce the GMAC
+        // equivalent host fn. Until then, the vf2 driver doesn't
+        // call this and we hard-reject any caller that does.
+        let _ = (queue_idx, desc_pa, avail_pa, used_pa, queue_size);
+        E_INVAL
+    }
+}
+
+/// Helper: 32-bit MMIO write to `addr` via `VolatilePtr`. Mirrors
+/// the pattern in `runtime::host_fns::host_net_mmio_write32` but
+/// without the extra cap check (the caller above already
+/// cap-checked).
+///
+/// SAFETY: `addr` is a fixed VirtIO-net MMIO register inside the
+/// `is_net_mmio_addr` window (validator-narrowed; INV-3 + INV-20).
+fn write32(addr: u32, val: u32) {
+    // SAFETY: INV-3 + INV-20. addr is from VirtIO MMIO base + a
+    // spec-fixed register offset; the cap check above gates entry
+    // to this helper.
+    unsafe {
+        core::ptr::write_volatile(addr as usize as *mut u32, val);
+    }
+}
+
+fn read32(addr: u32) -> u32 {
+    // SAFETY: same justification as `write32`.
+    unsafe { core::ptr::read_volatile(addr as usize as *const u32) }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// nic_set_mac — driver → kernel "I'm initialized, here's the MAC"
+// ─────────────────────────────────────────────────────────────────
+
+/// `wari::nic_set_mac(mac_low: u32, mac_high: u32) -> i32`.
+///
+/// PR Net-4b — the Tier-2 net driver calls this after it has
+/// successfully completed the VirtIO device init sequence and read
+/// the MAC from device config space. The kernel stores the MAC in
+/// the driver's `Net` pool entry and flips `initialized = true` so
+/// `runtime::run_tier2_net` can observe driver readiness.
+///
+/// Argument encoding: 6-byte MAC packed little-endian as
+/// `mac_low = mac[0..4]` and `mac_high = mac[4..6]` (high 16 bits of
+/// `mac_high` ignored). VirtIO 1.2 §5.1.4 says the MAC bytes are
+/// "the device's MAC address. The mac field is only valid if
+/// VIRTIO_NET_F_MAC has been negotiated" — driver is responsible
+/// for that gate.
+///
+/// Cap-gated by `Net` cap with WRITE rights at slot 0 (the driver's
+/// root cap from `init_root_caps`).
+pub fn nic_set_mac_impl(proc_id: u8, mac_low: u32, mac_high: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_PERM;
+    }
+    // Cap check: driver holds Net + WRITE at slot 0.
+    let cap = {
+        let cs = cspaces();
+        cs[proc_id as usize].slots[0]
+    };
+    if cap.is_empty() {
+        return E_PERM;
+    }
+    if !matches!(cap.kind, ObjectKind::Net) {
+        return E_PERM;
+    }
+    if cap.rights & CAP_RIGHT_WRITE == 0 {
+        return E_PERM;
+    }
+
+    // Update the Net pool entry.
+    let pool_index = cap.pool_index;
+    let pools = object_pools();
+    if let Some(net) = pools.nets.get_mut(pool_index) {
+        net.mac[0] = (mac_low & 0xFF) as u8;
+        net.mac[1] = ((mac_low >> 8) & 0xFF) as u8;
+        net.mac[2] = ((mac_low >> 16) & 0xFF) as u8;
+        net.mac[3] = ((mac_low >> 24) & 0xFF) as u8;
+        net.mac[4] = (mac_high & 0xFF) as u8;
+        net.mac[5] = ((mac_high >> 8) & 0xFF) as u8;
+        net.initialized = true;
+        0
+    } else {
+        E_INVAL
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
 // notification_wait / notification_ack
 // ─────────────────────────────────────────────────────────────────
 

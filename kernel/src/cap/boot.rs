@@ -210,6 +210,56 @@ pub fn init_root_caps() -> Result<(), KernelError> {
         };
     }
     let pools = object_pools();
+
+    // 5c. Allocate a Notification for the NIC IRQ and bind it to
+    //     the platform's NIC IRQ line. PR Net-1 landed the PLIC
+    //     dispatch + bind machinery; PR Net-4c wires it up with
+    //     real allocations now that the net driver actually wants
+    //     to wait on them.
+    let nic_notif_idx = pools.notifications.alloc(super::objects::Notification::new())?;
+    if let Some(notif) = pools.notifications.get_mut(nic_notif_idx) {
+        notif.refcount = 1; // the driver's cap on this notification
+    }
+
+    let _ = pools; // drop borrow before re-acquiring cspaces
+    let cs = cspaces();
+    let net_cs = &mut cs[PROC_ID_TIER2_NET as usize];
+    // SLOT_NIC_NOTIF (= 1) is the second cap in the driver's CSpace.
+    // The driver calls wari::notification_wait(1) to block on
+    // packet-arrival IRQs.
+    net_cs.slots[1] = Cap {
+        badge: 0,
+        parent: CapId::ROOT,
+        generation: 0,
+        pool_index: nic_notif_idx,
+        kind: ObjectKind::Notification,
+        rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
+    };
+    let _ = cs;
+
+    // Bind the IRQ source. QEMU virt routes VirtIO MMIO devices to
+    // PLIC IRQs starting at 1 (per the QEMU virt machine.c); the
+    // 4th VirtIO MMIO device (which is where we put VirtIO-net at
+    // 0x10008000) is IRQ 8. VF2 GMAC IRQ numbers come in Phase 1c.
+    #[cfg(feature = "qemu")]
+    let nic_irq: u32 = 8;
+    #[cfg(feature = "vf2")]
+    let nic_irq: u32 = 0; // sentinel; not used because vf2 driver is stub
+    #[cfg(feature = "qemu")]
+    {
+        crate::mmio::plic::bind_irq_to_notification(
+            nic_irq,
+            nic_notif_idx,
+        )?;
+        crate::mmio::plic::enable_irq(nic_irq, 1)?;
+    }
+    #[cfg(feature = "vf2")]
+    {
+        let _ = nic_irq;
+    }
+
+    let pools = object_pools();
+
     // UART ep refs: 1 for Tier-2 (if mmio_uart), plus 1 per Tier-1
     // instance (if stdout).
     let uart_refs = (tier2_caps.mmio_uart as u16)

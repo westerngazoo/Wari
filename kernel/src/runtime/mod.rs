@@ -84,16 +84,37 @@ pub fn run_noop() -> Result<(), KernelError> {
 /// `KernelError::BadWasm` for any verification, parse, link, or
 /// instantiate failure (R5).
 pub fn run_tier2_net() -> Result<(), KernelError> {
-    use crate::cap::PROC_ID_TIER2_NET;
+    use crate::cap::{object_pools, PROC_ID_TIER2_NET};
     let _net = loader::load_tier2_net(
         net_blob::NET_DRIVER_SIGNED,
         ModuleId::Tier2Net,
         PROC_ID_TIER2_NET,
     )?;
-    // PR Net-4a: instance dropped on return — the driver's `_start`
-    // is a stub, no exports need resolving yet. PR Net-4b installs
-    // a `tier2_net::Tier2NetHandle` singleton so future Tier-1
+    // PR Net-4b: the driver's `_start` ran the VirtIO init sequence
+    // and (on success) called `wari::nic_set_mac`, which set
+    // `Net.initialized = true` and stored the MAC. Read both back
+    // and emit a diagnostic boot line. A zeroed MAC + initialized=false
+    // means VirtIO init failed silently; the boot still proceeds (no
+    // panic — the system is usable without networking).
+    //
+    // Phase-1b net pool index is 0 — `init_root_caps` allocates
+    // exactly one Net pool entry. PR Net-4c will install a
+    // `tier2_net::Tier2NetHandle` singleton so future Tier-1
     // socket calls can re-enter the driver via host fns.
+    let pools = object_pools();
+    if let Some(net) = pools.nets.get(0) {
+        if net.initialized {
+            let m = net.mac;
+            kprintln!(
+                "[net] virtio-net up, mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            );
+        } else {
+            kprintln!("[net] virtio init failed (mac zeroed) — net unavailable");
+        }
+    } else {
+        kprintln!("[net] no net pool entry — init_root_caps failure?");
+    }
     Ok(())
 }
 
