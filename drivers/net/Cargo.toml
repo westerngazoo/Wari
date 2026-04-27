@@ -12,6 +12,22 @@ crate-type = ["cdylib"]
 
 [dependencies]
 
+# smoltcp — embedded TCP/IP stack, no_std, allocation-free in the
+# default-features = false configuration. Phase 1b enables the
+# minimal protocol set: Ethernet medium + IPv4 + TCP + UDP + ICMP.
+# IPv6, DHCP, IGMP, and the higher-level features are off in
+# Phase 1b; future PRs can flip them on as needed.
+#
+# Pinned to a precise minor version for reproducible builds (R8).
+# We accept patch updates within the minor.
+smoltcp = { version = "0.11", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+    "socket-icmp",
+] }
+
 # Per-platform feature gate, mirrors `wari-driver-uart`. Phase 1b ships
 # the qemu (VirtIO-net) variant only; the vf2 (JH7110 GMAC) variant
 # compiles but its `_start` is a stub `loop {}` until PR Net-9
