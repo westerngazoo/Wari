@@ -523,6 +523,104 @@ fn read32(addr: u32) -> u32 {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// nic_queue_notify — kick a virtqueue's QueueNotify register
+// PR Net-4d.
+// ─────────────────────────────────────────────────────────────────
+
+const VIRTIO_MMIO_QUEUE_NOTIFY: u32 = 0x050;
+
+/// `wari::nic_queue_notify(queue_idx) -> i32`.
+///
+/// PR Net-4d — the Tier-2 net driver calls this after writing
+/// new entries into a virtqueue's available ring (or after
+/// repopulating rx descriptors) to tell the device "queue
+/// `queue_idx` has new buffers, look at it." VirtIO 1.2 §4.2.4.1.
+///
+/// Cap-gated by `Net + WRITE` at slot 0. Returns 0 on success,
+/// `E_PERM` on cap denial, `E_INVAL` on bad queue_idx.
+pub fn nic_queue_notify_impl(proc_id: u8, queue_idx: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_PERM;
+    }
+    let cap = {
+        let cs = cspaces();
+        cs[proc_id as usize].slots[0]
+    };
+    if cap.is_empty()
+        || !matches!(cap.kind, ObjectKind::Net)
+        || cap.rights & CAP_RIGHT_WRITE == 0
+    {
+        return E_PERM;
+    }
+    if queue_idx > 1 {
+        return E_INVAL;
+    }
+    #[cfg(feature = "qemu")]
+    {
+        write32(NIC_BASE_FOR_QUEUE_ATTACH + VIRTIO_MMIO_QUEUE_NOTIFY, queue_idx);
+        0
+    }
+    #[cfg(feature = "vf2")]
+    {
+        let _ = queue_idx;
+        E_INVAL
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// lin_mem_base — leak the driver's lin-mem PA so it can compute
+// physical addresses for descriptor entries. PR Net-4d.
+// ─────────────────────────────────────────────────────────────────
+
+/// `wari::lin_mem_base() -> u64`.
+///
+/// Returns the physical address of the calling instance's WASM
+/// linear-memory base. PR Net-4d adds this so the Tier-2 net driver
+/// can compute physical addresses for VirtIO descriptor `addr`
+/// fields (which are PAs, not lin-mem offsets).
+///
+/// **Why this leaks PA to user code (and why it's acceptable here)**:
+/// the Tier-2 net driver is signed code with `Net + WRITE`
+/// authority. Knowing its own lin-mem PA does not expand the kernel
+/// memory it can reach (the WASM sandbox already restricts memory
+/// access to its own lin-mem; PA knowledge doesn't change that).
+/// The leak is bounded: only Net-cap holders learn the address, and
+/// a Net cap mint is gated by INV-19 (Tier-1 cannot hold one). For
+/// VirtIO descriptor setup specifically, the alternative (kernel
+/// translates per-descriptor) would need a per-descriptor host fn
+/// per packet path, which is much more host-fn surface and more
+/// audit complexity.
+///
+/// Cap-gated by `Net + READ` at slot 0. Returns the PA on success;
+/// 0 on cap denial (a real lin-mem base is never 0 since the bump
+/// allocator's arena starts at the kernel's `_runtime_heap_start`,
+/// well above 0x40200000 on QEMU virt).
+pub fn lin_mem_base_impl<T>(caller: &mut wasmi::Caller<'_, T>, proc_id: u8) -> u64 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return 0;
+    }
+    let cap = {
+        let cs = cspaces();
+        cs[proc_id as usize].slots[0]
+    };
+    if cap.is_empty() || !matches!(cap.kind, ObjectKind::Net) {
+        return 0;
+    }
+    if cap.rights & CAP_RIGHT_READ == 0 {
+        return 0;
+    }
+    let memory = match caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+    {
+        Some(m) => m,
+        None => return 0,
+    };
+    let data = memory.data(&*caller);
+    data.as_ptr() as u64
+}
+
+// ─────────────────────────────────────────────────────────────────
 // nic_set_mac — driver → kernel "I'm initialized, here's the MAC"
 // ─────────────────────────────────────────────────────────────────
 

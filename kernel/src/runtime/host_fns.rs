@@ -302,8 +302,9 @@ pub fn register_net_host_fns(
     // driver's proc_id baked into each closure.
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-        cap_revoke_impl, nic_attach_queue_impl, nic_set_mac_impl,
-        notification_ack_impl, notification_wait_impl,
+        cap_revoke_impl, lin_mem_base_impl, nic_attach_queue_impl,
+        nic_queue_notify_impl, nic_set_mac_impl, notification_ack_impl,
+        notification_wait_impl,
     };
     linker
         .func_wrap(
@@ -400,6 +401,31 @@ pub fn register_net_host_fns(
                     &mut caller, pid, queue_idx, desc_off, avail_off,
                     used_off, queue_size,
                 )
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
+    // PR Net-4d — kick the device after the driver has written new
+    // entries into a virtqueue's available ring.
+    linker
+        .func_wrap(
+            "wari",
+            "nic_queue_notify",
+            move |_: Caller<'_, Tier2HostState>, queue_idx: u32| -> i32 {
+                nic_queue_notify_impl(pid, queue_idx)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
+    // PR Net-4d — return the driver's lin-mem PA so the driver can
+    // compute physical addresses for VirtIO descriptor `addr`
+    // fields. Cap-gated by Net + READ; returns 0 on cap denial.
+    linker
+        .func_wrap(
+            "wari",
+            "lin_mem_base",
+            move |mut caller: Caller<'_, Tier2HostState>| -> u64 {
+                lin_mem_base_impl(&mut caller, pid)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;

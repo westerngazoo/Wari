@@ -177,8 +177,6 @@ extern "C" {
     /// passes lin-mem offsets; the kernel translates to physical
     /// addresses and writes the VirtIO MMIO queue config registers.
     /// PR Net-4c host fn.
-    ///
-    /// Returns 0 on success, negative errno on failure.
     #[link_name = "nic_attach_queue"]
     fn wari_nic_attach_queue(
         queue_idx: u32,
@@ -187,6 +185,19 @@ extern "C" {
         used_off: u32,
         queue_size: u32,
     ) -> i32;
+
+    /// Kick the device's QueueNotify register for `queue_idx`
+    /// (0 = rx, 1 = tx) after the driver has updated the available
+    /// ring. PR Net-4d host fn.
+    #[link_name = "nic_queue_notify"]
+    fn wari_nic_queue_notify(queue_idx: u32) -> i32;
+
+    /// Return the driver's WASM lin-mem physical address. Used by
+    /// the driver to compute PAs for VirtIO descriptor `addr`
+    /// fields (which are PAs, not lin-mem offsets). PR Net-4d
+    /// host fn. Cap-gated by Net + READ; returns 0 on cap denial.
+    #[link_name = "lin_mem_base"]
+    fn wari_lin_mem_base() -> u64;
 }
 
 // ── Virtqueue ring storage (PR Net-4c) ───────────────────────────
@@ -265,6 +276,334 @@ fn attach_queue(
     } else {
         Err(())
     }
+}
+
+// ── Packet buffers (PR Net-4d) ───────────────────────────────────
+//
+// Phase-1b ships 8 rx buffers + 1 tx scratch. Each is sized to
+// hold a full Ethernet frame (1518 bytes = 14 hdr + 1500 mtu + 4
+// crc) plus the 12-byte VirtIO-net header (§5.1.6) — round to
+// 1536 for alignment headroom. Total: 8 * 1536 + 1 * 1536 =
+// 14 KiB of static lin-mem.
+
+const ETH_FRAME_MAX: usize = 1536;
+const RX_BUF_COUNT: usize = QUEUE_SIZE as usize;
+
+/// VirtIO descriptor flag — buffer is device-write (rx).
+const VIRTQ_DESC_F_WRITE: u16 = 0x2;
+
+/// VirtIO-net packet header per §5.1.6. The device prepends this
+/// to every frame on rx, and expects it on every tx frame. We
+/// negotiated zero protocol features so all 12 bytes are zero on
+/// our tx, and the device's rx headers are ignored by us
+/// (smoltcp in PR Net-5 will pull a frame past the header).
+#[allow(dead_code)]
+const VIRTIO_NET_HDR_LEN: usize = 12;
+
+#[repr(C, align(8))]
+pub struct PacketBuffer {
+    pub bytes: [u8; ETH_FRAME_MAX],
+}
+
+static mut RX_BUFS: [PacketBuffer; RX_BUF_COUNT] = [const {
+    PacketBuffer { bytes: [0; ETH_FRAME_MAX] }
+}; RX_BUF_COUNT];
+/// Convenience scratch for callers that don't supply their own
+/// buffer. Currently unused by the driver itself; PR Net-5's
+/// smoltcp wrapper (or PR Net-6's socket-IPC marshaller) writes
+/// frames here and calls `tx_send(addr_of_mut!(TX_BUF) as u32,
+/// len)`. Kept exported so it survives optimization.
+#[no_mangle]
+pub static mut TX_BUF: PacketBuffer = PacketBuffer { bytes: [0; ETH_FRAME_MAX] };
+
+/// Driver-side ring index tracking. Phase-1b keeps it simple — no
+/// wraparound logic beyond the `% QUEUE_SIZE` masking; rx_used_seen
+/// monotonically advances and the kernel's idle loop (Phase-2+)
+/// would call `rx_pop()` repeatedly until it returns 0.
+static mut RX_USED_SEEN: u16 = 0;
+static mut RX_AVAIL_NEXT: u16 = 0;
+static mut TX_USED_SEEN: u16 = 0;
+
+/// Write a 16-bit little-endian value to a lin-mem offset.
+fn write_u16_le(off: u32, val: u16) {
+    let p = off as *mut u8;
+    // SAFETY: caller passes a valid offset within our lin-mem;
+    // wasmi traps on OOB. Two byte stores compile to a single
+    // wasm i32.store16.
+    unsafe {
+        p.write(val as u8);
+        p.add(1).write((val >> 8) as u8);
+    }
+}
+
+#[allow(dead_code)]
+fn read_u16_le(off: u32) -> u16 {
+    let p = off as *const u8;
+    // SAFETY: same as write_u16_le.
+    unsafe { p.read() as u16 | ((p.add(1).read() as u16) << 8) }
+}
+
+/// Write a 32-bit little-endian value to a lin-mem offset.
+fn write_u32_le(off: u32, val: u32) {
+    let p = off as *mut u8;
+    // SAFETY: same as write_u16_le.
+    unsafe {
+        p.write(val as u8);
+        p.add(1).write((val >> 8) as u8);
+        p.add(2).write((val >> 16) as u8);
+        p.add(3).write((val >> 24) as u8);
+    }
+}
+
+#[allow(dead_code)]
+fn read_u32_le(off: u32) -> u32 {
+    let p = off as *const u8;
+    // SAFETY: same as write_u32_le.
+    unsafe {
+        p.read() as u32
+            | ((p.add(1).read() as u32) << 8)
+            | ((p.add(2).read() as u32) << 16)
+            | ((p.add(3).read() as u32) << 24)
+    }
+}
+
+/// Write a 64-bit little-endian value to a lin-mem offset. Used
+/// for VirtIO descriptor `addr` fields.
+fn write_u64_le(off: u32, val: u64) {
+    let p = off as *mut u8;
+    // SAFETY: same as write_u16_le.
+    unsafe {
+        for i in 0..8 {
+            p.add(i).write((val >> (i * 8)) as u8);
+        }
+    }
+}
+
+/// Build a VirtIO descriptor at `desc_off + idx*16` pointing at a
+/// packet buffer.
+///
+/// VirtIO 1.2 §2.6.5:
+///   struct virtq_desc { le64 addr; le32 len; le16 flags; le16 next; }
+fn write_desc(desc_off: u32, idx: u16, buf_pa: u64, len: u32, flags: u16, next: u16) {
+    let off = desc_off + (idx as u32) * 16;
+    write_u64_le(off, buf_pa);          // addr
+    write_u32_le(off + 8, len);         // len
+    write_u16_le(off + 12, flags);      // flags
+    write_u16_le(off + 14, next);       // next
+}
+
+/// Populate the rx queue: build 8 descriptors, each pointing at a
+/// distinct rx buffer and flagged WRITE (device writes incoming
+/// packets here). Add all 8 indices to the available ring, advance
+/// `avail.idx`, kick QueueNotify(0).
+///
+/// Called once from `init_virtio` after queue attach + before
+/// DRIVER_OK. After this, the device may write incoming packets
+/// to our buffers; until something calls `rx_pop` the packets
+/// pile up in the used ring (Phase-1b polling, Phase-2+ adds an
+/// idle loop or worker to drain them).
+fn populate_rx() -> Result<(), ()> {
+    // SAFETY: extern host-fn — kernel cap-checks Net + READ. The
+    // returned PA is the WASM lin-mem base in kernel-physical
+    // address space. Returns 0 on cap denial.
+    let lin_base = unsafe { wari_lin_mem_base() };
+    if lin_base == 0 {
+        return Err(());
+    }
+
+    // Offsets in lin-mem.
+    let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
+    let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
+    // SAFETY: addr_of_mut! over indexed static doesn't deref, but
+    // Rust's E0133 still flags the index expression. Single-thread
+    // driver, no data race.
+    let rx_buf0_off =
+        unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
+
+    // Build 8 descriptors, one per rx buffer.
+    for i in 0..RX_BUF_COUNT {
+        let buf_pa = lin_base + (rx_buf0_off as u64) + (i as u64) * (ETH_FRAME_MAX as u64);
+        write_desc(
+            rx_desc_off,
+            i as u16,
+            buf_pa,
+            ETH_FRAME_MAX as u32,
+            VIRTQ_DESC_F_WRITE,
+            0,
+        );
+    }
+
+    // Available ring layout (§2.6.6):
+    //   le16 flags          @ avail_off + 0
+    //   le16 idx            @ avail_off + 2
+    //   le16 ring[QSIZE]    @ avail_off + 4
+    // Phase-1b leaves flags = 0 (no event-idx, no suppression).
+    write_u16_le(rx_avail_off, 0); // flags
+    for i in 0..RX_BUF_COUNT {
+        write_u16_le(rx_avail_off + 4 + (i as u32) * 2, i as u16);
+    }
+    // Set idx LAST — VirtIO §2.6.13.4 requires the entries are
+    // written before idx advances. The host-fn boundary (notify
+    // call below) acts as the memory barrier the spec requires.
+    write_u16_le(rx_avail_off + 2, RX_BUF_COUNT as u16);
+
+    // SAFETY: single-threaded driver context, INV-1 covers exclusivity.
+    unsafe {
+        RX_AVAIL_NEXT = RX_BUF_COUNT as u16;
+    }
+
+    // Kick the device. SAFETY: extern host-fn, kernel cap-checks.
+    let r = unsafe { wari_nic_queue_notify(0) };
+    if r == 0 { Ok(()) } else { Err(()) }
+}
+
+// ── Exported RX/TX helpers (consumed by PR Net-5 / smoltcp) ──────
+
+/// Send a frame from `buf_off` of length `len` bytes. Phase-1b
+/// allows only one in-flight tx at a time (no descriptor pool); the
+/// caller must wait for the previous send to retire before calling
+/// again. Returns 0 on success, -1 on host-fn failure.
+///
+/// Caller is responsible for prepending the 12-byte VirtIO-net
+/// header to the frame (per §5.1.6); Phase-1b's smoltcp wrapper
+/// (PR Net-5) handles this.
+#[no_mangle]
+pub extern "C" fn tx_send(buf_off: u32, len: u32) -> i32 {
+    if len > ETH_FRAME_MAX as u32 {
+        return -1;
+    }
+    // SAFETY: extern host-fn, kernel cap-checks Net + READ.
+    let lin_base = unsafe { wari_lin_mem_base() };
+    if lin_base == 0 {
+        return -1;
+    }
+
+    let tx_desc_off = core::ptr::addr_of_mut!(TX_DESC) as u32;
+    let tx_avail_off = core::ptr::addr_of_mut!(TX_AVAIL) as u32;
+
+    // Always reuse descriptor 0 — Phase-1b has no in-flight queue.
+    let desc_idx: u16 = 0;
+    let buf_pa = lin_base + (buf_off as u64);
+
+    // VIRTQ_DESC_F_WRITE not set on tx — device reads, doesn't
+    // write. flags = 0.
+    write_desc(tx_desc_off, desc_idx, buf_pa, len, 0, 0);
+
+    // Available ring: bump idx to publish the descriptor.
+    let avail_idx = unsafe {
+        let new_idx = (TX_USED_SEEN.wrapping_add(1)) % QUEUE_SIZE as u16;
+        write_u16_le(
+            tx_avail_off + 4 + ((new_idx % QUEUE_SIZE as u16) as u32) * 2,
+            desc_idx,
+        );
+        new_idx
+    };
+    write_u16_le(tx_avail_off + 2, avail_idx.wrapping_add(1));
+
+    // SAFETY: extern host-fn, kernel cap-checks.
+    unsafe { wari_nic_queue_notify(1) }
+}
+
+/// Drain the rx used ring. Returns the byte count of the next
+/// received frame in the high 32 bits and the lin-mem offset of
+/// the buffer in the low 32 bits, packed as a single u64. Returns
+/// `0` if no new packets are available since the last `rx_pop`
+/// call.
+///
+/// The buffer pointed to by the returned offset remains owned by
+/// the driver until `rx_recycle` is called with the same desc
+/// index — until then the device has been told the buffer is in
+/// use.
+///
+/// Returns u64 packed as `(buf_off as u64) | ((len as u64) << 32)`.
+/// `0` (== both fields 0) is the "no packets" sentinel — a real
+/// packet always has len > 0 (Ethernet frames carry ≥ 60 bytes
+/// after preamble).
+#[no_mangle]
+pub extern "C" fn rx_pop() -> u64 {
+    let rx_used_off = core::ptr::addr_of_mut!(RX_USED) as u32;
+    let device_idx = read_u16_le(rx_used_off + 2);
+
+    // SAFETY: single-threaded driver, RX_USED_SEEN is local.
+    let seen = unsafe { RX_USED_SEEN };
+    if device_idx == seen {
+        return 0; // no new packets
+    }
+
+    // Read used ring entry at slot `seen % QSIZE`:
+    //   struct virtq_used_elem { le32 id; le32 len; }
+    let slot = (seen as u32) % QUEUE_SIZE;
+    let elem_off = rx_used_off + 4 + slot * 8;
+    let desc_id = read_u32_le(elem_off);
+    let used_len = read_u32_le(elem_off + 4);
+
+    // SAFETY: single-threaded.
+    unsafe {
+        RX_USED_SEEN = seen.wrapping_add(1);
+    }
+
+    // Locate the buffer this descriptor points at. Descriptor i
+    // points at RX_BUFS[i] in our layout, so desc_id = buffer index.
+    if (desc_id as usize) >= RX_BUF_COUNT {
+        return 0; // device returned an unexpected desc_id
+    }
+    // SAFETY: addr_of_mut! doesn't deref; the index expression
+    // requires unsafe. Single-thread driver, no race.
+    let buf_off =
+        unsafe { core::ptr::addr_of_mut!(RX_BUFS[desc_id as usize]) } as u32;
+    (buf_off as u64) | ((used_len as u64) << 32)
+}
+
+/// Recycle a buffer after the caller is done with it. Builds a
+/// fresh rx descriptor at `desc_idx` and adds it to the available
+/// ring so the device can write a new packet there.
+#[no_mangle]
+pub extern "C" fn rx_recycle(desc_idx: u32) -> i32 {
+    if (desc_idx as usize) >= RX_BUF_COUNT {
+        return -1;
+    }
+    // SAFETY: extern host-fn — kernel cap-checks.
+    let lin_base = unsafe { wari_lin_mem_base() };
+    if lin_base == 0 {
+        return -1;
+    }
+
+    let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
+    let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
+    // SAFETY: addr_of_mut! over indexed static doesn't deref, but
+    // Rust's E0133 still flags the index expression. Single-thread
+    // driver, no data race.
+    let rx_buf0_off =
+        unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
+    let buf_pa = lin_base
+        + (rx_buf0_off as u64)
+        + (desc_idx as u64) * (ETH_FRAME_MAX as u64);
+
+    // Rewrite the descriptor (idempotent).
+    write_desc(
+        rx_desc_off,
+        desc_idx as u16,
+        buf_pa,
+        ETH_FRAME_MAX as u32,
+        VIRTQ_DESC_F_WRITE,
+        0,
+    );
+
+    // Append to avail ring.
+    let avail_idx = unsafe {
+        let next = RX_AVAIL_NEXT;
+        write_u16_le(
+            rx_avail_off + 4 + ((next % QUEUE_SIZE as u16) as u32) * 2,
+            desc_idx as u16,
+        );
+        let new_next = next.wrapping_add(1);
+        RX_AVAIL_NEXT = new_next;
+        new_next
+    };
+    write_u16_le(rx_avail_off + 2, avail_idx);
+
+    // SAFETY: extern host-fn.
+    unsafe { wari_nic_queue_notify(0) }
 }
 
 // ── Register access helpers ──────────────────────────────────────
@@ -396,6 +735,14 @@ fn init_virtio() -> Result<[u8; 6], ()> {
     // controlq (didn't negotiate VIRTIO_NET_F_CTRL_VQ).
     attach_queue(0, rx_desc_off, rx_avail_off, rx_used_off)?;
     attach_queue(1, tx_desc_off, tx_avail_off, tx_used_off)?;
+
+    // PR Net-4d — populate the rx queue with descriptors pointing
+    // at our packet buffers. After this the device may start
+    // writing incoming frames; until something calls `rx_pop`
+    // they pile up in the used ring (which is harmless — the
+    // device simply runs out of buffers and drops further packets,
+    // which is the correct degradation mode).
+    populate_rx()?;
 
     // §3.1.1 step 8 — set DRIVER_OK. Device now considers the
     // driver ready and starts honoring the queues. PR Net-4c does
