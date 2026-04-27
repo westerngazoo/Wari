@@ -151,9 +151,23 @@ pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
             unsafe { core::arch::asm!("wfi"); }
         }
     }
-    kprintln!("[sched] all tenants exited, halting");
+    kprintln!("[sched] all tenants exited, idling");
 
+    // PR Net-5b — net idle loop. The Tier-2 net driver's smoltcp
+    // Interface needs periodic poll() calls to process incoming
+    // packets (ARP requests, ICMP echoes, future TCP/UDP). When
+    // `tier2_net::is_installed` is false (net failed to init), we
+    // fall back to the bare wfi loop.
+    let net_up = runtime::tier2_net::is_installed();
+    let mut tick: u64 = 0;
     loop {
+        if net_up {
+            // Logical timestamp — smoltcp uses it for retransmit
+            // intervals; physical wall-clock alignment isn't
+            // required, only monotonicity.
+            let _ = unsafe { runtime::tier2_net::poll(tick) };
+            tick = tick.saturating_add(10);
+        }
         // SAFETY: INV-7 — wfi is an S-mode instruction; we are in S-mode.
         unsafe { core::arch::asm!("wfi"); }
     }
