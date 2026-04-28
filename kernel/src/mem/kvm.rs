@@ -28,6 +28,25 @@ use wari_mem::page_table::{
 /// Phase 1 alongside VF2 support).
 const UART_MMIO_BASE: usize = 0x1000_0000;
 
+/// PLIC MMIO base — Platform-Level Interrupt Controller. Standard
+/// RV64 layout at `0x0c000000`; covers 0x400000 bytes (4 MiB) of
+/// register space (priority + pending + enable + threshold + claim
+/// for up to 1024 IRQ sources × 16K hart contexts). Phase-1b uses
+/// only the first hart's contexts but maps the full window so PLIC
+/// register access from `mmio::plic::*` doesn't fault.
+/// Added in PR Net-1 fix.
+const PLIC_MMIO_BASE: usize = 0x0c00_0000;
+const PLIC_MMIO_LEN:  usize = 0x40_0000;
+
+/// VirtIO MMIO transport range on QEMU virt — `0x10001000..0x10009000`,
+/// 8 transport slots × 0x1000 each. The Phase-1b net driver uses the
+/// 4th slot at `0x10008000`. Cfg-gated since VF2 has no VirtIO MMIO.
+/// Added in PR Net-3 fix (deferred mapping).
+#[cfg(feature = "qemu")]
+const VIRTIO_MMIO_BASE: usize = 0x1000_1000;
+#[cfg(feature = "qemu")]
+const VIRTIO_MMIO_LEN:  usize = 0x8000;
+
 // ── Linker symbol accessors ─────────────────────────────────────
 
 extern "C" {
@@ -144,6 +163,10 @@ pub fn init() -> Result<(), KernelError> {
     // cacheability is a PMA property, not a PTE property. Identity-map
     // the page RW and trust the platform PMA configuration.
     map_range(root, UART_MMIO_BASE, UART_MMIO_BASE + PAGE_SIZE, KERNEL_RW)?;
+
+    map_range(root, PLIC_MMIO_BASE, PLIC_MMIO_BASE + PLIC_MMIO_LEN, KERNEL_RW)?;
+    #[cfg(feature = "qemu")]
+    map_range(root, VIRTIO_MMIO_BASE, VIRTIO_MMIO_BASE + VIRTIO_MMIO_LEN, KERNEL_RW)?;
 
     kprintln!("  [kvm] root pt at {:#x}", root);
 
