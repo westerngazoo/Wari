@@ -44,6 +44,17 @@ static mut HEAP_CURSOR: usize = 0;
 /// Exclusive upper bound of the arena.
 static mut HEAP_END: usize = 0;
 
+/// Diagnostic accessor — returns (cursor, end). Used for debug
+/// kprintlns; safe under INV-1.
+pub fn diagnostic_state() -> (usize, usize) {
+    // SAFETY: INV-1 single-hart, reads only.
+    unsafe {
+        let c = core::ptr::read_volatile(core::ptr::addr_of!(HEAP_CURSOR));
+        let e = core::ptr::read_volatile(core::ptr::addr_of!(HEAP_END));
+        (c, e)
+    }
+}
+
 /// Bump allocator type — zero-sized; all state lives in the static
 /// pair above. One instance, registered as `#[global_allocator]`.
 pub struct BumpAllocator;

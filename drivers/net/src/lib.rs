@@ -606,6 +606,131 @@ pub extern "C" fn rx_recycle(desc_idx: u32) -> i32 {
     unsafe { wari_nic_queue_notify(0) }
 }
 
+// ── smoltcp Interface (PR Net-5b) ────────────────────────────────
+//
+// `nic_iface::init(mac)` is called once from `_start` after VirtIO
+// init succeeds. It builds a `smoltcp::iface::Interface` configured
+// with our static IP and the device-supplied MAC, plus a small
+// SocketSet backing array. After this, the kernel idle loop calls
+// the exported `poll(timestamp_ms)` function which advances
+// `Interface::poll`.
+
+#[cfg(feature = "qemu")]
+mod nic_iface {
+    use core::ptr::addr_of_mut;
+    use smoltcp::iface::{Config, Interface, SocketSet, SocketStorage};
+    use smoltcp::time::Instant;
+    use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
+
+    use super::phy::NicDevice;
+
+    /// Phase-1b QEMU demo IP (per net design doc §10 Q1). QEMU
+    /// slirp's default subnet is 192.168.122.0/24 with gateway
+    /// 192.168.122.1; we take 192.168.122.10.
+    const IP_OCTETS: [u8; 4] = [192, 168, 122, 10];
+    const IP_PREFIX_LEN: u8 = 24;
+
+    /// SocketSet backing storage. Phase-1b reserves 4 socket slots
+    /// (none populated until PR Net-6 wires the Tier-1 socket host
+    /// fns). Larger workloads bump this constant later.
+    const SOCKET_BACKING_LEN: usize = 4;
+
+    static mut INTERFACE: Option<Interface> = None;
+    static mut DEVICE: NicDevice = NicDevice::new();
+    static mut SOCKETS: Option<SocketSet<'static>> = None;
+    static mut SOCKETS_STORAGE: [SocketStorage<'static>; SOCKET_BACKING_LEN] =
+        [const { SocketStorage::EMPTY }; SOCKET_BACKING_LEN];
+
+    /// Build the smoltcp `Interface`. Called once from `_start`.
+    ///
+    /// Returns `Err(())` if the IP push fails (storage exhausted).
+    /// Phase 1b only pushes one CIDR so this can't actually fail,
+    /// but the Result keeps the contract honest.
+    pub fn init(mac: [u8; 6]) -> Result<(), ()> {
+        let hwaddr = EthernetAddress::from_bytes(&mac);
+        let config = Config::new(HardwareAddress::Ethernet(hwaddr));
+        // SAFETY: `_start` runs once at boot; INV-1 / INV-14
+        // generalized — this static-mut access happens before any
+        // poll. `addr_of_mut!(DEVICE).as_mut()` is sound because
+        // DEVICE is a valid initialized static.
+        let mut iface = unsafe {
+            Interface::new(
+                config,
+                addr_of_mut!(DEVICE).as_mut().expect("DEVICE static is non-null"),
+                Instant::from_millis(0),
+            )
+        };
+        let mut push_ok = true;
+        iface.update_ip_addrs(|addrs| {
+            if addrs
+                .push(IpCidr::new(
+                    IpAddress::v4(IP_OCTETS[0], IP_OCTETS[1], IP_OCTETS[2], IP_OCTETS[3]),
+                    IP_PREFIX_LEN,
+                ))
+                .is_err()
+            {
+                push_ok = false;
+            }
+        });
+        if !push_ok {
+            return Err(());
+        }
+        // SAFETY: same as Interface::new above.
+        unsafe {
+            INTERFACE = Some(iface);
+            SOCKETS = Some(SocketSet::new(&mut SOCKETS_STORAGE[..]));
+        }
+        Ok(())
+    }
+
+    /// Advance smoltcp's poll cycle once. `timestamp_ms` is a
+    /// logical monotonic counter from the kernel idle loop; not
+    /// wall-clock-aligned, but smoltcp only requires monotonicity
+    /// for retransmit decisions.
+    ///
+    /// Returns `true` if any state changed (incoming packet
+    /// processed, outgoing packet emitted, ARP entry updated).
+    pub fn poll(timestamp_ms: u64) -> bool {
+        // SAFETY: single-thread driver; INV-1 generalized.
+        unsafe {
+            let iface = match &mut *addr_of_mut!(INTERFACE) {
+                Some(i) => i,
+                None => return false,
+            };
+            let sockets = match &mut *addr_of_mut!(SOCKETS) {
+                Some(s) => s,
+                None => return false,
+            };
+            let device = addr_of_mut!(DEVICE)
+                .as_mut()
+                .expect("DEVICE static is non-null");
+            iface.poll(Instant::from_millis(timestamp_ms as i64), device, sockets)
+        }
+    }
+}
+
+/// `wari_driver_net::poll(timestamp_ms: u64) -> i32`.
+///
+/// Kernel idle-loop entry point. Returns 1 if smoltcp processed
+/// any state, 0 if idle. Negative on init failure (vf2 stub or
+/// nic_iface not initialized).
+#[no_mangle]
+pub extern "C" fn poll(timestamp_ms: u64) -> i32 {
+    #[cfg(feature = "qemu")]
+    {
+        if nic_iface::poll(timestamp_ms) {
+            1
+        } else {
+            0
+        }
+    }
+    #[cfg(feature = "vf2")]
+    {
+        let _ = timestamp_ms;
+        -1
+    }
+}
+
 // ── smoltcp Device trait impl (PR Net-5a) ────────────────────────
 //
 // `NicDevice` is a zero-sized handle wrapping the static rx/tx
@@ -984,6 +1109,15 @@ pub extern "C" fn _start() {
         let mac_high = (mac[4] as u32) | ((mac[5] as u32) << 8);
         // SAFETY: extern host-fn call. Kernel cap-checks Net+WRITE.
         let _ = unsafe { wari_nic_set_mac(mac_low, mac_high) };
+
+        // PR Net-5b — bring up the smoltcp Interface. Failure here
+        // means the kernel's run_tier2_net will see Net.initialized
+        // = true (we already set it via nic_set_mac) but
+        // tier2_net::is_installed will be false (poll export
+        // resolves but its first call hits a None Interface and
+        // returns 0). The kernel logs "[net] virtio init failed"
+        // / "[net] smoltcp interface up" lines accordingly.
+        let _ = nic_iface::init(mac);
     }
     // The vf2 path is a Phase-1c stub — return immediately, leave
     // Net.initialized = false on the kernel side. The kernel logs

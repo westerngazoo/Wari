@@ -30,6 +30,7 @@ pub mod loader;
 pub mod net_blob;
 pub mod noop_blob;
 pub mod sign;
+pub mod tier2_net;
 pub mod tier2_uart;
 pub mod uart_blob;
 pub mod wasi;
@@ -85,35 +86,51 @@ pub fn run_noop() -> Result<(), KernelError> {
 /// instantiate failure (R5).
 pub fn run_tier2_net() -> Result<(), KernelError> {
     use crate::cap::{object_pools, PROC_ID_TIER2_NET};
-    let _net = loader::load_tier2_net(
+    let net_inst = loader::load_tier2_net(
         net_blob::NET_DRIVER_SIGNED,
         ModuleId::Tier2Net,
         PROC_ID_TIER2_NET,
     )?;
-    // PR Net-4b: the driver's `_start` ran the VirtIO init sequence
-    // and (on success) called `wari::nic_set_mac`, which set
-    // `Net.initialized = true` and stored the MAC. Read both back
-    // and emit a diagnostic boot line. A zeroed MAC + initialized=false
-    // means VirtIO init failed silently; the boot still proceeds (no
-    // panic — the system is usable without networking).
-    //
-    // Phase-1b net pool index is 0 — `init_root_caps` allocates
-    // exactly one Net pool entry. PR Net-4c will install a
-    // `tier2_net::Tier2NetHandle` singleton so future Tier-1
-    // socket calls can re-enter the driver via host fns.
+    // The driver's `_start` ran the VirtIO init sequence; on
+    // success it called `wari::nic_set_mac` (which set
+    // Net.initialized = true) AND configured the smoltcp
+    // Interface internally (PR Net-5b). On failure init_virtio
+    // returns silently and Net.initialized stays false.
     let pools = object_pools();
-    if let Some(net) = pools.nets.get(0) {
-        if net.initialized {
+    let initialized = pools.nets.get(0).is_some_and(|n| n.initialized);
+
+    if initialized {
+        if let Some(net) = pools.nets.get(0) {
             let m = net.mac;
             kprintln!(
                 "[net] virtio-net up, mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 m[0], m[1], m[2], m[3], m[4], m[5]
             );
-        } else {
-            kprintln!("[net] virtio init failed (mac zeroed) — net unavailable");
         }
+
+        // PR Net-5b — resolve the driver's `poll` export and
+        // install the Tier2NetHandle singleton. The kmain idle
+        // loop calls `tier2_net::poll(tick)` periodically to
+        // drive smoltcp's Interface::poll.
+        let loader::Tier2Instance { instance, store, .. } = net_inst;
+        let poll_fn = instance
+            .get_typed_func::<u64, i32>(&store, "poll")
+            .map_err(|_| KernelError::DriverError)?;
+        let handle = tier2_net::Tier2NetHandle {
+            instance,
+            store,
+            poll_fn,
+        };
+        // SAFETY: INV-1 (single-hart) + INV-8 (boot-time post-init)
+        // + one-time install pattern. `kmain` orders this call
+        // before entering the idle loop that calls `tier2_net::poll`.
+        unsafe { tier2_net::install(handle) };
+        kprintln!("[net] smoltcp interface up, listening on 192.168.122.10/24");
     } else {
-        kprintln!("[net] no net pool entry — init_root_caps failure?");
+        kprintln!("[net] virtio init failed (mac zeroed) — net unavailable");
+        // Drop net_inst here; kmain will skip the idle-loop poll
+        // calls via `tier2_net::is_installed`.
+        drop(net_inst);
     }
     Ok(())
 }
