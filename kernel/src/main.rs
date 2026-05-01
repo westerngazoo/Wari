@@ -32,6 +32,7 @@ mod kputc;
 mod mem;
 mod mmio;
 mod runtime;
+mod sbi;
 mod sched;
 mod trap;
 mod validate;
@@ -165,25 +166,29 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
             unsafe { core::arch::asm!("wfi"); }
         }
     }
-    kprintln!("[sched] all tenants exited, idling");
+    kprintln!("[sched] all tenants exited, idling (Ctrl-R = reboot)");
 
-    // PR Net-5b — net idle loop. The Tier-2 net driver's smoltcp
-    // Interface needs periodic poll() calls to process incoming
-    // packets (ARP requests, ICMP echoes, future TCP/UDP). When
-    // `tier2_net::is_installed` is false (net failed to init), we
-    // fall back to the bare wfi loop.
+    // Idle loop. Two responsibilities:
+    //   1. Drive smoltcp's Interface::poll if the net driver is
+    //      installed (Phase-1b idle-loop polling per PR Net-5b).
+    //   2. Watch UART RX for Ctrl-R (0x12) → SBI cold reboot. This
+    //      restores goose-os's reset-key affordance. Busy-polled
+    //      because UART RX isn't yet routed through the PLIC; a
+    //      future PR can wire IRQ-driven `wfi` to drop the busy
+    //      cost.
     let net_up = runtime::tier2_net::is_installed();
     let mut tick: u64 = 0;
     loop {
         if net_up {
-            // Logical timestamp — smoltcp uses it for retransmit
-            // intervals; physical wall-clock alignment isn't
-            // required, only monotonicity.
             let _ = unsafe { runtime::tier2_net::poll(tick) };
             tick = tick.saturating_add(10);
         }
-        // SAFETY: INV-7 — wfi is an S-mode instruction; we are in S-mode.
-        unsafe { core::arch::asm!("wfi"); }
+        if let Some(b) = mmio::uart_ns16550::try_read_byte() {
+            if b == 0x12 {
+                kprintln!("\r\n[reboot] Ctrl-R received, restarting via SBI...");
+                sbi::system_reset();
+            }
+        }
     }
 }
 

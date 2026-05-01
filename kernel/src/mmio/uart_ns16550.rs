@@ -141,3 +141,25 @@ pub fn putc(byte: u8) {
     while lsr.read() & LSR_THRE == 0 {}
     thr.write(byte);
 }
+
+/// Bit 0 of LSR: data ready (one or more bytes in the RX FIFO).
+const LSR_DR: u8 = 1 << 0;
+
+/// Non-blocking RX poll. Returns `Some(byte)` if a byte is waiting
+/// in the RX FIFO, `None` otherwise.
+///
+/// Used by the kmain idle loop's Ctrl-R reboot detection. A future
+/// PR will swap this for an IRQ-driven path (UART RX-Available IRQ
+/// via PLIC → `wfi` wakes on byte) to drop the busy-poll cost.
+pub fn try_read_byte() -> Option<u8> {
+    // SAFETY: INV-3.
+    let lsr = unsafe { reg(LSR_REG) };
+    if lsr.read() & LSR_DR == 0 {
+        return None;
+    }
+    // RBR shares THR's address (offset 0); read = receive,
+    // write = transmit.
+    // SAFETY: INV-3.
+    let rbr = unsafe { reg(THR_REG) };
+    Some(rbr.read())
+}
