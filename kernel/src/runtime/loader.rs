@@ -138,7 +138,8 @@ pub fn load_tier2(
     // structurally a validate + link step. If a future Tier-2 module
     // ships with a start fn it runs here under wasmi's default budget.
     let instance = linker
-        .instantiate_and_start(&mut store, &module)
+        .instantiate(&mut store, &module)
+        .and_then(|pre| pre.start(&mut store))
         .map_err(|_| KernelError::BadWasm)?;
 
     Ok(Tier2Instance {
@@ -181,7 +182,8 @@ pub fn load_tier2_net(
     host_fns::register_net_host_fns(&mut linker, proc_id)?;
 
     let instance = linker
-        .instantiate_and_start(&mut store, &module)
+        .instantiate(&mut store, &module)
+        .and_then(|pre| pre.start(&mut store))
         .map_err(|_| KernelError::BadWasm)?;
 
     Ok(Tier2Instance {
@@ -254,7 +256,8 @@ pub fn load_tier1(
     // `_start` explicitly via `Instance::get_typed_func` so the
     // `i32_exit` Error from `proc_exit` propagates as a clean Result.
     let instance = linker
-        .instantiate_and_start(&mut store, &module)
+        .instantiate(&mut store, &module)
+        .and_then(|pre| pre.start(&mut store))
         .map_err(|_| KernelError::BadWasm)?;
 
     Ok(Tier1Instance {

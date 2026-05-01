@@ -39,7 +39,8 @@ pub fn instantiate_noop() -> Result<(), KernelError> {
     // so this is structurally a no-op past validation. Any wasmi error
     // folds to `BadWasm` (R5: typed error, never panic).
     let _instance = linker
-        .instantiate_and_start(&mut store, &module)
+        .instantiate(&mut store, &module)
+        .and_then(|pre| pre.start(&mut store))
         .map_err(|_| KernelError::BadWasm)?;
 
     Ok(())

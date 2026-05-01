@@ -45,16 +45,20 @@ const BUILD: &str = match option_env!("WARI_BUILD") {
     None => "dev",
 };
 
-/// Linker-defined boot hart id. The value of this symbol (read as
-/// the address of an absolute symbol) is `_boot_hart_id` from the
-/// active linker script — `0` on QEMU virt, `1` on VF2. We use the
-/// linker's truth rather than the `a0` passed by OpenSBI because
-/// some OpenSBI ports (notably VF2's StarFive build) leave `a0`
-/// with junk by the time the Rust prologue saves it for kprintln,
-/// producing nonsense like `hart 100000` at boot.
-extern "C" {
-    static _boot_hart_id: u8;
-}
+/// Boot hart id, selected at compile time. Mirrors the linker
+/// script's `_boot_hart_id` (`0` on QEMU virt, `1` on VF2) — both
+/// truths come from the same `--features vf2` build switch, so
+/// keeping them in sync is a build-time concern. We don't read the
+/// `a0` passed by OpenSBI because some OpenSBI ports (notably
+/// VF2's StarFive build) leave `a0` with junk by the time the Rust
+/// prologue saves it for kprintln, producing nonsense like
+/// `hart 100000` at boot. We don't read the linker symbol itself
+/// because PC-relative addressing in the medany code model can't
+/// reach an absolute symbol at value 0/1 from the kernel base.
+#[cfg(feature = "vf2")]
+const BOOT_HART_ID: usize = 1;
+#[cfg(not(feature = "vf2"))]
+const BOOT_HART_ID: usize = 0;
 
 /// Kernel entry point, called from `boot.S` after OpenSBI hands
 /// control to S-mode and the boot stack is set up. Never returns.
@@ -67,10 +71,7 @@ extern "C" {
 #[no_mangle]
 pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
     mmio::uart_ns16550::init();
-    // SAFETY: INV-4. `_boot_hart_id` is a linker-defined absolute
-    // symbol; the symbol's *address* IS its value (0 or 1).
-    let hart_id = unsafe { &_boot_hart_id as *const u8 as usize };
-    kprintln!("Wari v0 build {} boot OK, hart {}", BUILD, hart_id);
+    kprintln!("Wari v0 build {} boot OK, hart {}", BUILD, BOOT_HART_ID);
 
     if let Err(e) = mem::kvm::init() {
         kprintln!("MMU init failed: {:?}", e);

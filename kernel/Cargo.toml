@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 wari-abi = { path = "../abi-shared" }
 wari-mem = { path = "../wari-mem" }
-wasmi = { version = "=1.0.9", default-features = false }
+wasmi = { version = "=0.32.3", default-features = false }
 ed25519-dalek = { version = "2", default-features = false }
 
 [features]
