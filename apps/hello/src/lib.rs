@@ -70,10 +70,13 @@ mod wasi {
     }
 }
 
-/// The exact bytes Phase 0 demands on the UART (`docs/testing.md`
-/// integration `hello_wasm.rs`). The trailing `\n` matches the marker
-/// the integration test grep'es for.
-const HELLO: &[u8] = b"Hello from Wari\n";
+/// The exact bytes the UART expects. NS16550 (and the JH7110
+/// DesignWare 8250 on VF2) ship raw bytes — no LF→CRLF
+/// translation. Without the `\r`, the next print after this one
+/// stays at column 15 on the terminal, indenting the kernel's
+/// `[t1:N] exit(0)` line. Sending `\r\n` returns the cursor to
+/// column 0 like a real terminal expects.
+const HELLO: &[u8] = b"Hello from Wari\r\n";
 
 /// WASI module entry point. Wasmi calls this as the `_start` export
 /// after instantiation. Never returns.

@@ -44,6 +44,17 @@ const BUILD: &str = match option_env!("WARI_BUILD") {
     None => "dev",
 };
 
+/// Linker-defined boot hart id. The value of this symbol (read as
+/// the address of an absolute symbol) is `_boot_hart_id` from the
+/// active linker script — `0` on QEMU virt, `1` on VF2. We use the
+/// linker's truth rather than the `a0` passed by OpenSBI because
+/// some OpenSBI ports (notably VF2's StarFive build) leave `a0`
+/// with junk by the time the Rust prologue saves it for kprintln,
+/// producing nonsense like `hart 100000` at boot.
+extern "C" {
+    static _boot_hart_id: u8;
+}
+
 /// Kernel entry point, called from `boot.S` after OpenSBI hands
 /// control to S-mode and the boot stack is set up. Never returns.
 ///
@@ -53,8 +64,11 @@ const BUILD: &str = match option_env!("WARI_BUILD") {
 /// off, only the kernel image mapped. `.bss` has already been zeroed
 /// by `boot.S`.
 #[no_mangle]
-pub extern "C" fn kmain(hart_id: usize, _dtb_addr: usize) -> ! {
+pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
     mmio::uart_ns16550::init();
+    // SAFETY: INV-4. `_boot_hart_id` is a linker-defined absolute
+    // symbol; the symbol's *address* IS its value (0 or 1).
+    let hart_id = unsafe { &_boot_hart_id as *const u8 as usize };
     kprintln!("Wari v0 build {} boot OK, hart {}", BUILD, hart_id);
 
     if let Err(e) = mem::kvm::init() {
