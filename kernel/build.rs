@@ -26,4 +26,11 @@ fn main() {
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rerun-if-changed=linker-vf2.ld");
     println!("cargo:rerun-if-changed=src/boot.S");
+    // CRITICAL: without this, cargo's incremental build cache does
+    // NOT detect WARI_BUILD changes, and the kernel binary embeds
+    // a stale build number forever. Bumping .build_number then
+    // running `cargo build` is a silent no-op without this line.
+    // Diagnosed May 2026 after VF2 stayed at "build 19" across ~10
+    // deploys despite local + origin showing later numbers.
+    println!("cargo:rerun-if-env-changed=WARI_BUILD");
 }

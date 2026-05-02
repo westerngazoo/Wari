@@ -45,6 +45,34 @@ const BUILD: &str = match option_env!("WARI_BUILD") {
     None => "dev",
 };
 
+/// Greppable build tag baked into the kernel ELF so `wari status`
+/// (and any external tooling) can extract the actual build number
+/// the binary was compiled with — independent of `.build_number`,
+/// which lives in the working tree and can drift. Format:
+/// `WARI-BUILD-TAG-<n>` followed by a NUL byte.
+///
+/// `#[used]` keeps the link-time GC from stripping it; the unique
+/// `WARI-BUILD-TAG-` prefix makes `strings | grep` unambiguous.
+#[used]
+#[no_mangle]
+pub static WARI_BUILD_TAG: [u8; 64] = {
+    let mut buf = [0u8; 64];
+    let prefix = b"WARI-BUILD-TAG-";
+    let suffix = BUILD.as_bytes();
+    let mut i = 0;
+    while i < prefix.len() {
+        buf[i] = prefix[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < suffix.len() && i < buf.len() - 1 {
+        buf[i] = suffix[j];
+        i += 1;
+        j += 1;
+    }
+    buf
+};
+
 /// Boot hart id, selected at compile time. Mirrors the linker
 /// script's `_boot_hart_id` (`0` on QEMU virt, `1` on VF2) — both
 /// truths come from the same `--features vf2` build switch, so

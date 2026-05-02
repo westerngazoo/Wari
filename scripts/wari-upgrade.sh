@@ -12,6 +12,23 @@
 WARI_DIR="/root/wari"
 WARI_KERNEL="/boot/kernel.bin"
 
+# Extract the build number embedded in a kernel binary by grepping
+# for the `WARI-BUILD-TAG-<n>` rodata string. Trustworthy because it
+# is what the binary was actually compiled with — `.build_number`
+# can drift if cargo's incremental cache misses an env-var change.
+# Prints the number, or "?" if the tag is not present.
+_wari_embedded_build() {
+    local f="$1"
+    [ -s "$f" ] || { echo "?"; return; }
+    local tag
+    tag=$(strings "$f" 2>/dev/null | grep -m1 'WARI-BUILD-TAG-' || true)
+    if [ -z "$tag" ]; then
+        echo "?(pre-tag-build)"
+    else
+        echo "${tag#WARI-BUILD-TAG-}"
+    fi
+}
+
 # Internal: pull origin/main with no merge surprises. Returns:
 #   0  + sets BUILD_NUM + EXPECTED_MD5      — repo is at latest
 #   1                                        — abort with reason already printed
@@ -53,11 +70,20 @@ _wari_pull_and_verify() {
         return 1
     fi
 
-    BUILD_NUM=$(cat .build_number 2>/dev/null || echo "?")
+    local file_build tree_build
+    file_build=$(_wari_embedded_build build/wari.bin)
+    tree_build=$(cat .build_number 2>/dev/null || echo "?")
+    BUILD_NUM="$file_build"
     EXPECTED_MD5=$(md5sum build/wari.bin | awk '{print $1}')
     local size
     size=$(stat -c%s build/wari.bin)
-    echo "  build/wari.bin: build=$BUILD_NUM size=$size md5=$EXPECTED_MD5"
+    echo "  build/wari.bin: embedded-build=$file_build .build_number=$tree_build"
+    echo "                  size=$size md5=$EXPECTED_MD5"
+    if [ "$file_build" != "$tree_build" ] && [ "$tree_build" != "?" ]; then
+        echo "  WARNING: embedded build ($file_build) != .build_number ($tree_build)"
+        echo "           This means the producer's cargo incremental cache missed"
+        echo "           a WARI_BUILD env-var bump. Push side needs a clean rebuild."
+    fi
     return 0
 }
 
@@ -158,16 +184,18 @@ wari() {
             ;;
         status|st)
             cd "$WARI_DIR" 2>/dev/null || { echo "ERROR: $WARI_DIR not found"; return 1; }
-            local build branch local_head remote_head flashed_md5 repo_md5
-            build=$(cat .build_number 2>/dev/null || echo "?")
+            local tree_build branch local_head remote_head
+            local repo_md5 flashed_md5 repo_build flashed_build
+            tree_build=$(cat .build_number 2>/dev/null || echo "?")
             branch=$(git rev-parse --abbrev-ref HEAD)
             local_head=$(git rev-parse HEAD 2>/dev/null || echo "?")
             git fetch origin main 2>/dev/null
             remote_head=$(git rev-parse origin/main 2>/dev/null || echo "?")
             repo_md5=$(md5sum build/wari.bin 2>/dev/null | awk '{print $1}')
             flashed_md5=$(md5sum "$WARI_KERNEL" 2>/dev/null | awk '{print $1}')
+            repo_build=$(_wari_embedded_build build/wari.bin)
+            flashed_build=$(_wari_embedded_build "$WARI_KERNEL")
             echo "=== Wari Status ==="
-            echo "  repo build #:    $build"
             echo "  branch:          $branch"
             echo "  local HEAD:      ${local_head:0:10}"
             echo "  origin/main:     ${remote_head:0:10}"
@@ -175,10 +203,16 @@ wari() {
                 echo "  >>> repo is BEHIND origin — run 'wari upgrade'"
             fi
             echo ""
-            echo "  repo  wari.bin   md5: $repo_md5"
-            echo "  /boot/kernel.bin md5: $flashed_md5"
+            echo "  .build_number (tree):       $tree_build"
+            echo "  build/wari.bin    embedded: $repo_build  md5: $repo_md5"
+            echo "  /boot/kernel.bin  embedded: $flashed_build  md5: $flashed_md5"
             if [ "$repo_md5" != "$flashed_md5" ]; then
                 echo "  >>> flashed kernel does NOT match repo — run 'wari upgrade'"
+            fi
+            if [ "$repo_build" != "$tree_build" ] && [ "$tree_build" != "?" ] \
+                 && [ "$repo_build" != "?(pre-tag-build)" ]; then
+                echo "  >>> .build_number ($tree_build) != binary embedded ($repo_build)"
+                echo "      The push side has a stale cargo cache."
             fi
             echo ""
             git log --oneline -5
