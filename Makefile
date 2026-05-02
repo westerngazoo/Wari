@@ -10,7 +10,10 @@ KERNEL_ELF   := target/riscv64gc-unknown-none-elf/release/wari
 KERNEL_BIN   := build/wari.bin
 HELLO_WASM   := apps/hello/target/wasm32-unknown-unknown/release/wari_hello.wasm
 QEMU         := qemu-system-riscv64
-QEMU_ARGS    := -machine virt -nographic -bios default
+QEMU_ARGS    := -machine virt -nographic -bios default \
+                -global virtio-mmio.force-legacy=false \
+                -netdev user,id=net0 \
+                -device virtio-net-device,netdev=net0
 
 # llvm-objcopy from Rust toolchain (install with: rustup component add llvm-tools)
 OBJCOPY := $(shell find $${HOME}/.rustup -name llvm-objcopy -type f 2>/dev/null | head -1)

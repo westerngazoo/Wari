@@ -86,16 +86,23 @@ pub fn run_noop() -> Result<(), KernelError> {
 /// instantiate failure (R5).
 pub fn run_tier2_net() -> Result<(), KernelError> {
     use crate::cap::{object_pools, PROC_ID_TIER2_NET};
-    let net_inst = loader::load_tier2_net(
+    let mut net_inst = loader::load_tier2_net(
         net_blob::NET_DRIVER_SIGNED,
         ModuleId::Tier2Net,
         PROC_ID_TIER2_NET,
     )?;
-    // The driver's `_start` ran the VirtIO init sequence; on
-    // success it called `wari::nic_set_mac` (which set
-    // Net.initialized = true) AND configured the smoltcp
-    // Interface internally (PR Net-5b). On failure init_virtio
-    // returns silently and Net.initialized stays false.
+    // wasmi 0.32's `pre.start()` runs the WASM `(start)` section but
+    // NOT the WASI command `_start` export (cdylib has the latter,
+    // not the former). Run `_start` explicitly so the driver's
+    // VirtIO init sequence executes. On success it calls
+    // `wari::nic_set_mac` (which sets Net.initialized = true). A
+    // panic or trap inside _start gets converted to BadWasm.
+    {
+        let start = net_inst.instance
+            .get_typed_func::<(), ()>(&net_inst.store, "_start")
+            .map_err(|_| KernelError::BadWasm)?;
+        let _ = start.call(&mut net_inst.store, ());
+    }
     let pools = object_pools();
     let initialized = pools.nets.get(0).is_some_and(|n| n.initialized);
 
