@@ -1,0 +1,446 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! Wari Tier-2 driver interface — manifest types and trait
+//! declarations shared by the kernel and every signed driver.
+//!
+//! See `docs/driver-interface-design.md` for the full design.
+//!
+//! # The contract in 60 seconds
+//!
+//! Every Tier-2 driver embeds a [`ManifestHeader`] + N
+//! [`ExportDecl`] + M [`ImportDecl`] in a WASM custom section
+//! named exactly `wari_driver_manifest` (no leading dot — WASM
+//! custom-section convention). The bytes are produced by the
+//! [`wari_driver!`] macro from a trait impl; the kernel parses
+//! them at load time, checks magic + ABI version + kind + every
+//! export's signature; refuses to load on any mismatch.
+//!
+//! # What lives here vs. elsewhere
+//!
+//! - **Here**: pure data types — the manifest layout, the closed
+//!   set of supported function signatures, driver-kind discriminant,
+//!   the `UartDriver` / `NetDriver` traits the macro lowers.
+//! - **In `kernel/src/runtime/manifest.rs`** (PR DI-3): the parser
+//!   that walks WASM section headers and returns `&ManifestHeader`
+//!   + slices of `ExportDecl` / `ImportDecl` (no allocation).
+//! - **In each driver crate** (`drivers/uart`, `drivers/net`,
+//!   PRs DI-2 / DI-4): a `wari_driver!` macro invocation that emits
+//!   `#[no_mangle] extern "C"` shims AND the manifest bytes static.
+//! - **In `scripts/sign-module.rs`** (PR DI-5): a pre-sign verifier
+//!   that walks both the WASM exports/imports and the embedded
+//!   manifest, refuses to sign on disagreement.
+//!
+//! # Stability
+//!
+//! Bumping any of:
+//!  - the manifest layout
+//!  - the [`FuncSig`] discriminants
+//!  - the [`DriverKind`] discriminants
+//!  - the trait method shapes (`UartDriver`, `NetDriver`)
+//!
+//! requires bumping [`MANIFEST_ABI_VERSION`]. The kernel rejects any
+//! manifest with a non-supported `abi_version`. Old kernels stay
+//! safe; vendor recompiles produce new manifest bytes.
+//!
+//! # Why no `alloc`
+//!
+//! Manifest bytes are statically sized and emitted at compile time.
+//! The kernel parser hands back slices into the input buffer. No
+//! heap, no `Vec`, no `String`. Same constraint that lets the
+//! parser be Kani-checkable.
+
+#![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs)]
+
+// ── Manifest framing ─────────────────────────────────────────────
+
+/// Magic bytes at the start of every manifest. ASCII "WDM\0".
+/// Wari Driver Manifest — distinguishes our section payload from
+/// any other custom section that happens to share its name.
+pub const MAGIC: [u8; 4] = *b"WDM\0";
+
+/// ABI version of the manifest format. Bump on any breaking change
+/// to the layout, the [`FuncSig`] discriminants, or the trait
+/// method shapes. Kernel rejects manifests with an unsupported
+/// version.
+pub const MANIFEST_ABI_VERSION: u16 = 1;
+
+/// Custom-section name (UTF-8) the kernel scans WASM binaries for.
+/// Must match the `#[link_section = ...]` the macro emits. Stored
+/// here so kernel and macro cannot drift.
+pub const SECTION_NAME: &str = "wari_driver_manifest";
+
+/// Maximum export name length, including trailing NUL. Sized to fit
+/// every export currently used by Wari drivers (`write`, `_start`,
+/// `poll`, `tx_send`, `rx_pop`, `rx_recycle`) with comfortable
+/// headroom. Increase requires an ABI version bump.
+pub const NAME_MAX: usize = 32;
+
+/// Maximum host-fn module name length (the `wari` in
+/// `linker.func_wrap("wari", "cap_mint", ...)`). 16 bytes is more
+/// than enough for the single namespace Phase 2 uses.
+pub const MODULE_MAX: usize = 16;
+
+// ── Discriminants ────────────────────────────────────────────────
+
+/// Driver kind. The kernel asserts this matches the slot it is
+/// loading the binary into; a UART binary loaded into the Net slot
+/// fails with [`DriverManifestError::WrongKind`] before any code
+/// runs. Discriminants are stable: never renumber, only append.
+#[repr(u16)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DriverKind {
+    /// Tier-2 UART driver. Exports `write`, `_start`.
+    Uart = 1,
+    /// Tier-2 network driver. Exports `_start`, `poll`, `tx_send`,
+    /// `rx_pop`, `rx_recycle`.
+    Net = 2,
+    /// Tier-2 block-device driver. Reserved for Phase 3.
+    Block = 3,
+    // Append-only. New kinds get the next id.
+}
+
+impl DriverKind {
+    /// Decode a discriminant from its raw u16 form. Returns `None`
+    /// for any value the parser does not recognize; the kernel
+    /// turns that into [`DriverManifestError::UnknownKind`].
+    pub fn from_raw(v: u16) -> Option<Self> {
+        match v {
+            1 => Some(DriverKind::Uart),
+            2 => Some(DriverKind::Net),
+            3 => Some(DriverKind::Block),
+            _ => None,
+        }
+    }
+}
+
+/// Closed set of WASM function signatures the manifest can declare.
+/// Adding a signature shape is an ABI change (bump
+/// [`MANIFEST_ABI_VERSION`]) — but in practice the host-fn surface
+/// grows slowly and the same shapes recur across drivers, so the
+/// table stays small.
+///
+/// The encoding deliberately spells out param/result lists rather
+/// than using a numeric `(arity, types_index)` scheme: the kernel
+/// can do `match sig` and pull a typed `get_typed_func` call out
+/// directly, no dynamic dispatch.
+///
+/// Naming convention: `<params>_<result>` where each component is
+/// `U32` / `U64` / `I32` / `Unit`, joined with `x` for multi-arg
+/// params (e.g. `U32xU32I32` = `(u32, u32) -> i32`).
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FuncSig {
+    /// `() -> ()` — `_start`, init shims.
+    UnitUnit = 1,
+
+    /// `(u32, u32) -> i32` — UART `write`, MMIO writes, `tx_send`.
+    U32xU32I32 = 2,
+
+    /// `u32 -> i32` — `notification_ack`, `rx_recycle`,
+    /// `irq_register`, `nic_queue_notify`.
+    U32I32 = 3,
+
+    /// `u32 -> u32` — `mmio_read8`, `mmio_read32`.
+    U32U32 = 4,
+
+    /// `u64 -> i32` — net `poll`.
+    U64I32 = 5,
+
+    /// `() -> u64` — `rx_pop` (packed `(buf_off, len)`),
+    /// `lin_mem_base`.
+    UnitU64 = 6,
+
+    /// `(u32, u32, u32, u32, u32) -> i32` — `nic_attach_queue`.
+    U32x5I32 = 7,
+    // Append-only. Renumbering breaks every signed driver.
+}
+
+impl FuncSig {
+    /// Decode a discriminant from its raw u8. `None` means the
+    /// kernel sees a manifest from a future driver-iface ABI; the
+    /// driver is rejected.
+    pub fn from_raw(v: u8) -> Option<Self> {
+        match v {
+            1 => Some(FuncSig::UnitUnit),
+            2 => Some(FuncSig::U32xU32I32),
+            3 => Some(FuncSig::U32I32),
+            4 => Some(FuncSig::U32U32),
+            5 => Some(FuncSig::U64I32),
+            6 => Some(FuncSig::UnitU64),
+            7 => Some(FuncSig::U32x5I32),
+            _ => None,
+        }
+    }
+}
+
+// ── Wire types ───────────────────────────────────────────────────
+
+/// 16-byte fixed header at the start of every manifest. Followed
+/// by `export_count` [`ExportDecl`]s then `import_count`
+/// [`ImportDecl`]s.
+///
+/// `repr(C, packed)` chosen so the on-wire layout matches the
+/// in-memory layout exactly. Two recompiles of the same trait impl
+/// must produce byte-identical manifest bytes — the signed
+/// envelope hashes them and any drift breaks reproducibility (R8).
+#[repr(C, packed)]
+#[derive(Copy, Clone, Debug)]
+pub struct ManifestHeader {
+    /// Always [`MAGIC`]. Distinguishes a Wari manifest from any
+    /// other custom section that happens to share the name.
+    pub magic: [u8; 4],
+
+    /// Always [`MANIFEST_ABI_VERSION`] for Phase 2.
+    pub abi_version: u16,
+
+    /// [`DriverKind`] discriminant. Kernel asserts this matches
+    /// the slot it is loading into.
+    pub kind: u16,
+
+    /// Number of [`ExportDecl`]s that follow the header.
+    pub export_count: u16,
+
+    /// Number of [`ImportDecl`]s that follow the exports.
+    pub import_count: u16,
+
+    /// Reserved for forward-compatible flags (e.g. bit 0 = "driver
+    /// declares a (start) section the kernel must invoke"). Phase
+    /// 2 always emits zero; Phase 3+ may set bits without an ABI
+    /// version bump if the meaning is "ignored when set" or "extra
+    /// behaviour".
+    pub flags: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<ManifestHeader>() == 16);
+
+/// Per-export descriptor. Kernel resolves the export by name and
+/// verifies the signature matches before invoking it.
+#[repr(C, packed)]
+#[derive(Copy, Clone, Debug)]
+pub struct ExportDecl {
+    /// Export name as a NUL-padded ASCII byte string. Length up
+    /// to [`NAME_MAX`] - 1; the trailing NUL is mandatory so the
+    /// kernel can use it as a string terminator without a
+    /// separate length field.
+    pub name: [u8; NAME_MAX],
+
+    /// [`FuncSig`] discriminant. Kernel uses this to pick the
+    /// correct typed `get_typed_func` instantiation.
+    pub sig: u8,
+
+    /// Padding to 4-byte alignment. Always zero.
+    pub _pad: [u8; 3],
+}
+
+const _: () = assert!(core::mem::size_of::<ExportDecl>() == NAME_MAX + 4);
+
+/// Per-import (host-fn) descriptor. Kernel asserts the linker has
+/// a host fn registered with the declared `(module, name, sig)`;
+/// fails fast on a missing or mistyped registration. Importing
+/// a host fn the kernel does not provide is a load-time error,
+/// not a "the driver crashes the first time it calls it."
+#[repr(C, packed)]
+#[derive(Copy, Clone, Debug)]
+pub struct ImportDecl {
+    /// Module name (always `"wari\0..."` in Phase 2; reserved for
+    /// future namespacing).
+    pub module: [u8; MODULE_MAX],
+
+    /// Import name, NUL-padded.
+    pub name: [u8; NAME_MAX],
+
+    /// Required [`FuncSig`] discriminant.
+    pub sig: u8,
+
+    /// Padding. Always zero.
+    pub _pad: [u8; 3],
+}
+
+const _: () = assert!(
+    core::mem::size_of::<ImportDecl>() == MODULE_MAX + NAME_MAX + 4
+);
+
+// ── Errors ───────────────────────────────────────────────────────
+
+/// Errors the kernel-side parser surfaces. Each maps to a distinct
+/// `KernelError::Driver*` variant — see PR DI-3.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DriverManifestError {
+    /// No `wari_driver_manifest` custom section in the WASM.
+    Missing,
+
+    /// Section payload too short to even hold the header, or the
+    /// declared `export_count` × stride + `import_count` × stride
+    /// overflows the payload.
+    Truncated,
+
+    /// Header `magic != [`MAGIC`]`. Wrong-kind file or junk in the
+    /// section name slot.
+    BadMagic,
+
+    /// `abi_version` outside the kernel's supported set.
+    UnsupportedAbiVersion,
+
+    /// `kind` is not a known [`DriverKind`].
+    UnknownKind,
+
+    /// `kind` is known but does not match the slot the kernel is
+    /// loading the driver into (e.g. UART binary in Net slot).
+    WrongKind,
+
+    /// An [`ExportDecl::sig`] or [`ImportDecl::sig`] is not a
+    /// known [`FuncSig`]. Driver was built against a newer
+    /// driver-iface ABI than this kernel supports.
+    UnknownSig,
+
+    /// A declared export does not exist in the WASM, or exists
+    /// but with a different signature than declared.
+    ExportMismatch,
+
+    /// A declared import is not registered on the kernel's
+    /// linker — the driver expects a host fn the kernel does not
+    /// provide.
+    MissingHostFn,
+}
+
+// ── Driver traits ────────────────────────────────────────────────
+
+/// Tier-2 UART driver contract. The `write` method delivers bytes
+/// to the underlying serial controller; everything else (reset,
+/// init, format) is internal driver state.
+///
+/// Driver authors implement this for a unit-style struct and wrap
+/// the impl with `wari_driver_iface::declare_uart_driver!{ ... }`
+/// (see PR DI-2). The macro emits the `#[no_mangle] extern "C"`
+/// `write(buf_ptr, len) -> i32` shim and the matching manifest.
+pub trait UartDriver {
+    /// Push `buf` to the UART. Returns bytes written on success
+    /// (always == `buf.len()` for the line-buffered Phase-2 driver),
+    /// or a negative errno on failure.
+    fn write(buf: &[u8]) -> i32;
+}
+
+/// Tier-2 network driver contract. Exposes the surface the kernel
+/// uses to drive smoltcp from its idle loop and to wire RX/TX to
+/// Tier-1 socket host fns (Phase-1b PR Net-6 in flight).
+pub trait NetDriver {
+    /// Run the driver's one-shot init. Called by the kernel before
+    /// `poll`. Failure leaves `Net.initialized = false` and the
+    /// kernel surfaces the failure via its log line.
+    fn start();
+
+    /// Drive smoltcp's `Interface::poll`. `timestamp_ms` is a
+    /// monotonic millisecond tick; the kernel passes its idle-loop
+    /// counter. Returns 1 if state changed, 0 if nothing happened.
+    fn poll(timestamp_ms: u64) -> i32;
+
+    /// Queue a TX descriptor for `buf` and notify the device.
+    /// Returns 0 on success, negative errno on failure.
+    fn tx_send(buf: &[u8]) -> i32;
+
+    /// Drain one RX descriptor from the used ring. Returns the
+    /// packed `(buf_off << 32) | len` as a u64, or 0 if the ring
+    /// is empty.
+    fn rx_pop() -> u64;
+
+    /// Recycle an RX buffer back to the device. Called after the
+    /// kernel-side smoltcp has consumed the bytes from `rx_pop`.
+    fn rx_recycle(desc_idx: u32) -> i32;
+}
+
+// ── Build helpers (compile-time use by the macro) ────────────────
+
+/// Pad an ASCII byte string into a fixed-size NUL-terminated buffer.
+/// Used by the `wari_driver!` macro to lower string literals into
+/// the manifest's `[u8; N]` name fields. Marked `const` so it runs
+/// at compile time and the manifest bytes end up in `.rodata`.
+///
+/// # Panics
+///
+/// Compile-time panic if `name.len() >= N` (i.e. the trailing NUL
+/// would not fit). This catches over-long export names at build
+/// time, before the manifest is ever signed.
+pub const fn pad_name<const N: usize>(name: &[u8]) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut i = 0;
+    // Reserve at least one byte for the trailing NUL.
+    if name.len() >= N {
+        // Compile-time abort — surfaced as a clear const-eval panic.
+        panic!("driver manifest: export/import name does not fit in fixed buffer");
+    }
+    while i < name.len() {
+        out[i] = name[i];
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_is_16_bytes_packed() {
+        // Sanity: the wire layout assumption the parser relies on.
+        assert_eq!(core::mem::size_of::<ManifestHeader>(), 16);
+        assert_eq!(core::mem::align_of::<ManifestHeader>(), 1);
+    }
+
+    #[test]
+    fn export_decl_is_36_bytes_packed() {
+        assert_eq!(core::mem::size_of::<ExportDecl>(), 36);
+        assert_eq!(core::mem::align_of::<ExportDecl>(), 1);
+    }
+
+    #[test]
+    fn import_decl_is_52_bytes_packed() {
+        assert_eq!(core::mem::size_of::<ImportDecl>(), 52);
+        assert_eq!(core::mem::align_of::<ImportDecl>(), 1);
+    }
+
+    #[test]
+    fn driver_kind_round_trips() {
+        for k in [DriverKind::Uart, DriverKind::Net, DriverKind::Block] {
+            assert_eq!(DriverKind::from_raw(k as u16), Some(k));
+        }
+        assert_eq!(DriverKind::from_raw(0), None);
+        assert_eq!(DriverKind::from_raw(0xFFFF), None);
+    }
+
+    #[test]
+    fn func_sig_round_trips() {
+        let all = [
+            FuncSig::UnitUnit,
+            FuncSig::U32xU32I32,
+            FuncSig::U32I32,
+            FuncSig::U32U32,
+            FuncSig::U64I32,
+            FuncSig::UnitU64,
+            FuncSig::U32x5I32,
+        ];
+        for s in all {
+            assert_eq!(FuncSig::from_raw(s as u8), Some(s));
+        }
+        assert_eq!(FuncSig::from_raw(0), None);
+        assert_eq!(FuncSig::from_raw(0xFF), None);
+    }
+
+    #[test]
+    fn pad_name_writes_nul_terminator() {
+        let n: [u8; 8] = pad_name(b"write");
+        assert_eq!(&n[..5], b"write");
+        assert_eq!(n[5], 0);
+        assert_eq!(n[6], 0);
+        assert_eq!(n[7], 0);
+    }
+
+    #[test]
+    fn worked_uart_manifest_size() {
+        // Per design doc §3.5: UART = 16 + 2*36 + 2*52 = 192.
+        let h = core::mem::size_of::<ManifestHeader>();
+        let e = core::mem::size_of::<ExportDecl>();
+        let i = core::mem::size_of::<ImportDecl>();
+        assert_eq!(h + 2 * e + 2 * i, 192);
+    }
+}

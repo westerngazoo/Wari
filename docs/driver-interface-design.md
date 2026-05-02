@@ -614,14 +614,19 @@ The parser is the new attack surface. Kani proof:
    include in DI-1 manifest type but make it optional; defer
    actual driver implementation to Phase 3.
 
-4. **Manifest in the signed envelope vs. inside the WASM
-   binary?** Today's design puts the manifest inside the WASM
-   custom section. Alternative: copy the manifest bytes into
-   the envelope header (so the kernel can read it without
-   parsing WASM). Pro: simpler kernel parser. Con: now there
-   are two copies of the manifest and they must agree (sign
-   tool ensures that). Suggest: keep manifest in WASM section
-   for Phase 2; revisit if kernel boot time becomes an issue.
+4. ~~**Manifest in the signed envelope vs. inside the WASM
+   binary?**~~ **Decided: WASM custom section** (May 2026).
+   Trade-off: envelope-resident saves ~30 LOC in the kernel
+   parser but makes the sign tool the *producer* of the
+   manifest (it inspects the WASM exports and emits matching
+   manifest bytes). WASM-section-resident makes the driver
+   author the producer (the macro emits both the manifest and
+   the matching shims), and the sign tool's job becomes
+   *verify the embedded manifest matches the actual WASM
+   exports* — a structurally stronger property because the
+   contract is declared, not inferred. For a kernel aiming
+   at provability, declaration > inference; spend the 30 LOC
+   on the section walker.
 
 ---
 

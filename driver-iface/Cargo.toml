@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "wari-driver-iface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Tier-2 driver interface contracts: manifest types, kind/sig enums, trait declarations. Pure no_std, shared by kernel and drivers."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pure no_std crate. Zero external deps; this is a contract module.
+# Driver crates and the kernel both depend on it; any addition here
+# expands the trust surface of every Tier-2 driver.
