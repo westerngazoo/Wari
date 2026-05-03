@@ -1115,30 +1115,41 @@ pub fn driver_start() {
         let _ = nic_iface::init(mac);
     }
     // The vf2 path is a Phase-1c stub — return immediately, leave
-    // Net.initialized = false on the kernel side. The kernel logs
-    // "[net] not yet implemented on vf2" if needed (Phase-1c TODO).
+    // Net.initialized = false on the kernel side.
     //
-    // We touch every host fn the manifest declares so LTO does not
-    // strip the WASM imports — without these calls the vf2 wasm
-    // would have zero imports and the sign-tool's manifest cross-
-    // check (PR DI-5) would refuse the binary as "manifest declares
-    // imports the wasm does not request". The kernel's MMIO
-    // validator rejects address 0 (returns u32::MAX), so the calls
-    // are harmless. Phase-1c GMAC work replaces this scaffold.
-    #[cfg(feature = "vf2")]
-    {
-        // SAFETY: extern host-fn calls. Kernel rejects address 0
-        // outside the JH7110 GMAC MMIO window (returns negative
-        // errno / u32::MAX); we discard the result.
-        unsafe {
-            let _ = wari_net_mmio_read32(0);
-            let _ = wari_net_mmio_write32(0, 0);
-            let _ = wari_nic_set_mac(0, 0);
-            let _ = wari_nic_attach_queue(0, 0, 0, 0, 0);
-            let _ = wari_nic_queue_notify(0);
-            let _ = wari_lin_mem_base();
-        }
-    }
+    // The vf2 binary still needs the same WASM imports as qemu so
+    // its manifest (which declares them) passes the sign-tool's
+    // cross-check (PR DI-5). LTO strips unused imports — to keep
+    // them alive WITHOUT actually invoking them (some have kernel
+    // side effects, e.g. nic_set_mac unconditionally sets
+    // Net.initialized = true), we reference each host fn through
+    // a `#[used]` function-pointer static. The pointer reference
+    // forces the linker to retain the WASM import; the function
+    // is never called from Rust code on vf2.
+    //
+    // Phase-1c GMAC work replaces this scaffold by *actually
+    // using* the imports for real hardware.
+}
+
+// Keep the qemu-side host-fn imports alive in the vf2 binary so
+// its manifest still cross-checks. Each static is a function-
+// pointer reference — LTO retains the symbol; nobody invokes it.
+// See driver_start vf2 branch for the why.
+#[cfg(feature = "vf2")]
+mod vf2_keep_imports {
+    use super::*;
+    #[used]
+    static A: unsafe extern "C" fn(u32, u32) -> i32 = wari_net_mmio_write32;
+    #[used]
+    static B: unsafe extern "C" fn(u32) -> u32 = wari_net_mmio_read32;
+    #[used]
+    static C: unsafe extern "C" fn(u32, u32) -> i32 = wari_nic_set_mac;
+    #[used]
+    static D: unsafe extern "C" fn(u32, u32, u32, u32, u32) -> i32 = wari_nic_attach_queue;
+    #[used]
+    static E: unsafe extern "C" fn(u32) -> i32 = wari_nic_queue_notify;
+    #[used]
+    static F: unsafe extern "C" fn() -> u64 = wari_lin_mem_base;
 }
 
 // ── Tier-2 net driver registration (PR DI-4) ─────────────────────
