@@ -27,6 +27,7 @@ pub mod heap;
 pub mod hello_blob;
 pub mod host_fns;
 pub mod loader;
+pub mod manifest;
 pub mod net_blob;
 pub mod noop_blob;
 pub mod sign;

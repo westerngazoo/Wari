@@ -33,6 +33,43 @@ pub enum KernelError {
     BadWasm,
     /// Driver-layer failure — see driver-specific log line for detail.
     DriverError,
+    /// Tier-2 driver binary has no `wari_driver_manifest` custom
+    /// section, or it is malformed (bad magic, truncated, unknown
+    /// signature discriminant). The driver is not loadable.
+    DriverManifestMalformed,
+    /// Driver manifest carries an `abi_version` the kernel does not
+    /// support. Driver was built against a newer (or older)
+    /// `wari-driver-iface` than this kernel knows.
+    DriverAbiVersion,
+    /// Driver manifest declares a `kind` other than the slot the
+    /// kernel is loading the binary into (e.g. `Net` binary in the
+    /// `Uart` slot). Refused before any code runs.
+    DriverWrongKind,
+    /// Driver manifest declares an export that the WASM does not
+    /// actually expose, or exposes with a different signature than
+    /// the manifest claims. The sign tool should have caught this
+    /// (PR DI-5); the kernel double-checks at load time.
+    DriverBadExport,
+    /// Driver manifest declares a host fn import the kernel did not
+    /// register on the linker. Driver expects a surface the kernel
+    /// does not provide.
+    DriverMissingHostFn,
+}
+
+impl From<wari_driver_iface::DriverManifestError> for KernelError {
+    fn from(e: wari_driver_iface::DriverManifestError) -> Self {
+        use wari_driver_iface::DriverManifestError as M;
+        match e {
+            M::Missing
+            | M::Truncated
+            | M::BadMagic
+            | M::UnknownSig => KernelError::DriverManifestMalformed,
+            M::UnsupportedAbiVersion => KernelError::DriverAbiVersion,
+            M::UnknownKind | M::WrongKind => KernelError::DriverWrongKind,
+            M::ExportMismatch => KernelError::DriverBadExport,
+            M::MissingHostFn => KernelError::DriverMissingHostFn,
+        }
+    }
 }
 
 impl KernelError {
@@ -53,6 +90,11 @@ impl KernelError {
             KernelError::NotMapped        => E::NotMapped,
             KernelError::BadWasm          => E::BadWasm,
             KernelError::DriverError      => E::Generic,
+            KernelError::DriverManifestMalformed
+            | KernelError::DriverAbiVersion
+            | KernelError::DriverWrongKind
+            | KernelError::DriverBadExport
+            | KernelError::DriverMissingHostFn => E::BadWasm,
         }
     }
 }

@@ -53,6 +53,7 @@ use wasmi::{Engine, Linker, Module, Store};
 use crate::cap::{caps_for, Caps, ModuleId, Tier};
 use crate::error::KernelError;
 use crate::runtime::host_fns::{self, Tier2HostState};
+use crate::runtime::manifest;
 use crate::runtime::sign;
 use crate::runtime::wasi::{self, Tier1HostState};
 
@@ -120,27 +121,57 @@ pub fn load_tier2(
     envelope: &[u8],
     module_id: ModuleId,
 ) -> Result<Tier2Instance, KernelError> {
-    // Step 1 — INV-13: verify before parse.
+    load_tier2_with_kind(
+        envelope,
+        module_id,
+        wari_driver_iface::DriverKind::Uart,
+    )
+}
+
+/// Internal helper — same as [`load_tier2`] but with the manifest
+/// kind explicitly named, so the net loader can share the manifest-
+/// verification path. Phase-2 PR DI-3.
+fn load_tier2_with_kind(
+    envelope: &[u8],
+    module_id: ModuleId,
+    expected_kind: wari_driver_iface::DriverKind,
+) -> Result<Tier2Instance, KernelError> {
+    // Step 1 — INV-13: verify signature before any parse runs.
     let wasm_bytes = sign::verify(envelope)?;
 
-    // Step 2 — parse + validate.
-    let engine = Engine::default();
-    let module = Module::new(&engine, wasm_bytes).map_err(|_| KernelError::BadWasm)?;
+    // Step 2 (NEW, PR DI-3) — parse the embedded driver manifest
+    // BEFORE wasmi sees the bytes. Catches wrong-kind binaries +
+    // ABI-version mismatches at the cheapest possible stage.
+    let view = manifest::parse_from_wasm(wasm_bytes)?;
+    let kind = view.kind()?;
+    if kind != expected_kind {
+        return Err(KernelError::DriverWrongKind);
+    }
 
-    // Step 3 — assign caps and build the per-instance store.
+    // Step 3 — wasmi parse + validate. The custom section is
+    // ignored by wasmi; only the function/export/import sections
+    // shape the instance.
+    let engine = Engine::default();
+    let module =
+        Module::new(&engine, wasm_bytes).map_err(|_| KernelError::BadWasm)?;
+
+    // Step 4 — assign caps and build the per-instance store.
     let caps = caps_for(Tier::Two, module_id);
     let mut store = Store::new(&engine, Tier2HostState { caps });
     let mut linker = <Linker<Tier2HostState>>::new(&engine);
     host_fns::register_host_fns(&mut linker)?;
 
-    // Step 4 — instantiate. Wasmi 1.0's `instantiate_and_start` runs the
-    // start function if one exists; the UART driver has none, so this is
-    // structurally a validate + link step. If a future Tier-2 module
-    // ships with a start fn it runs here under wasmi's default budget.
+    // Step 5 — instantiate.
     let instance = linker
         .instantiate(&mut store, &module)
         .and_then(|pre| pre.start(&mut store))
         .map_err(|_| KernelError::BadWasm)?;
+
+    // Step 6 (NEW, PR DI-3) — verify every export the manifest
+    // declares actually resolves with the declared signature.
+    // Catches typos / signature drift the sign tool somehow let
+    // through. See manifest::verify_exports for details.
+    manifest::verify_exports(&view, &instance, &store)?;
 
     Ok(Tier2Instance {
         instance,
@@ -170,8 +201,33 @@ pub fn load_tier2_net(
     module_id: ModuleId,
     proc_id: u8,
 ) -> Result<Tier2Instance, KernelError> {
-    // INV-13: signature verification before parse.
+    // Step 1 — INV-13: signature verification before parse.
     let wasm_bytes = sign::verify(envelope)?;
+
+    // Step 2 (PR DI-3) — manifest gate. The net driver migrates
+    // to the macro in PR DI-4; for binaries built before that
+    // migration the parser returns Missing, and the loader treats
+    // it as a soft warning in Phase 2 (the kernel still loads,
+    // logs `[net] no driver manifest — phase-1 binary`, and the
+    // operator sees the gap). After DI-4 lands, the net driver's
+    // wasm carries a Net-kind manifest and this branch becomes a
+    // hard gate identical to load_tier2's.
+    match manifest::parse_from_wasm(wasm_bytes) {
+        Ok(view) => {
+            let kind = view.kind()?;
+            if kind != wari_driver_iface::DriverKind::Net {
+                return Err(KernelError::DriverWrongKind);
+            }
+            // Defer export verification to after instantiate.
+            let _ = view;
+        }
+        Err(wari_driver_iface::DriverManifestError::Missing) => {
+            crate::kprintln!(
+                "[net] driver loaded without manifest (pre-DI-4 binary, soft-allow)"
+            );
+        }
+        Err(e) => return Err(e.into()),
+    }
 
     let engine = Engine::default();
     let module = Module::new(&engine, wasm_bytes).map_err(|_| KernelError::BadWasm)?;
@@ -185,6 +241,13 @@ pub fn load_tier2_net(
         .instantiate(&mut store, &module)
         .and_then(|pre| pre.start(&mut store))
         .map_err(|_| KernelError::BadWasm)?;
+
+    // Re-parse and verify exports if the manifest was present
+    // (the borrow above is dropped by now because `wasm_bytes`
+    // was loaned to wasmi). Cheap — the parser is O(sections).
+    if let Ok(view) = manifest::parse_from_wasm(wasm_bytes) {
+        manifest::verify_exports(&view, &instance, &store)?;
+    }
 
     Ok(Tier2Instance {
         instance,

@@ -16,6 +16,11 @@ path = "src/main.rs"
 [dependencies]
 wari-abi = { path = "../abi-shared" }
 wari-mem = { path = "../wari-mem" }
+# Driver contract: manifest types + DriverKind/FuncSig enums +
+# DriverManifestError. Pure no_std types — same crate every
+# Tier-2 driver depends on, so the kernel parser and the macro
+# emission cannot drift.
+wari-driver-iface = { path = "../driver-iface" }
 wasmi = { version = "=0.32.3", default-features = false }
 ed25519-dalek = { version = "2", default-features = false }
 
