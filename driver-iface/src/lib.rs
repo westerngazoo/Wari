@@ -52,6 +52,12 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+/// WASM section walker + manifest parser. Shared by the kernel
+/// loader (`kernel/src/runtime/manifest.rs`) and the host-side
+/// sign tool (`scripts/sign-module.rs`) so the two cannot drift.
+/// See `parse::parse_from_wasm`.
+pub mod parse;
+
 // ── Manifest framing ─────────────────────────────────────────────
 
 /// Magic bytes at the start of every manifest. ASCII "WDM\0".
@@ -156,6 +162,36 @@ pub enum FuncSig {
     // Append-only. Renumbering breaks every signed driver.
 }
 
+/// WASM-level shape of a function signature: (param value types,
+/// result value types). The `i32` slot is the only thing WASM
+/// itself cares about — `u32` vs `i32` is a manifest-level
+/// semantic distinction. Two `FuncSig` variants share the same
+/// shape iff they encode the same `(i32 / i64)` pattern.
+///
+/// Used by the sign-tool verifier (PR DI-5) to compare a
+/// manifest declaration against the WASM binary's actual type
+/// section: the comparison uses shape equality, so a manifest
+/// declaring `U32I32` against a WASM `(i32) -> i32` is accepted
+/// (both shapes are `[I32] -> [I32]`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WasmSigShape {
+    /// Parameter value-type pattern. Each element is one of
+    /// `WasmValType` below.
+    pub params: &'static [WasmValType],
+    /// Result value-type pattern.
+    pub results: &'static [WasmValType],
+}
+
+/// Subset of WASM ValType the Wari ABI actually uses (no f32 /
+/// f64 / v128 / refs in the host-fn surface).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WasmValType {
+    /// 32-bit integer. Covers manifest U32 and I32 alike.
+    I32,
+    /// 64-bit integer.
+    I64,
+}
+
 impl FuncSig {
     /// Decode a discriminant from its raw u8. `None` means the
     /// kernel sees a manifest from a future driver-iface ABI; the
@@ -170,6 +206,29 @@ impl FuncSig {
             6 => Some(FuncSig::UnitU64),
             7 => Some(FuncSig::U32x5I32),
             _ => None,
+        }
+    }
+
+    /// The WASM-level shape this signature encodes. Used by the
+    /// sign-tool to verify the embedded manifest agrees with the
+    /// binary's actual type section. Multiple `FuncSig` variants
+    /// can share a shape (e.g. `U32I32` and `U32U32`) — the
+    /// difference is semantic to Wari, invisible to WASM.
+    pub fn wasm_shape(self) -> WasmSigShape {
+        use WasmValType::{I32, I64};
+        const E: &[WasmValType] = &[];
+        const I32_1: &[WasmValType] = &[I32];
+        const I32_2: &[WasmValType] = &[I32, I32];
+        const I32_5: &[WasmValType] = &[I32, I32, I32, I32, I32];
+        const I64_1: &[WasmValType] = &[I64];
+        match self {
+            FuncSig::UnitUnit   => WasmSigShape { params: E,     results: E      },
+            FuncSig::U32xU32I32 => WasmSigShape { params: I32_2, results: I32_1  },
+            FuncSig::U32I32     => WasmSigShape { params: I32_1, results: I32_1  },
+            FuncSig::U32U32     => WasmSigShape { params: I32_1, results: I32_1  },
+            FuncSig::U64I32     => WasmSigShape { params: I64_1, results: I32_1  },
+            FuncSig::UnitU64    => WasmSigShape { params: E,     results: I64_1  },
+            FuncSig::U32x5I32   => WasmSigShape { params: I32_5, results: I32_1  },
         }
     }
 }
@@ -563,17 +622,31 @@ macro_rules! wari_uart_driver {
                     (b"_start", $crate::FuncSig::UnitUnit),
                 ],
                 &[
-                    (b"wari", b"wari_mmio_write8", $crate::FuncSig::U32xU32I32),
-                    (b"wari", b"wari_mmio_read8",  $crate::FuncSig::U32U32),
+                    // Names match the driver's #[link_name = "..."]
+                    // attributes — those become the actual WASM
+                    // import names. The `wari_` prefix is the Rust
+                    // symbol, not the WASM-level name.
+                    (b"wari", b"mmio_write8", $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"mmio_read8",  $crate::FuncSig::U32U32),
                 ],
             );
     };
 }
 
-/// Total manifest size for the Tier-2 net driver. Computed as
-/// `manifest_size(5, 8)` = 16 + 5*36 + 8*52 = 612 bytes. Exported
-/// so the macro and any external tooling agree.
-pub const NET_MANIFEST_SIZE: usize = manifest_size(5, 8);
+/// Total manifest size for the Tier-2 net driver. Computed from
+/// `manifest_size(5, 6)` = 16 + 5*36 + 6*52 = 508 bytes. Exported
+/// so the macro and external tooling agree on the byte length.
+///
+/// 6 imports cover what the smoltcp-backed VirtIO driver actually
+/// calls today: `net_mmio_write32`, `net_mmio_read32`,
+/// `nic_set_mac`, `nic_attach_queue`, `nic_queue_notify`,
+/// `lin_mem_base`. The `notification_wait` / `notification_ack`
+/// host fns are declared in the driver source for a future PR
+/// but not yet invoked, so LTO strips the imports from the WASM —
+/// adding them to the manifest would make the sign-tool refuse
+/// the binary as "manifest declares an import the wasm does not
+/// request". Re-add them when the driver actually calls them.
+pub const NET_MANIFEST_SIZE: usize = manifest_size(5, 6);
 
 /// Declare a Tier-2 network driver.
 ///
@@ -660,14 +733,18 @@ macro_rules! wari_net_driver {
                     (b"rx_recycle", $crate::FuncSig::U32I32),
                 ],
                 &[
-                    (b"wari", b"net_mmio_write32",  $crate::FuncSig::U32xU32I32),
-                    (b"wari", b"net_mmio_read32",   $crate::FuncSig::U32U32),
-                    (b"wari", b"nic_set_mac",       $crate::FuncSig::U32xU32I32),
-                    (b"wari", b"notification_wait", $crate::FuncSig::U32I32),
-                    (b"wari", b"notification_ack",  $crate::FuncSig::U32I32),
-                    (b"wari", b"nic_attach_queue",  $crate::FuncSig::U32x5I32),
-                    (b"wari", b"nic_queue_notify",  $crate::FuncSig::U32I32),
-                    (b"wari", b"lin_mem_base",      $crate::FuncSig::UnitU64),
+                    // Names match the driver's #[link_name = "..."]
+                    // attributes (the WASM-level import name). LTO
+                    // strips unused imports — the manifest must list
+                    // ONLY what the wasm actually requests, so the
+                    // sign-tool's bidirectional check passes. See
+                    // NET_MANIFEST_SIZE doc.
+                    (b"wari", b"net_mmio_write32", $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"net_mmio_read32",  $crate::FuncSig::U32U32),
+                    (b"wari", b"nic_set_mac",      $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"nic_attach_queue", $crate::FuncSig::U32x5I32),
+                    (b"wari", b"nic_queue_notify", $crate::FuncSig::U32I32),
+                    (b"wari", b"lin_mem_base",     $crate::FuncSig::UnitU64),
                 ],
             );
     };

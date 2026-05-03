@@ -1117,8 +1117,28 @@ pub fn driver_start() {
     // The vf2 path is a Phase-1c stub — return immediately, leave
     // Net.initialized = false on the kernel side. The kernel logs
     // "[net] not yet implemented on vf2" if needed (Phase-1c TODO).
+    //
+    // We touch every host fn the manifest declares so LTO does not
+    // strip the WASM imports — without these calls the vf2 wasm
+    // would have zero imports and the sign-tool's manifest cross-
+    // check (PR DI-5) would refuse the binary as "manifest declares
+    // imports the wasm does not request". The kernel's MMIO
+    // validator rejects address 0 (returns u32::MAX), so the calls
+    // are harmless. Phase-1c GMAC work replaces this scaffold.
     #[cfg(feature = "vf2")]
-    {}
+    {
+        // SAFETY: extern host-fn calls. Kernel rejects address 0
+        // outside the JH7110 GMAC MMIO window (returns negative
+        // errno / u32::MAX); we discard the result.
+        unsafe {
+            let _ = wari_net_mmio_read32(0);
+            let _ = wari_net_mmio_write32(0, 0);
+            let _ = wari_nic_set_mac(0, 0);
+            let _ = wari_nic_attach_queue(0, 0, 0, 0, 0);
+            let _ = wari_nic_queue_notify(0);
+            let _ = wari_lin_mem_base();
+        }
+    }
 }
 
 // ── Tier-2 net driver registration (PR DI-4) ─────────────────────

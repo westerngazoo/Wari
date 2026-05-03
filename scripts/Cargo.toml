@@ -28,3 +28,13 @@ path = "gen-keypair.rs"
 [dependencies]
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
+# Driver-manifest types + the shared parse module. Pure no_std,
+# but Rust types compile on host just fine. Same crate the kernel
+# uses; ensures sign tool and kernel agree byte-for-byte on what
+# constitutes a valid manifest.
+wari-driver-iface = { path = "../driver-iface" }
+# Standard WASM walker for the cross-check step: extracts the
+# binary's actual exports + imports + their type-section
+# signatures. Sign tool uses this to assert the embedded manifest
+# is not lying about the binary's surface.
+wasmparser = "0.230"
