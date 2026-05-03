@@ -385,6 +385,9 @@ dependencies = [
 [[package]]
 name = "wari-driver-uart"
 version = "0.0.1"
+dependencies = [
+ "wari-driver-iface",
+]
 
 [[package]]
 name = "wari-hello"

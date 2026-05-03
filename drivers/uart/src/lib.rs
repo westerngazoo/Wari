@@ -118,27 +118,30 @@ fn put_byte(b: u8) -> i32 {
     unsafe { wari_mmio_write8(thr_addr(), b as u32) }
 }
 
-// ── Exports ──────────────────────────────────────────────────────
+// ── Driver impl ──────────────────────────────────────────────────
+//
+// The driver is now declared via the `wari_driver_iface` trait +
+// macro. The trait body is the entire driver-author surface; the
+// `wari_uart_driver!` invocation below emits:
+//   - the `extern "C" fn write(buf_ptr, len) -> i32` shim
+//   - the `extern "C" fn _start()` empty entrypoint
+//   - the 192-byte `WARI_DRIVER_MANIFEST` static in WASM custom
+//     section `wari_driver_manifest`
+// See docs/driver-interface-design.md §4 for rationale.
 
-/// Push `len` bytes from linear memory at `buf_ptr` to the UART.
-///
-/// Returns `len` on success, or the negative errno from the first
-/// failing host call.
-#[no_mangle]
-pub extern "C" fn write(buf_ptr: u32, len: u32) -> i32 {
-    let mem = buf_ptr as usize as *const u8;
-    for i in 0..(len as usize) {
-        // SAFETY: caller passes a pointer into our linear memory;
-        // wasmi bounds-checks every load. OOB traps the instance
-        // rather than corrupting host state.
-        let byte = unsafe { mem.add(i).read() };
-        let r = put_byte(byte);
-        if r != 0 {
-            return r;
+/// Tier-2 UART driver instance (zero-sized; per-call dispatch).
+pub struct Driver;
+
+impl wari_driver_iface::UartDriver for Driver {
+    fn write(buf: &[u8]) -> i32 {
+        for &byte in buf {
+            let r = put_byte(byte);
+            if r != 0 {
+                return r;
+            }
         }
+        buf.len() as i32
     }
-    len as i32
 }
 
-#[no_mangle]
-pub extern "C" fn _start() {}
+wari_driver_iface::wari_uart_driver!(Driver);

@@ -351,6 +351,108 @@ pub trait NetDriver {
 
 // ── Build helpers (compile-time use by the macro) ────────────────
 
+/// Total size in bytes of the manifest payload for a given
+/// (export count, import count). Computed at compile time so the
+/// `[u8; N]` static the macro emits has a known length.
+pub const fn manifest_size(export_count: usize, import_count: usize) -> usize {
+    16 + export_count * 36 + import_count * 52
+}
+
+/// Build the byte image of a manifest at compile time. Driver
+/// crates hand a fixed-size descriptor array to this and get back
+/// the exact bytes the WASM custom section will carry.
+///
+/// `EXPORTS` and `IMPORTS` are the compile-time count parameters;
+/// `N` is the resulting buffer length (must equal
+/// `manifest_size(EXPORTS, IMPORTS)`). The const-eval engine
+/// catches any mismatch as a compile error.
+///
+/// Each export/import descriptor is `(name_bytes, sig)` —
+/// the function NUL-pads the name, packs the sig byte, leaves
+/// 3 bytes of padding, and writes the result at the right
+/// offset. Imports additionally carry a module name (always
+/// `"wari"` in Phase 2, but spelled out per descriptor for
+/// future namespacing).
+pub const fn build_manifest<const N: usize>(
+    kind: DriverKind,
+    exports: &[(&[u8], FuncSig)],
+    imports: &[(&[u8], &[u8], FuncSig)],
+) -> [u8; N] {
+    let need = manifest_size(exports.len(), imports.len());
+    if need != N {
+        panic!("driver manifest: const-buffer size disagrees with descriptor counts");
+    }
+
+    let mut buf = [0u8; N];
+    let mut i = 0;
+
+    // Header: magic + abi_version + kind + export_count +
+    //         import_count + flags.  Little-endian per repr(C).
+    buf[0] = MAGIC[0];
+    buf[1] = MAGIC[1];
+    buf[2] = MAGIC[2];
+    buf[3] = MAGIC[3];
+    buf[4] = (MANIFEST_ABI_VERSION & 0xff) as u8;
+    buf[5] = (MANIFEST_ABI_VERSION >> 8) as u8;
+    buf[6] = ((kind as u16) & 0xff) as u8;
+    buf[7] = ((kind as u16) >> 8) as u8;
+    let ec = exports.len() as u16;
+    buf[8] = (ec & 0xff) as u8;
+    buf[9] = (ec >> 8) as u8;
+    let ic = imports.len() as u16;
+    buf[10] = (ic & 0xff) as u8;
+    buf[11] = (ic >> 8) as u8;
+    // flags u32 = 0 (already zeroed)
+    i = 16;
+
+    // Exports — NAME_MAX-padded name + 1 sig byte + 3 pad bytes.
+    let mut e = 0;
+    while e < exports.len() {
+        let (name, sig) = exports[e];
+        if name.len() >= NAME_MAX {
+            panic!("driver manifest: export name does not fit in NAME_MAX bytes");
+        }
+        let mut k = 0;
+        while k < name.len() {
+            buf[i + k] = name[k];
+            k += 1;
+        }
+        // NUL-padding already in place; sig at offset NAME_MAX.
+        buf[i + NAME_MAX] = sig as u8;
+        // 3 bytes of padding remain zero.
+        i += NAME_MAX + 4;
+        e += 1;
+    }
+
+    // Imports — module + name + sig + pad.
+    let mut m = 0;
+    while m < imports.len() {
+        let (module, name, sig) = imports[m];
+        if module.len() >= MODULE_MAX {
+            panic!("driver manifest: import module name does not fit in MODULE_MAX bytes");
+        }
+        if name.len() >= NAME_MAX {
+            panic!("driver manifest: import name does not fit in NAME_MAX bytes");
+        }
+        let mut k = 0;
+        while k < module.len() {
+            buf[i + k] = module[k];
+            k += 1;
+        }
+        let mut k2 = 0;
+        while k2 < name.len() {
+            buf[i + MODULE_MAX + k2] = name[k2];
+            k2 += 1;
+        }
+        buf[i + MODULE_MAX + NAME_MAX] = sig as u8;
+        i += MODULE_MAX + NAME_MAX + 4;
+        m += 1;
+    }
+
+    let _ = i; // silence "unused at end" — kept for future asserts
+    buf
+}
+
 /// Pad an ASCII byte string into a fixed-size NUL-terminated buffer.
 /// Used by the `wari_driver!` macro to lower string literals into
 /// the manifest's `[u8; N]` name fields. Marked `const` so it runs
@@ -374,6 +476,98 @@ pub const fn pad_name<const N: usize>(name: &[u8]) -> [u8; N] {
         i += 1;
     }
     out
+}
+
+// ── Driver-side macros ───────────────────────────────────────────
+//
+// The macros below are the driver author's only required surface.
+// They:
+//   - emit `#[no_mangle] extern "C"` shims that translate the WASM
+//     ABI (linmem offsets) into Rust slices and dispatch into the
+//     trait impl;
+//   - emit a `WARI_DRIVER_MANIFEST` static in the
+//     `wari_driver_manifest` WASM custom section, byte-exactly
+//     matching the trait the driver is implementing.
+//
+// One macro per `DriverKind`. Adding a new kind = adding a new
+// trait, a new manifest descriptor list, and a new macro. The
+// repetition keeps each macro auditable in isolation.
+
+/// Declare a Tier-2 UART driver.
+///
+/// Usage:
+/// ```ignore
+/// use wari_driver_iface::{wari_uart_driver, UartDriver};
+///
+/// pub struct Driver;
+/// impl UartDriver for Driver {
+///     fn write(buf: &[u8]) -> i32 { /* push to UART */ }
+/// }
+/// wari_uart_driver!(Driver);
+/// ```
+///
+/// Expands to:
+///
+/// - `extern "C" fn write(buf_ptr: u32, len: u32) -> i32` — the
+///   wasm-ABI shim. Reads `len` bytes from linmem at `buf_ptr` and
+///   dispatches into `<$t as UartDriver>::write(slice)`.
+/// - `extern "C" fn _start()` — empty WASI command entrypoint, so
+///   the kernel's explicit `_start.call()` succeeds.
+/// - A 192-byte `WARI_DRIVER_MANIFEST` static in section
+///   `wari_driver_manifest`, declaring kind = Uart and the two
+///   exports (`write`, `_start`) and two imports
+///   (`wari_mmio_write8`, `wari_mmio_read8`).
+#[macro_export]
+macro_rules! wari_uart_driver {
+    ($t:ty) => {
+        // ─── exports ────────────────────────────────────────────
+        //
+        // Empty WASI-command entrypoint. The kernel calls _start
+        // explicitly post-instantiate (wasmi 0.32 does not auto-
+        // run exported _start the way wasmi 1.0's
+        // instantiate_and_start did).
+        #[no_mangle]
+        pub extern "C" fn _start() {}
+
+        /// `wari::write(buf_ptr: u32, len: u32) -> i32` — wasm-ABI
+        /// shim, dispatches to the trait impl.
+        #[no_mangle]
+        pub extern "C" fn write(buf_ptr: u32, len: u32) -> i32 {
+            // SAFETY: kernel-validated linear-memory slice; length
+            // fits in u32 by ABI; the kernel's host-fn surface is
+            // the only path by which this is invoked, so the
+            // pointer is in-bounds for the driver's linmem.
+            let slice = unsafe {
+                core::slice::from_raw_parts(
+                    buf_ptr as *const u8,
+                    len as usize,
+                )
+            };
+            <$t as $crate::UartDriver>::write(slice)
+        }
+
+        // ─── manifest ──────────────────────────────────────────
+        //
+        // 192-byte image, computed at compile time from the
+        // descriptors below. `#[link_section]` places it in a WASM
+        // custom section named `wari_driver_manifest`. `#[used]`
+        // keeps the linker from stripping it under LTO.
+        #[link_section = "wari_driver_manifest"]
+        #[used]
+        #[no_mangle]
+        pub static WARI_DRIVER_MANIFEST: [u8; 192] =
+            $crate::build_manifest::<192>(
+                $crate::DriverKind::Uart,
+                &[
+                    (b"write",  $crate::FuncSig::U32xU32I32),
+                    (b"_start", $crate::FuncSig::UnitUnit),
+                ],
+                &[
+                    (b"wari", b"wari_mmio_write8", $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"wari_mmio_read8",  $crate::FuncSig::U32U32),
+                ],
+            );
+    };
 }
 
 #[cfg(test)]
@@ -433,6 +627,45 @@ mod tests {
         assert_eq!(n[5], 0);
         assert_eq!(n[6], 0);
         assert_eq!(n[7], 0);
+    }
+
+    #[test]
+    fn build_manifest_uart_round_trip() {
+        // Reproduce what the wari_uart_driver! macro emits and
+        // verify byte-by-byte that the header is correct + the
+        // export/import names land at the right offsets.
+        const M: [u8; 192] = build_manifest::<192>(
+            DriverKind::Uart,
+            &[
+                (b"write",  FuncSig::U32xU32I32),
+                (b"_start", FuncSig::UnitUnit),
+            ],
+            &[
+                (b"wari", b"wari_mmio_write8", FuncSig::U32xU32I32),
+                (b"wari", b"wari_mmio_read8",  FuncSig::U32U32),
+            ],
+        );
+        // Header
+        assert_eq!(&M[0..4], b"WDM\0");
+        assert_eq!(u16::from_le_bytes([M[4], M[5]]), MANIFEST_ABI_VERSION);
+        assert_eq!(u16::from_le_bytes([M[6], M[7]]), DriverKind::Uart as u16);
+        assert_eq!(u16::from_le_bytes([M[8], M[9]]), 2);
+        assert_eq!(u16::from_le_bytes([M[10], M[11]]), 2);
+        // First export = "write", sig U32xU32I32
+        let off = 16;
+        assert_eq!(&M[off..off + 5], b"write");
+        assert_eq!(M[off + 5], 0); // NUL pad
+        assert_eq!(M[off + NAME_MAX], FuncSig::U32xU32I32 as u8);
+        // Second export = "_start"
+        let off = 16 + 36;
+        assert_eq!(&M[off..off + 6], b"_start");
+        assert_eq!(M[off + NAME_MAX], FuncSig::UnitUnit as u8);
+        // First import: module "wari", name "wari_mmio_write8"
+        let off = 16 + 2 * 36;
+        assert_eq!(&M[off..off + 4], b"wari");
+        assert_eq!(M[off + 4], 0);
+        assert_eq!(&M[off + MODULE_MAX..off + MODULE_MAX + 16], b"wari_mmio_write8");
+        assert_eq!(M[off + MODULE_MAX + NAME_MAX], FuncSig::U32xU32I32 as u8);
     }
 
     #[test]

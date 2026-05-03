@@ -11,6 +11,11 @@ authors.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+# The shared driver contract: trait declarations + manifest types
+# + `wari_uart_driver!` macro. This crate is the ONLY surface
+# Tier-2 drivers depend on; it pins the ABI version a driver
+# binary speaks. See docs/driver-interface-design.md.
+wari-driver-iface = { path = "../../driver-iface" }
 
 # Per-platform feature gate. Exactly one of `qemu` / `vf2` must be active
 # at build time; both bake the platform's MMIO base + register stride
