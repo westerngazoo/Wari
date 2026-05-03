@@ -73,8 +73,10 @@ help:
 # ── Build ──────────────────────────────────────────────────────
 
 build: sign-uart-driver sign-net-driver build-hello
-	cd kernel && WARI_BUILD=$(NEXT_BUILD) cargo build --release --features qemu
+	@echo "  [build] kernel: QEMU virt (entry 0x80200000)"
+	@cd kernel && WARI_BUILD=$(NEXT_BUILD) cargo build --release --features qemu
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
+	@echo "  [build] kernel: build $(NEXT_BUILD), QEMU virt"
 
 # Build the Tier-1 hello.wasm and stage it where the kernel's
 # `runtime/hello_blob.rs` `include_bytes!` expects it. Phase 0
@@ -89,14 +91,16 @@ build-hello:
 # `include_bytes!`s the platform-matched signed blob — see
 # kernel/src/runtime/uart_blob.rs.
 build-uart-driver:
-	mkdir -p build/drivers
-	# QEMU variant
-	cd drivers/uart && cargo build --release --features qemu --no-default-features
-	cp target/wasm32-unknown-unknown/release/wari_driver_uart.wasm \
+	@mkdir -p build/drivers
+	@echo "  [build] uart driver: building both platform variants (QEMU + VF2)"
+	@echo "          (kernel/src/runtime/uart_blob.rs cfg-selects which one is embedded)"
+	@echo "  [build] uart driver: QEMU variant"
+	@cd drivers/uart && cargo build --release --features qemu --no-default-features
+	@cp target/wasm32-unknown-unknown/release/wari_driver_uart.wasm \
 		build/drivers/uart-qemu.wasm
-	# VF2 variant
-	cd drivers/uart && cargo build --release --features vf2 --no-default-features
-	cp target/wasm32-unknown-unknown/release/wari_driver_uart.wasm \
+	@echo "  [build] uart driver: VF2 variant"
+	@cd drivers/uart && cargo build --release --features vf2 --no-default-features
+	@cp target/wasm32-unknown-unknown/release/wari_driver_uart.wasm \
 		build/drivers/uart-vf2.wasm
 
 # Sign both Tier-2 UART driver variants. Required before the kernel
@@ -112,14 +116,16 @@ sign-uart-driver: build-uart-driver
 # `include_bytes!`s the platform-matched signed blob — see
 # kernel/src/runtime/net_blob.rs.
 build-net-driver:
-	mkdir -p build/drivers
-	# QEMU variant (VirtIO-net)
-	cd drivers/net && cargo build --release --features qemu --no-default-features
-	cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
+	@mkdir -p build/drivers
+	@echo "  [build] net driver: building both platform variants (QEMU + VF2)"
+	@echo "          (kernel/src/runtime/net_blob.rs cfg-selects which one is embedded)"
+	@echo "  [build] net driver: QEMU variant (VirtIO-net)"
+	@cd drivers/net && cargo build --release --features qemu --no-default-features
+	@cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
 		build/drivers/net-qemu.wasm
-	# VF2 variant (JH7110 GMAC — Phase 1c stub)
-	cd drivers/net && cargo build --release --features vf2 --no-default-features
-	cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
+	@echo "  [build] net driver: VF2 variant (JH7110 GMAC stub, Phase-1c)"
+	@cd drivers/net && cargo build --release --features vf2 --no-default-features
+	@cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
 		build/drivers/net-vf2.wasm
 
 # Sign both Tier-2 net driver variants. Required before the kernel
@@ -187,10 +193,12 @@ audit:
 # ── VisionFive 2 ───────────────────────────────────────────────
 
 kernel-vf2: sign-uart-driver sign-net-driver
+	@echo "  [build] kernel: VF2 (entry 0x40200000, hart 1)"
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
-	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
+	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
 	  cargo build --release --features vf2 --no-default-features
-	$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+	@echo "  [build] kernel: build $(NEXT_BUILD), VF2"
 	@ls -lh $(KERNEL_BIN)
 	@echo ">>> $(KERNEL_BIN) ready — build $(NEXT_BUILD)"
 
