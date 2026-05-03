@@ -467,8 +467,7 @@ fn populate_rx() -> Result<(), ()> {
 /// Caller is responsible for prepending the 12-byte VirtIO-net
 /// header to the frame (per §5.1.6); Phase-1b's smoltcp wrapper
 /// (PR Net-5) handles this.
-#[no_mangle]
-pub extern "C" fn tx_send(buf_off: u32, len: u32) -> i32 {
+pub fn driver_tx_send(buf_off: u32, len: u32) -> i32 {
     if len > ETH_FRAME_MAX as u32 {
         return -1;
     }
@@ -519,8 +518,7 @@ pub extern "C" fn tx_send(buf_off: u32, len: u32) -> i32 {
 /// `0` (== both fields 0) is the "no packets" sentinel — a real
 /// packet always has len > 0 (Ethernet frames carry ≥ 60 bytes
 /// after preamble).
-#[no_mangle]
-pub extern "C" fn rx_pop() -> u64 {
+pub fn driver_rx_pop() -> u64 {
     let rx_used_off = core::ptr::addr_of_mut!(RX_USED) as u32;
     let device_idx = read_u16_le(rx_used_off + 2);
 
@@ -557,8 +555,7 @@ pub extern "C" fn rx_pop() -> u64 {
 /// Recycle a buffer after the caller is done with it. Builds a
 /// fresh rx descriptor at `desc_idx` and adds it to the available
 /// ring so the device can write a new packet there.
-#[no_mangle]
-pub extern "C" fn rx_recycle(desc_idx: u32) -> i32 {
+pub fn driver_rx_recycle(desc_idx: u32) -> i32 {
     if (desc_idx as usize) >= RX_BUF_COUNT {
         return -1;
     }
@@ -714,8 +711,7 @@ mod nic_iface {
 /// Kernel idle-loop entry point. Returns 1 if smoltcp processed
 /// any state, 0 if idle. Negative on init failure (vf2 stub or
 /// nic_iface not initialized).
-#[no_mangle]
-pub extern "C" fn poll(timestamp_ms: u64) -> i32 {
+pub fn driver_poll(timestamp_ms: u64) -> i32 {
     #[cfg(feature = "qemu")]
     {
         if nic_iface::poll(timestamp_ms) {
@@ -1092,8 +1088,7 @@ fn init_virtio() -> Result<[u8; 6], ()> {
 /// `Net.initialized = false` on the kernel side. The kernel-side
 /// `run_tier2_net` will see this and log an error rather than the
 /// success line.
-#[no_mangle]
-pub extern "C" fn _start() {
+pub fn driver_start() {
     #[cfg(feature = "qemu")]
     {
         let mac = match init_virtio() {
@@ -1125,3 +1120,41 @@ pub extern "C" fn _start() {
     #[cfg(feature = "vf2")]
     {}
 }
+
+// ── Tier-2 net driver registration (PR DI-4) ─────────────────────
+//
+// The driver author's surface for Phase-2 onward is the
+// `wari_driver_iface::NetDriver` trait + the `wari_net_driver!`
+// macro. The macro emits the wasm-ABI shims (`_start`, `poll`,
+// `tx_send`, `rx_pop`, `rx_recycle`) and the 612-byte manifest
+// in WASM custom section `wari_driver_manifest`.
+//
+// The trait methods just delegate into the existing `driver_*`
+// functions to keep the migration narrow — no logic moves. A
+// future PR may inline the bodies into the trait if needed.
+
+/// Tier-2 net driver instance (zero-sized; per-call dispatch).
+pub struct Driver;
+
+impl wari_driver_iface::NetDriver for Driver {
+    fn start() {
+        driver_start();
+    }
+    fn poll(timestamp_ms: u64) -> i32 {
+        driver_poll(timestamp_ms)
+    }
+    fn tx_send(buf: &[u8]) -> i32 {
+        // Slice → (offset, len) for the existing virtqueue path.
+        // `buf.as_ptr() as u32` is the WASM linmem offset because
+        // wasm32 has 32-bit pointers.
+        driver_tx_send(buf.as_ptr() as u32, buf.len() as u32)
+    }
+    fn rx_pop() -> u64 {
+        driver_rx_pop()
+    }
+    fn rx_recycle(desc_idx: u32) -> i32 {
+        driver_rx_recycle(desc_idx)
+    }
+}
+
+wari_driver_iface::wari_net_driver!(Driver);

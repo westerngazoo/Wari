@@ -570,6 +570,109 @@ macro_rules! wari_uart_driver {
     };
 }
 
+/// Total manifest size for the Tier-2 net driver. Computed as
+/// `manifest_size(5, 8)` = 16 + 5*36 + 8*52 = 612 bytes. Exported
+/// so the macro and any external tooling agree.
+pub const NET_MANIFEST_SIZE: usize = manifest_size(5, 8);
+
+/// Declare a Tier-2 network driver.
+///
+/// Usage mirrors [`wari_uart_driver!`]:
+///
+/// ```ignore
+/// use wari_driver_iface::{wari_net_driver, NetDriver};
+///
+/// pub struct Driver;
+/// impl NetDriver for Driver {
+///     fn start() { /* virtio init */ }
+///     fn poll(t: u64) -> i32 { /* smoltcp poll */ }
+///     fn tx_send(buf: &[u8]) -> i32 { /* virtqueue tx */ }
+///     fn rx_pop() -> u64 { /* drain used ring */ }
+///     fn rx_recycle(i: u32) -> i32 { /* recycle desc */ }
+/// }
+/// wari_net_driver!(Driver);
+/// ```
+///
+/// Expands to the 5 wasm-ABI shims (`_start`, `poll`, `tx_send`,
+/// `rx_pop`, `rx_recycle`) and a 612-byte `WARI_DRIVER_MANIFEST`
+/// static in section `wari_driver_manifest`, declaring kind = Net
+/// and the 8 host-fn imports the smoltcp-backed virtio driver
+/// requires.
+#[macro_export]
+macro_rules! wari_net_driver {
+    ($t:ty) => {
+        // ─── exports ────────────────────────────────────────────
+
+        /// Driver-init entrypoint. Kernel calls this explicitly
+        /// post-instantiate (see `runtime::run_tier2_net`). On
+        /// success the trait's `start` has populated the kernel-
+        /// side `Net.initialized = true` via `wari_nic_set_mac`.
+        #[no_mangle]
+        pub extern "C" fn _start() {
+            <$t as $crate::NetDriver>::start();
+        }
+
+        /// `wari::poll(timestamp_ms: u64) -> i32` — drive smoltcp's
+        /// Interface::poll for one tick. Kernel calls per idle loop.
+        #[no_mangle]
+        pub extern "C" fn poll(timestamp_ms: u64) -> i32 {
+            <$t as $crate::NetDriver>::poll(timestamp_ms)
+        }
+
+        /// `wari::tx_send(buf_off, len) -> i32` — queue + notify.
+        #[no_mangle]
+        pub extern "C" fn tx_send(buf_off: u32, len: u32) -> i32 {
+            // SAFETY: kernel-validated linmem slice (same shape as
+            // the UART shim).
+            let slice = unsafe {
+                core::slice::from_raw_parts(
+                    buf_off as *const u8,
+                    len as usize,
+                )
+            };
+            <$t as $crate::NetDriver>::tx_send(slice)
+        }
+
+        /// `wari::rx_pop() -> u64` — packed `(buf_off, len)`.
+        #[no_mangle]
+        pub extern "C" fn rx_pop() -> u64 {
+            <$t as $crate::NetDriver>::rx_pop()
+        }
+
+        /// `wari::rx_recycle(desc_idx: u32) -> i32`
+        #[no_mangle]
+        pub extern "C" fn rx_recycle(desc_idx: u32) -> i32 {
+            <$t as $crate::NetDriver>::rx_recycle(desc_idx)
+        }
+
+        // ─── manifest ──────────────────────────────────────────
+        #[link_section = "wari_driver_manifest"]
+        #[used]
+        #[no_mangle]
+        pub static WARI_DRIVER_MANIFEST: [u8; $crate::NET_MANIFEST_SIZE] =
+            $crate::build_manifest::<{ $crate::NET_MANIFEST_SIZE }>(
+                $crate::DriverKind::Net,
+                &[
+                    (b"_start",     $crate::FuncSig::UnitUnit),
+                    (b"poll",       $crate::FuncSig::U64I32),
+                    (b"tx_send",    $crate::FuncSig::U32xU32I32),
+                    (b"rx_pop",     $crate::FuncSig::UnitU64),
+                    (b"rx_recycle", $crate::FuncSig::U32I32),
+                ],
+                &[
+                    (b"wari", b"net_mmio_write32",  $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"net_mmio_read32",   $crate::FuncSig::U32U32),
+                    (b"wari", b"nic_set_mac",       $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"notification_wait", $crate::FuncSig::U32I32),
+                    (b"wari", b"notification_ack",  $crate::FuncSig::U32I32),
+                    (b"wari", b"nic_attach_queue",  $crate::FuncSig::U32x5I32),
+                    (b"wari", b"nic_queue_notify",  $crate::FuncSig::U32I32),
+                    (b"wari", b"lin_mem_base",      $crate::FuncSig::UnitU64),
+                ],
+            );
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

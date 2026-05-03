@@ -12,6 +12,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 
+# Driver contract — same crate the UART driver depends on.
+wari-driver-iface = { path = "../../driver-iface" }
+
 # smoltcp — embedded TCP/IP stack, no_std, allocation-free in the
 # default-features = false configuration. Phase 1b enables the
 # minimal protocol set: Ethernet medium + IPv4 + TCP + UDP + ICMP.

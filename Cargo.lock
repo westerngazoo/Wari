@@ -380,6 +380,7 @@ name = "wari-driver-net"
 version = "0.0.1"
 dependencies = [
  "smoltcp",
+ "wari-driver-iface",
 ]
 
 [[package]]
