@@ -54,6 +54,13 @@ pub struct Tier2NetHandle {
     /// state changed (packets drained or queued), 0 otherwise.
     /// Phase-1b QEMU only; vf2 stub returns -1.
     pub poll_fn: TypedFunc<u64, i32>,
+    /// `wari::socket_create(proto: u32) -> i32` — driver allocates
+    /// a smoltcp socket, returns its raw handle on success or a
+    /// negative errno (PR Net-6a).
+    pub socket_create_fn: TypedFunc<u32, i32>,
+    /// `wari::socket_close(handle: u32) -> i32` — tears down a
+    /// previously-allocated smoltcp socket.
+    pub socket_close_fn: TypedFunc<u32, i32>,
 }
 
 /// Boot-initialized singleton. Set once by `install` from
@@ -105,6 +112,42 @@ pub unsafe fn poll(timestamp_ms: u64) -> Result<i32, KernelError> {
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     h.poll_fn
         .call(&mut h.store, timestamp_ms)
+        .map_err(|_| KernelError::DriverError)
+}
+
+/// Allocate a smoltcp socket of `proto` via the driver. Returns
+/// the driver's i32 (positive raw socket handle on success, or
+/// negative errno) or `KernelError::DriverError` on trap. Called
+/// from the Tier-1-facing `wari::net_socket_create` host fn after
+/// the kernel cap-checks the caller's Net cap.
+///
+/// # Safety
+///
+/// `install` must have run; INV-1 single-hart for the
+/// `&mut TIER2_NET` accessor.
+pub unsafe fn socket_create(proto: u32) -> Result<i32, KernelError> {
+    // SAFETY: INV-1 + INV-8.
+    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
+        .expect("TIER2_NET ref always valid (static)");
+    let h = slot.as_mut().ok_or(KernelError::DriverError)?;
+    h.socket_create_fn
+        .call(&mut h.store, proto)
+        .map_err(|_| KernelError::DriverError)
+}
+
+/// Tear down a smoltcp socket via the driver. Same return
+/// convention + safety as [`socket_create`].
+///
+/// # Safety
+///
+/// Same as [`socket_create`].
+pub unsafe fn socket_close(handle: u32) -> Result<i32, KernelError> {
+    // SAFETY: INV-1 + INV-8.
+    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
+        .expect("TIER2_NET ref always valid (static)");
+    let h = slot.as_mut().ok_or(KernelError::DriverError)?;
+    h.socket_close_fn
+        .call(&mut h.store, handle)
         .map_err(|_| KernelError::DriverError)
 }
 

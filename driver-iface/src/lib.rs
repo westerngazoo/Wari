@@ -382,7 +382,7 @@ pub trait UartDriver {
 
 /// Tier-2 network driver contract. Exposes the surface the kernel
 /// uses to drive smoltcp from its idle loop and to wire RX/TX to
-/// Tier-1 socket host fns (Phase-1b PR Net-6 in flight).
+/// Tier-1 socket host fns (Phase-1b PR Net-6).
 pub trait NetDriver {
     /// Run the driver's one-shot init. Called by the kernel before
     /// `poll`. Failure leaves `Net.initialized = false` and the
@@ -406,6 +406,50 @@ pub trait NetDriver {
     /// Recycle an RX buffer back to the device. Called after the
     /// kernel-side smoltcp has consumed the bytes from `rx_pop`.
     fn rx_recycle(desc_idx: u32) -> i32;
+
+    // ── Socket API (PR Net-6a) ─────────────────────────────────
+    //
+    // Synchronous driver-RPC path: the kernel's Tier-1-facing
+    // `wari::net_socket_*` host fns dispatch directly into these
+    // exports. Per-call: kernel validates the calling tier's
+    // caps, calls the driver, mints/revokes Socket caps in the
+    // calling tier's CSpace as appropriate.
+
+    /// Allocate a new smoltcp socket of the given protocol.
+    /// Returns a positive smoltcp handle on success, or a negative
+    /// errno (`E_NOMEM` if the smoltcp socket pool is full,
+    /// `E_INVAL` if `proto` is not a known [`SocketProto`]).
+    fn socket_create(proto: u32) -> i32;
+
+    /// Tear down a smoltcp socket previously returned by
+    /// `socket_create`. Returns 0 on success, negative errno on
+    /// failure (e.g. `E_INVAL` if the handle is unknown).
+    fn socket_close(handle: u32) -> i32;
+}
+
+/// Socket protocol selector — passed as the `proto` arg of
+/// [`NetDriver::socket_create`]. Matches the
+/// `wari::net_socket_create` host fn ABI from
+/// `docs/net-driver-design.md` §6.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SocketProto {
+    /// TCP socket. Backed by smoltcp's `socket-tcp` feature.
+    Tcp = 1,
+    /// UDP socket. Backed by smoltcp's `socket-udp` feature.
+    Udp = 2,
+}
+
+impl SocketProto {
+    /// Decode a raw u32 into a known protocol; returns `None` for
+    /// any unknown value (callers turn that into `E_INVAL`).
+    pub fn from_raw(v: u32) -> Option<Self> {
+        match v {
+            1 => Some(SocketProto::Tcp),
+            2 => Some(SocketProto::Udp),
+            _ => None,
+        }
+    }
 }
 
 // ── Build helpers (compile-time use by the macro) ────────────────
@@ -634,8 +678,12 @@ macro_rules! wari_uart_driver {
 }
 
 /// Total manifest size for the Tier-2 net driver. Computed from
-/// `manifest_size(5, 6)` = 16 + 5*36 + 6*52 = 508 bytes. Exported
+/// `manifest_size(7, 6)` = 16 + 7*36 + 6*52 = 580 bytes. Exported
 /// so the macro and external tooling agree on the byte length.
+///
+/// 7 exports: `_start`, `poll`, `tx_send`, `rx_pop`, `rx_recycle`
+/// (Phase-1b PR Net-4/5b) plus `socket_create`, `socket_close`
+/// (PR Net-6a — Tier-1 socket API entry points).
 ///
 /// 6 imports cover what the smoltcp-backed VirtIO driver actually
 /// calls today: `net_mmio_write32`, `net_mmio_read32`,
@@ -646,7 +694,7 @@ macro_rules! wari_uart_driver {
 /// adding them to the manifest would make the sign-tool refuse
 /// the binary as "manifest declares an import the wasm does not
 /// request". Re-add them when the driver actually calls them.
-pub const NET_MANIFEST_SIZE: usize = manifest_size(5, 6);
+pub const NET_MANIFEST_SIZE: usize = manifest_size(7, 6);
 
 /// Declare a Tier-2 network driver.
 ///
@@ -718,6 +766,18 @@ macro_rules! wari_net_driver {
             <$t as $crate::NetDriver>::rx_recycle(desc_idx)
         }
 
+        /// `wari::socket_create(proto: u32) -> i32` (PR Net-6a)
+        #[no_mangle]
+        pub extern "C" fn socket_create(proto: u32) -> i32 {
+            <$t as $crate::NetDriver>::socket_create(proto)
+        }
+
+        /// `wari::socket_close(handle: u32) -> i32` (PR Net-6a)
+        #[no_mangle]
+        pub extern "C" fn socket_close(handle: u32) -> i32 {
+            <$t as $crate::NetDriver>::socket_close(handle)
+        }
+
         // ─── manifest ──────────────────────────────────────────
         #[link_section = "wari_driver_manifest"]
         #[used]
@@ -726,11 +786,13 @@ macro_rules! wari_net_driver {
             $crate::build_manifest::<{ $crate::NET_MANIFEST_SIZE }>(
                 $crate::DriverKind::Net,
                 &[
-                    (b"_start",     $crate::FuncSig::UnitUnit),
-                    (b"poll",       $crate::FuncSig::U64I32),
-                    (b"tx_send",    $crate::FuncSig::U32xU32I32),
-                    (b"rx_pop",     $crate::FuncSig::UnitU64),
-                    (b"rx_recycle", $crate::FuncSig::U32I32),
+                    (b"_start",       $crate::FuncSig::UnitUnit),
+                    (b"poll",         $crate::FuncSig::U64I32),
+                    (b"tx_send",      $crate::FuncSig::U32xU32I32),
+                    (b"rx_pop",       $crate::FuncSig::UnitU64),
+                    (b"rx_recycle",   $crate::FuncSig::U32I32),
+                    (b"socket_create",$crate::FuncSig::U32I32),
+                    (b"socket_close", $crate::FuncSig::U32I32),
                 ],
                 &[
                     // Names match the driver's #[link_name = "..."]

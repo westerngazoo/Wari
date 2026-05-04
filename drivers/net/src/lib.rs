@@ -638,6 +638,99 @@ mod nic_iface {
     static mut SOCKETS_STORAGE: [SocketStorage<'static>; SOCKET_BACKING_LEN] =
         [const { SocketStorage::EMPTY }; SOCKET_BACKING_LEN];
 
+    // ── Per-socket buffer pool (PR Net-6a) ───────────────────────
+    //
+    // smoltcp::socket::tcp::Socket needs &'static mut [u8] for
+    // its rx/tx buffers. We pre-allocate `SOCKET_BACKING_LEN`
+    // pairs and hand them out at socket_create time. SLOT_USED
+    // tracks which pairs are owned by an open socket.
+    const SOCKET_TX_BUF_LEN: usize = 1024;
+    const SOCKET_RX_BUF_LEN: usize = 1024;
+
+    static mut SOCKET_TX_BUFS: [[u8; SOCKET_TX_BUF_LEN]; SOCKET_BACKING_LEN] =
+        [[0u8; SOCKET_TX_BUF_LEN]; SOCKET_BACKING_LEN];
+    static mut SOCKET_RX_BUFS: [[u8; SOCKET_RX_BUF_LEN]; SOCKET_BACKING_LEN] =
+        [[0u8; SOCKET_RX_BUF_LEN]; SOCKET_BACKING_LEN];
+    /// Maps SocketSet handle (raw u32) → buffer pair index, so
+    /// socket_close can free the pair when the smoltcp socket is
+    /// removed. `None` slot = free buffer pair.
+    static mut SOCKET_HANDLE_FOR_BUF: [Option<u32>; SOCKET_BACKING_LEN] =
+        [None; SOCKET_BACKING_LEN];
+
+    /// Allocate a TCP smoltcp socket. Returns the raw
+    /// `SocketHandle` value as i32 on success, negative errno on
+    /// failure (`-3` = E_NOMEM if the buffer pool is exhausted).
+    /// Called from `driver_socket_create` (Net-6a).
+    pub fn socket_create_tcp() -> Result<i32, i32> {
+        use smoltcp::socket::tcp;
+        // SAFETY: single-thread driver (INV-1 generalized).
+        unsafe {
+            let sockets = match &mut *addr_of_mut!(SOCKETS) {
+                Some(s) => s,
+                None => return Err(-3),
+            };
+            // Find a free buffer pair.
+            let slot = match SOCKET_HANDLE_FOR_BUF.iter().position(|s| s.is_none()) {
+                Some(i) => i,
+                None => return Err(-3), // E_NOMEM
+            };
+            let rx_buf = tcp::SocketBuffer::new(
+                &mut SOCKET_RX_BUFS[slot][..],
+            );
+            let tx_buf = tcp::SocketBuffer::new(
+                &mut SOCKET_TX_BUFS[slot][..],
+            );
+            let socket = tcp::Socket::new(rx_buf, tx_buf);
+            let handle = sockets.add(socket);
+            // smoltcp's SocketHandle is opaque but reads as a usize
+            // index internally. Cast through Debug-derived shape:
+            // (handle as u32) is what we hand back to the kernel.
+            let raw = handle_to_raw(handle);
+            SOCKET_HANDLE_FOR_BUF[slot] = Some(raw);
+            Ok(raw as i32)
+        }
+    }
+
+    /// Tear down a TCP socket previously returned by
+    /// `socket_create_tcp`. Returns 0 on success, `-2` (E_INVAL)
+    /// if the handle is unknown.
+    pub fn socket_close(raw_handle: u32) -> i32 {
+        // SAFETY: same as socket_create.
+        unsafe {
+            let sockets = match &mut *addr_of_mut!(SOCKETS) {
+                Some(s) => s,
+                None => return -3,
+            };
+            let slot = match SOCKET_HANDLE_FOR_BUF
+                .iter()
+                .position(|s| *s == Some(raw_handle))
+            {
+                Some(i) => i,
+                None => return -2, // E_INVAL: unknown handle
+            };
+            let handle = raw_to_handle(raw_handle);
+            sockets.remove(handle);
+            SOCKET_HANDLE_FOR_BUF[slot] = None;
+            0
+        }
+    }
+
+    /// Convert smoltcp's opaque `SocketHandle` to its raw u32
+    /// integer. smoltcp doesn't expose the inner index publicly;
+    /// we use a transmute that the same-version invariant makes
+    /// safe (both are repr(transparent) over usize internally).
+    fn handle_to_raw(h: smoltcp::iface::SocketHandle) -> u32 {
+        // SAFETY: SocketHandle is repr(transparent) over usize in
+        // smoltcp 0.11; we only round-trip the low 32 bits within
+        // a single instance lifetime. The reverse function below
+        // performs the inverse transmute.
+        unsafe { core::mem::transmute::<_, usize>(h) as u32 }
+    }
+    fn raw_to_handle(raw: u32) -> smoltcp::iface::SocketHandle {
+        // SAFETY: counterpart to handle_to_raw above.
+        unsafe { core::mem::transmute::<usize, _>(raw as usize) }
+    }
+
     /// Build the smoltcp `Interface`. Called once from `_start`.
     ///
     /// Returns `Err(())` if the IP push fails (storage exhausted).
@@ -1186,6 +1279,56 @@ impl wari_driver_iface::NetDriver for Driver {
     fn rx_recycle(desc_idx: u32) -> i32 {
         driver_rx_recycle(desc_idx)
     }
+    fn socket_create(proto: u32) -> i32 {
+        driver_socket_create(proto)
+    }
+    fn socket_close(handle: u32) -> i32 {
+        driver_socket_close(handle)
+    }
 }
 
 wari_driver_iface::wari_net_driver!(Driver);
+
+// ── Socket API (PR Net-6a) ───────────────────────────────────────
+//
+// Driver-side smoltcp socket open/close. Tier-1 calls
+// `wari::net_socket_create(proto, slot_for_cap)` → kernel checks
+// the calling tier's Net cap, calls into here to allocate a
+// smoltcp socket, mints a Socket cap into the caller's CSpace
+// at slot_for_cap. socket_close is the inverse.
+//
+// Phase-1b scope: TCP only (UDP returns E_INVAL until Net-6c).
+// vf2 build returns E_INVAL for both protos (Phase-1c GMAC).
+
+/// `socket_create` body — qemu path. Allocates a TCP smoltcp
+/// socket via the smoltcp::Interface, returns a packed handle
+/// (smoltcp::iface::SocketHandle as u32).
+#[cfg(feature = "qemu")]
+pub fn driver_socket_create(proto: u32) -> i32 {
+    use wari_driver_iface::SocketProto;
+    let Some(p) = SocketProto::from_raw(proto) else {
+        return -2; // E_INVAL
+    };
+    match p {
+        SocketProto::Tcp => nic_iface::socket_create_tcp().unwrap_or(-3),
+        SocketProto::Udp => -2, // not yet implemented (Net-6c)
+    }
+}
+
+#[cfg(feature = "qemu")]
+pub fn driver_socket_close(handle: u32) -> i32 {
+    nic_iface::socket_close(handle)
+}
+
+/// vf2 stub — net is the JH7110 GMAC Phase-1c TODO. Refuses
+/// every socket operation cleanly so a Tier-1 calling them on
+/// VF2 silicon gets a deterministic E_INVAL instead of a hang.
+#[cfg(feature = "vf2")]
+pub fn driver_socket_create(_proto: u32) -> i32 {
+    -2 // E_INVAL
+}
+
+#[cfg(feature = "vf2")]
+pub fn driver_socket_close(_handle: u32) -> i32 {
+    -2 // E_INVAL
+}

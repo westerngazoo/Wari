@@ -124,10 +124,18 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
         let poll_fn = instance
             .get_typed_func::<u64, i32>(&store, "poll")
             .map_err(|_| KernelError::DriverError)?;
+        let socket_create_fn = instance
+            .get_typed_func::<u32, i32>(&store, "socket_create")
+            .map_err(|_| KernelError::DriverError)?;
+        let socket_close_fn = instance
+            .get_typed_func::<u32, i32>(&store, "socket_close")
+            .map_err(|_| KernelError::DriverError)?;
         let handle = tier2_net::Tier2NetHandle {
             instance,
             store,
             poll_fn,
+            socket_create_fn,
+            socket_close_fn,
         };
         // SAFETY: INV-1 (single-hart) + INV-8 (boot-time post-init)
         // + one-time install pattern. `kmain` orders this call
