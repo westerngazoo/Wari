@@ -179,6 +179,30 @@ pub fn register_wasi_host_fns(
         )
         .map_err(|_| KernelError::BadWasm)?;
 
+    // PR Net-6b — Tier-1-facing socket API. Both fns dispatch to
+    // crate::cap::syscall, which validates the caller's Net cap
+    // at SLOT_NET, calls into the Tier-2 net driver, and mints/
+    // revokes Socket caps in the caller's CSpace.
+    use crate::cap::{net_socket_close_impl, net_socket_create_impl};
+    linker
+        .func_wrap(
+            "wari",
+            "net_socket_create",
+            move |_: Caller<'_, Tier1HostState>, proto: u32, slot_for_cap: u32| -> i32 {
+                net_socket_create_impl(pid, proto, slot_for_cap)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "net_socket_close",
+            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
+                net_socket_close_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
     Ok(())
 }
 

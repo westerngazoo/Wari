@@ -58,6 +58,20 @@ mod wasi {
         pub fn proc_exit(code: u32) -> !;
     }
 
+    /// Wari socket API (PR Net-6b). Tier-1 calls these to allocate
+    /// and tear down sockets via the Tier-2 net driver.
+    #[link(wasm_import_module = "wari")]
+    extern "C" {
+        /// Allocate a smoltcp socket of `proto` (1=TCP, 2=UDP) and
+        /// mint a Socket cap into the caller's CSpace at
+        /// `slot_for_cap`. Returns 0 on success, negative errno
+        /// otherwise.
+        pub fn net_socket_create(proto: u32, slot_for_cap: u32) -> i32;
+        /// Tear down the Socket cap at `slot`. Returns 0 on
+        /// success, negative errno otherwise.
+        pub fn net_socket_close(slot: u32) -> i32;
+    }
+
     /// WASI Preview 1 `iovec` — `(buf, buf_len)` pair.
     ///
     /// Layout matches the WASI P1 ABI: two `u32`s contiguous in linear
@@ -93,6 +107,30 @@ pub extern "C" fn _start() -> ! {
     // errno return (which we ignore — Phase 0's `_start` always exits
     // success).
     let _ = unsafe { wasi::fd_write(1, &iov, 1, &mut nwritten) };
+
+    // PR Net-6b — exercise the Tier-1 socket API. Allocates a TCP
+    // socket (proto=1) into CSpace slot 8 (well above the boot-
+    // installed slots 0/1/2 for stdout/exit/Net), then closes it.
+    // On success prints "  socket ok"; on any errno prints
+    // "  socket err N". Either way we proc_exit(0) — Phase-0 demo
+    // contract keeps the test green even if net is unavailable.
+    let create_rc = unsafe { wasi::net_socket_create(1, 8) };
+    if create_rc == 0 {
+        let close_rc = unsafe { wasi::net_socket_close(8) };
+        if close_rc == 0 {
+            let msg: &[u8] = b"  socket ok\r\n";
+            let iov2 = wasi::Iovec { buf: msg.as_ptr(), buf_len: msg.len() as u32 };
+            let _ = unsafe { wasi::fd_write(1, &iov2, 1, &mut nwritten) };
+        } else {
+            let msg: &[u8] = b"  socket close err\r\n";
+            let iov2 = wasi::Iovec { buf: msg.as_ptr(), buf_len: msg.len() as u32 };
+            let _ = unsafe { wasi::fd_write(1, &iov2, 1, &mut nwritten) };
+        }
+    } else {
+        let msg: &[u8] = b"  socket create err\r\n";
+        let iov2 = wasi::Iovec { buf: msg.as_ptr(), buf_len: msg.len() as u32 };
+        let _ = unsafe { wasi::fd_write(1, &iov2, 1, &mut nwritten) };
+    }
 
     // SAFETY: extern fn into a host import; `-> !` on the WASM side, the
     // host fn returns `wasmi::Error::i32_exit` which traps the instance

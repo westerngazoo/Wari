@@ -81,6 +81,13 @@ pub const PROC_ID_TIER2_NET: u8 = 4;
 
 /// Slot index for a module's primary cap (UART receive on Tier-2,
 /// stdout on Tier-1).
+/// Conventional cap-slot index for the Tier-1 Net cap (PR Net-6b).
+/// Tier-1 instances that hold a Net cap can call
+/// `wari::net_socket_create(proto, slot_for_cap)` — the impl
+/// validates the Net cap at SLOT_NET, then mints a derived
+/// Socket cap into the caller's `slot_for_cap`.
+pub const SLOT_NET: u8 = 2;
+
 const SLOT_PRIMARY: u8 = 0;
 /// Slot index for the exit cap (Tier-1 only).
 const SLOT_EXIT: u8 = 1;
@@ -188,7 +195,10 @@ pub fn init_root_caps() -> Result<(), KernelError> {
     let nic_kind = 1u8;
     let net_pool_idx = pools.nets.alloc(super::objects::Net::new(nic_kind))?;
     if let Some(net) = pools.nets.get_mut(net_pool_idx) {
-        net.refcount = 1; // the Tier-2 net driver's root cap
+        // 3 caps reference this Net: the driver's root cap (slot 0)
+        // and one derived cap each in tier-1 hello A + B (slot
+        // SLOT_NET = 2). PR Net-6b.
+        net.refcount = 3;
     }
 
     // 5b. Install the Net cap (READ + WRITE) at the net driver's
@@ -208,6 +218,9 @@ pub fn init_root_caps() -> Result<(), KernelError> {
             kind: ObjectKind::Net,
             rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
         };
+        // PR Net-6b: install Net cap into both Tier-1 hello CSpaces.
+        install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO,   net_pool_idx);
+        install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO_B, net_pool_idx);
     }
     let pools = object_pools();
 
@@ -304,6 +317,27 @@ fn install_tier1_caps(
             CAP_RIGHT_WRITE,
         );
     }
+}
+
+/// Install the Tier-1 Net cap (PR Net-6b). Derived from the
+/// driver's root Net cap — same `pool_index`, refcount-managed
+/// at the pool level. Granted READ + WRITE so the calling
+/// Tier-1 can socket_create / socket_close. Phase-1b grants the
+/// same Net cap to every Tier-1 in the demo; Phase 2+ ties the
+/// grant to a manifest-declared capability request.
+pub(super) fn install_tier1_net_cap(
+    cs: &mut [super::cspace::CSpace],
+    proc_id: u8,
+    net_pool_idx: u16,
+) {
+    cs[proc_id as usize].slots[SLOT_NET as usize] = Cap {
+        badge: 0,
+        parent: CapId::ROOT,
+        generation: 0,
+        pool_index: net_pool_idx,
+        kind: ObjectKind::Net,
+        rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
+    };
 }
 
 /// Install a root cap (no parent — `parent = CapId::ROOT`) into a

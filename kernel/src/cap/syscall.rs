@@ -844,6 +844,175 @@ pub fn cap_lookup_impl<T>(
 }
 
 // ─────────────────────────────────────────────────────────────────
+// net_socket_create / net_socket_close (PR Net-6b)
+// ─────────────────────────────────────────────────────────────────
+//
+// Tier-1 socket API entry points. The Phase-2 driver-manifest
+// contract guarantees the driver exports `socket_create` /
+// `socket_close` with the right signatures (kind=Net manifest
+// declares them); the kernel then validates the calling tier's
+// Net cap, dispatches into the driver, allocates a Socket pool
+// entry, and mints a Socket cap into the caller's CSpace.
+
+/// `wari::net_socket_create(proto: u32, slot_for_cap: u32) -> i32`.
+///
+/// Allocates a smoltcp socket of `proto` (1=Tcp, 2=Udp) via the
+/// Tier-2 net driver, then mints a Socket cap into the caller's
+/// CSpace at `slot_for_cap`. Returns 0 on success, negative
+/// errno on failure.
+///
+/// Errors:
+/// - `E_INVAL` — bad proc_id / bad slot index / unknown proto
+/// - `E_PERM`  — caller does not hold a Net cap with WRITE rights
+///               at `crate::cap::boot::SLOT_NET`, OR target slot
+///               is already occupied
+/// - `E_NOMEM` — Socket pool exhausted, or driver returned errno
+pub fn net_socket_create_impl(
+    proc_id: u8,
+    proto: u32,
+    slot_for_cap: u32,
+) -> i32 {
+    use crate::cap::boot::SLOT_NET;
+
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_INVAL;
+    }
+    if slot_for_cap >= CSPACE_SLOTS as u32 {
+        return E_INVAL;
+    }
+    let slot_for_cap = slot_for_cap as u8;
+
+    // 1. Validate Net cap at SLOT_NET, snapshot the parent ref.
+    let (net_cap, parent_id) = {
+        let cs = cspaces();
+        let cap = cs[proc_id as usize].slots[SLOT_NET as usize];
+        if cap.is_empty() || !matches!(cap.kind, ObjectKind::Net) {
+            return E_PERM;
+        }
+        if cap.rights & CAP_RIGHT_WRITE == 0 {
+            return E_PERM;
+        }
+        if !cs[proc_id as usize].slots[slot_for_cap as usize].is_empty() {
+            return E_PERM;
+        }
+        let gen = cs[proc_id as usize].generations[SLOT_NET as usize];
+        (cap, CapId::new(proc_id, SLOT_NET, gen))
+    };
+
+    // 2. Dispatch into driver — returns smoltcp socket handle as
+    //    positive i32 or negative errno.
+    // SAFETY: tier2_net::install ran during boot (run_tier2_net);
+    // single-hart INV-1 + INV-8.
+    let driver_ret = match unsafe { crate::runtime::tier2_net::socket_create(proto) } {
+        Ok(v) => v,
+        Err(_) => return E_NOMEM, // driver trapped
+    };
+    if driver_ret < 0 {
+        return driver_ret; // driver-side errno (E_INVAL / E_NOMEM)
+    }
+    let smoltcp_handle = driver_ret as u32;
+
+    // 3. Allocate a Socket pool entry that records parent Net pool
+    //    index + driver's smoltcp handle for later close.
+    let socket_pool_idx = {
+        let pools = object_pools();
+        match pools
+            .sockets
+            .alloc(super::objects::Socket::new(net_cap.pool_index, smoltcp_handle))
+        {
+            Ok(idx) => idx,
+            Err(_) => {
+                // Could not allocate — roll back the driver-side
+                // socket so we don't leak smoltcp state.
+                // SAFETY: same as create above.
+                let _ = unsafe {
+                    crate::runtime::tier2_net::socket_close(smoltcp_handle)
+                };
+                return E_NOMEM;
+            }
+        }
+    };
+
+    // 4. Mint Socket cap into caller's slot_for_cap. Refcount on
+    //    the Socket pool entry is bumped by `inc_refcount` to track
+    //    that this cap exists.
+    let target_gen = {
+        let cs = cspaces();
+        cs[proc_id as usize].generations[slot_for_cap as usize] as u32
+    };
+    let cap = Cap {
+        badge: 0,
+        parent: parent_id,
+        generation: target_gen,
+        pool_index: socket_pool_idx,
+        kind: ObjectKind::Socket,
+        rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
+    };
+    {
+        let cs = cspaces();
+        cs[proc_id as usize].slots[slot_for_cap as usize] = cap;
+    }
+    inc_refcount(ObjectKind::Socket, socket_pool_idx);
+
+    0
+}
+
+/// `wari::net_socket_close(slot: u32) -> i32`.
+///
+/// Tears down the Socket cap at `slot` — calls into the driver
+/// to release the smoltcp socket, frees the Socket pool entry,
+/// clears the cap, bumps the slot generation. Returns 0 on
+/// success, negative errno on failure.
+pub fn net_socket_close_impl(proc_id: u8, slot: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_INVAL;
+    }
+    if slot >= CSPACE_SLOTS as u32 {
+        return E_INVAL;
+    }
+    let slot = slot as u8;
+
+    // 1. Validate the cap, snapshot the smoltcp handle from the
+    //    Socket pool entry.
+    let (sock_cap, smoltcp_handle) = {
+        let cs = cspaces();
+        let cap = cs[proc_id as usize].slots[slot as usize];
+        if cap.is_empty() || !matches!(cap.kind, ObjectKind::Socket) {
+            return E_PERM;
+        }
+        let pools = object_pools();
+        let sock = match pools.sockets.get(cap.pool_index) {
+            Some(s) => s,
+            None => return E_INVAL, // dangling cap
+        };
+        (cap, sock.smoltcp_handle)
+    };
+
+    // 2. Tell the driver to release the smoltcp socket. Failures
+    //    here are surfaced but we proceed with cap cleanup so the
+    //    Tier-1 cannot wedge on a stuck socket.
+    // SAFETY: same as create above.
+    let driver_ret = unsafe { crate::runtime::tier2_net::socket_close(smoltcp_handle) }
+        .unwrap_or(-1);
+
+    // 3. Drop the cap, dec refcount (free pool entry on 0).
+    {
+        let cs = cspaces();
+        cs[proc_id as usize].slots[slot as usize] = Cap::empty();
+        cs[proc_id as usize].generations[slot as usize] =
+            cs[proc_id as usize].generations[slot as usize].wrapping_add(1);
+    }
+    dec_refcount(sock_cap.kind, sock_cap.pool_index);
+
+    if driver_ret != 0 {
+        // Surface the driver-side error to the caller.
+        driver_ret
+    } else {
+        0
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────
 
