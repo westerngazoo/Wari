@@ -192,7 +192,7 @@ audit:
 
 # ── VisionFive 2 ───────────────────────────────────────────────
 
-kernel-vf2: sign-uart-driver sign-net-driver
+kernel-vf2: sign-uart-driver sign-net-driver build-hello
 	@echo "  [build] kernel: VF2 (entry 0x40200000, hart 1)"
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
