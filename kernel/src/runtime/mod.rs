@@ -142,6 +142,30 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
         // before entering the idle loop that calls `tier2_net::poll`.
         unsafe { tier2_net::install(handle) };
         kprintln!("[net] smoltcp interface up, listening on 192.168.122.10/24");
+
+        // PR Net-6a-2 — boot-time self-test of the socket driver
+        // path. Allocates a TCP socket via the driver, closes it,
+        // logs the round-trip handle. Proves the wari_net_driver!
+        // macro's new socket_create / socket_close exports are
+        // correctly wired through the kernel typed-func handles.
+        // Tier-1-facing wari::net_socket_create / *_close are
+        // registered in wasi.rs; cap-mint integration lands in
+        // PR Net-6b alongside the demo Tier-1 app.
+        // SAFETY: install just ran (line above); INV-1 single-hart.
+        let create_proto = wari_driver_iface::SocketProto::Tcp as u32;
+        match unsafe { tier2_net::socket_create(create_proto) } {
+            Ok(handle) if handle >= 0 => {
+                kprintln!("[net] socket self-test: create=tcp -> handle={}", handle);
+                // SAFETY: same.
+                match unsafe { tier2_net::socket_close(handle as u32) } {
+                    Ok(0) => kprintln!("[net] socket self-test: close ok"),
+                    Ok(e) => kprintln!("[net] socket self-test: close errno={}", e),
+                    Err(_) => kprintln!("[net] socket self-test: close trapped"),
+                }
+            }
+            Ok(e) => kprintln!("[net] socket self-test: create errno={}", e),
+            Err(_) => kprintln!("[net] socket self-test: create trapped"),
+        }
     } else {
         kprintln!("[net] virtio init failed (mac zeroed) — net unavailable");
         // Drop net_inst here; kmain will skip the idle-loop poll
