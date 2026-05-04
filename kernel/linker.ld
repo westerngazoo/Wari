@@ -57,10 +57,16 @@ SECTIONS {
     . = ALIGN(4K);
     _end = .;
 
-    /* Boot stack — 64KB, grows down. _stack_bottom is the low end,
-     * _stack_top is the high end (initial sp). */
+    /* Boot stack + page-allocator pool — share this 1 MiB region.
+     * The stack pointer starts at _stack_top and grows DOWN; the
+     * page allocator hands out frames from _end (== _stack_bottom)
+     * UP. Bumped from 64 KiB → 1 MiB in PR Phase-1c-1.5 because
+     * adding MMIO mappings (PLIC + GMAC0) ran out of L3 page-table
+     * pages with the smaller region; the kernel rebooted in a loop
+     * mid-kvm::init. 1 MiB = 256 pages, enough for every MMIO
+     * region in the foreseeable future. */
     _stack_bottom = .;
-    . += 0x10000;
+    . += 0x100000;
     _stack_top = .;
 
     . = ALIGN(4K);
