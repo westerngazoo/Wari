@@ -159,6 +159,11 @@ pub enum FuncSig {
 
     /// `(u32, u32, u32, u32, u32) -> i32` — `nic_attach_queue`.
     U32x5I32 = 7,
+
+    /// `(u32, u32, u32) -> i32` — `socket_bind` (handle, ip_be,
+    /// port), `socket_send` / `socket_recv` (handle, buf_off, len).
+    /// Added in PR Net-6c.
+    U32x3I32 = 8,
     // Append-only. Renumbering breaks every signed driver.
 }
 
@@ -205,6 +210,7 @@ impl FuncSig {
             5 => Some(FuncSig::U64I32),
             6 => Some(FuncSig::UnitU64),
             7 => Some(FuncSig::U32x5I32),
+            8 => Some(FuncSig::U32x3I32),
             _ => None,
         }
     }
@@ -219,6 +225,7 @@ impl FuncSig {
         const E: &[WasmValType] = &[];
         const I32_1: &[WasmValType] = &[I32];
         const I32_2: &[WasmValType] = &[I32, I32];
+        const I32_3: &[WasmValType] = &[I32, I32, I32];
         const I32_5: &[WasmValType] = &[I32, I32, I32, I32, I32];
         const I64_1: &[WasmValType] = &[I64];
         match self {
@@ -229,6 +236,7 @@ impl FuncSig {
             FuncSig::U64I32     => WasmSigShape { params: I64_1, results: I32_1  },
             FuncSig::UnitU64    => WasmSigShape { params: E,     results: I64_1  },
             FuncSig::U32x5I32   => WasmSigShape { params: I32_5, results: I32_1  },
+            FuncSig::U32x3I32   => WasmSigShape { params: I32_3, results: I32_1  },
         }
     }
 }
@@ -425,6 +433,20 @@ pub trait NetDriver {
     /// `socket_create`. Returns 0 on success, negative errno on
     /// failure (e.g. `E_INVAL` if the handle is unknown).
     fn socket_close(handle: u32) -> i32;
+
+    /// Bind a TCP socket to a local IPv4 address + port. `ip_be`
+    /// is big-endian IPv4 (0 = unspecified / wildcard). Phase-1b
+    /// scope: stores intent inside the driver; the actual smoltcp
+    /// listen call happens in `socket_listen`. Returns 0 on
+    /// success, negative errno otherwise.
+    fn socket_bind(handle: u32, ip_be: u32, port: u32) -> i32;
+
+    /// Mark a TCP socket as listening on the port supplied via
+    /// `socket_bind`. `backlog` is currently ignored by the
+    /// smoltcp backing (single-pending-conn). Returns 0 on
+    /// success, negative errno otherwise (`E_INVAL` if the
+    /// socket has no bound port yet, smoltcp listen failure).
+    fn socket_listen(handle: u32, backlog: u32) -> i32;
 }
 
 /// Socket protocol selector — passed as the `proto` arg of
@@ -678,12 +700,13 @@ macro_rules! wari_uart_driver {
 }
 
 /// Total manifest size for the Tier-2 net driver. Computed from
-/// `manifest_size(7, 6)` = 16 + 7*36 + 6*52 = 580 bytes. Exported
+/// `manifest_size(9, 6)` = 16 + 9*36 + 6*52 = 652 bytes. Exported
 /// so the macro and external tooling agree on the byte length.
 ///
-/// 7 exports: `_start`, `poll`, `tx_send`, `rx_pop`, `rx_recycle`
-/// (Phase-1b PR Net-4/5b) plus `socket_create`, `socket_close`
-/// (PR Net-6a — Tier-1 socket API entry points).
+/// 9 exports: `_start`, `poll`, `tx_send`, `rx_pop`, `rx_recycle`
+/// (Phase-1b PR Net-4/5b), `socket_create`, `socket_close`
+/// (PR Net-6a), `socket_bind`, `socket_listen` (PR Net-6c —
+/// TCP server side of the socket API).
 ///
 /// 6 imports cover what the smoltcp-backed VirtIO driver actually
 /// calls today: `net_mmio_write32`, `net_mmio_read32`,
@@ -694,7 +717,7 @@ macro_rules! wari_uart_driver {
 /// adding them to the manifest would make the sign-tool refuse
 /// the binary as "manifest declares an import the wasm does not
 /// request". Re-add them when the driver actually calls them.
-pub const NET_MANIFEST_SIZE: usize = manifest_size(7, 6);
+pub const NET_MANIFEST_SIZE: usize = manifest_size(9, 6);
 
 /// Declare a Tier-2 network driver.
 ///
@@ -778,6 +801,18 @@ macro_rules! wari_net_driver {
             <$t as $crate::NetDriver>::socket_close(handle)
         }
 
+        /// `wari::socket_bind(handle, ip_be, port) -> i32` (Net-6c)
+        #[no_mangle]
+        pub extern "C" fn socket_bind(handle: u32, ip_be: u32, port: u32) -> i32 {
+            <$t as $crate::NetDriver>::socket_bind(handle, ip_be, port)
+        }
+
+        /// `wari::socket_listen(handle, backlog) -> i32` (Net-6c)
+        #[no_mangle]
+        pub extern "C" fn socket_listen(handle: u32, backlog: u32) -> i32 {
+            <$t as $crate::NetDriver>::socket_listen(handle, backlog)
+        }
+
         // ─── manifest ──────────────────────────────────────────
         #[link_section = "wari_driver_manifest"]
         #[used]
@@ -793,6 +828,8 @@ macro_rules! wari_net_driver {
                     (b"rx_recycle",   $crate::FuncSig::U32I32),
                     (b"socket_create",$crate::FuncSig::U32I32),
                     (b"socket_close", $crate::FuncSig::U32I32),
+                    (b"socket_bind",  $crate::FuncSig::U32x3I32),
+                    (b"socket_listen",$crate::FuncSig::U32xU32I32),
                 ],
                 &[
                     // Names match the driver's #[link_name = "..."]

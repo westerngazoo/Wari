@@ -406,6 +406,7 @@ fn wasm_sig_shape(
     use FuncSig::*;
     for s in [
         UnitUnit, U32xU32I32, U32I32, U32U32, U64I32, UnitU64, U32x5I32,
+        U32x3I32,
     ] {
         let shape = s.wasm_shape();
         if shape.params == p.as_slice() && shape.results == r.as_slice() {

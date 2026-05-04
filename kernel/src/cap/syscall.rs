@@ -1012,6 +1012,74 @@ pub fn net_socket_close_impl(proc_id: u8, slot: u32) -> i32 {
     }
 }
 
+/// `wari::net_socket_bind(slot, ip_be, port) -> i32` (PR Net-6c).
+///
+/// Caller must hold a Socket cap with WRITE rights at `slot`.
+/// Dispatches into the driver's `socket_bind`. Returns 0 on
+/// success, negative errno otherwise.
+pub fn net_socket_bind_impl(
+    proc_id: u8,
+    slot: u32,
+    ip_be: u32,
+    port: u32,
+) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_INVAL;
+    }
+    if slot >= CSPACE_SLOTS as u32 {
+        return E_INVAL;
+    }
+    let smoltcp_handle = match resolve_socket_handle(proc_id, slot as u8) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    // SAFETY: install ran during boot.
+    match unsafe { crate::runtime::tier2_net::socket_bind(smoltcp_handle, ip_be, port) } {
+        Ok(rc) => rc,
+        Err(_) => E_NOMEM,
+    }
+}
+
+/// `wari::net_socket_listen(slot, backlog) -> i32` (PR Net-6c).
+///
+/// Caller must hold a Socket cap with WRITE rights at `slot`.
+/// Calls into the driver to mark the underlying smoltcp TCP
+/// socket as listening on its previously-bound port.
+pub fn net_socket_listen_impl(proc_id: u8, slot: u32, backlog: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_INVAL;
+    }
+    if slot >= CSPACE_SLOTS as u32 {
+        return E_INVAL;
+    }
+    let smoltcp_handle = match resolve_socket_handle(proc_id, slot as u8) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    // SAFETY: install ran during boot.
+    match unsafe { crate::runtime::tier2_net::socket_listen(smoltcp_handle, backlog) } {
+        Ok(rc) => rc,
+        Err(_) => E_NOMEM,
+    }
+}
+
+/// Helper shared by every Socket-cap-gated host fn: validate the
+/// cap at `slot` is a Socket cap with WRITE rights, then read the
+/// driver-side smoltcp handle from the Socket pool entry.
+fn resolve_socket_handle(proc_id: u8, slot: u8) -> Result<u32, i32> {
+    let cs = cspaces();
+    let cap = cs[proc_id as usize].slots[slot as usize];
+    if cap.is_empty() || !matches!(cap.kind, ObjectKind::Socket) {
+        return Err(E_PERM);
+    }
+    if cap.rights & CAP_RIGHT_WRITE == 0 {
+        return Err(E_PERM);
+    }
+    let pools = object_pools();
+    let sock = pools.sockets.get(cap.pool_index).ok_or(E_INVAL)?;
+    Ok(sock.smoltcp_handle)
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────

@@ -130,12 +130,20 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
         let socket_close_fn = instance
             .get_typed_func::<u32, i32>(&store, "socket_close")
             .map_err(|_| KernelError::DriverError)?;
+        let socket_bind_fn = instance
+            .get_typed_func::<(u32, u32, u32), i32>(&store, "socket_bind")
+            .map_err(|_| KernelError::DriverError)?;
+        let socket_listen_fn = instance
+            .get_typed_func::<(u32, u32), i32>(&store, "socket_listen")
+            .map_err(|_| KernelError::DriverError)?;
         let handle = tier2_net::Tier2NetHandle {
             instance,
             store,
             poll_fn,
             socket_create_fn,
             socket_close_fn,
+            socket_bind_fn,
+            socket_listen_fn,
         };
         // SAFETY: INV-1 (single-hart) + INV-8 (boot-time post-init)
         // + one-time install pattern. `kmain` orders this call
@@ -144,20 +152,32 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
         kprintln!("[net] smoltcp interface up, listening on 192.168.122.10/24");
 
         // PR Net-6a-2 — boot-time self-test of the socket driver
-        // path. Allocates a TCP socket via the driver, closes it,
-        // logs the round-trip handle. Proves the wari_net_driver!
-        // macro's new socket_create / socket_close exports are
-        // correctly wired through the kernel typed-func handles.
-        // Tier-1-facing wari::net_socket_create / *_close are
-        // registered in wasi.rs; cap-mint integration lands in
-        // PR Net-6b alongside the demo Tier-1 app.
+        // path. Net-6c extends to also exercise bind+listen on the
+        // newly-allocated socket so the kernel-side wiring of the
+        // new TCP-server-side host fns gets coverage even while
+        // their Tier-1 registration is gated (bisect found a wasmi
+        // 0.32 instantiate hang when 3-arg host fns are added to
+        // the Tier-1 linker — investigating in Net-6c-2).
         // SAFETY: install just ran (line above); INV-1 single-hart.
         let create_proto = wari_driver_iface::SocketProto::Tcp as u32;
         match unsafe { tier2_net::socket_create(create_proto) } {
             Ok(handle) if handle >= 0 => {
+                let h = handle as u32;
                 kprintln!("[net] socket self-test: create=tcp -> handle={}", handle);
+                // PR Net-6c — bind to port 7000, listen.
+                let bind_rc = unsafe { tier2_net::socket_bind(h, 0, 7000) }
+                    .unwrap_or(-99);
+                let listen_rc = if bind_rc == 0 {
+                    unsafe { tier2_net::socket_listen(h, 1) }.unwrap_or(-99)
+                } else {
+                    -98
+                };
+                kprintln!(
+                    "[net] socket self-test: bind=port7000 rc={}, listen rc={}",
+                    bind_rc, listen_rc
+                );
                 // SAFETY: same.
-                match unsafe { tier2_net::socket_close(handle as u32) } {
+                match unsafe { tier2_net::socket_close(h) } {
                     Ok(0) => kprintln!("[net] socket self-test: close ok"),
                     Ok(e) => kprintln!("[net] socket self-test: close errno={}", e),
                     Err(_) => kprintln!("[net] socket self-test: close trapped"),

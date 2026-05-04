@@ -70,6 +70,10 @@ mod wasi {
         /// Tear down the Socket cap at `slot`. Returns 0 on
         /// success, negative errno otherwise.
         pub fn net_socket_close(slot: u32) -> i32;
+        /// Bind the Socket cap at `slot` to a local port (PR Net-6c).
+        pub fn net_socket_bind(slot: u32, ip_be: u32, port: u32) -> i32;
+        /// Mark the Socket cap at `slot` as listening (PR Net-6c).
+        pub fn net_socket_listen(slot: u32, backlog: u32) -> i32;
     }
 
     /// WASI Preview 1 `iovec` — `(buf, buf_len)` pair.

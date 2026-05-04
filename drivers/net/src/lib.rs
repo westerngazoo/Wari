@@ -656,6 +656,10 @@ mod nic_iface {
     /// removed. `None` slot = free buffer pair.
     static mut SOCKET_HANDLE_FOR_BUF: [Option<u32>; SOCKET_BACKING_LEN] =
         [None; SOCKET_BACKING_LEN];
+    /// Per-buffer-slot bound port (set by socket_bind, consumed
+    /// by socket_listen). 0 = unbound.
+    static mut SOCKET_BOUND_PORT: [u16; SOCKET_BACKING_LEN] =
+        [0u16; SOCKET_BACKING_LEN];
 
     /// Allocate a TCP smoltcp socket. Returns the raw
     /// `SocketHandle` value as i32 on success, negative errno on
@@ -691,6 +695,61 @@ mod nic_iface {
         }
     }
 
+    /// Stash the requested local port for a TCP socket so a
+    /// later `socket_listen` can hand it to smoltcp. Phase-1b
+    /// ignores the IP arg (smoltcp listens on all local IPs by
+    /// default; binding to a specific local IP is Phase-2).
+    /// Returns 0 on success, `-2` if the handle is unknown.
+    pub fn socket_bind(raw_handle: u32, _ip_be: u32, port: u32) -> i32 {
+        // SAFETY: single-thread driver.
+        unsafe {
+            let slot = match SOCKET_HANDLE_FOR_BUF
+                .iter()
+                .position(|s| *s == Some(raw_handle))
+            {
+                Some(i) => i,
+                None => return -2,
+            };
+            if port == 0 || port > u16::MAX as u32 {
+                return -2;
+            }
+            SOCKET_BOUND_PORT[slot] = port as u16;
+            0
+        }
+    }
+
+    /// Mark a TCP socket as listening on its previously-bound
+    /// port. Returns 0 on success, `-2` if the handle is unknown
+    /// or the socket has not been bound yet, `-3` (E_NOMEM) if
+    /// smoltcp's listen call fails (already-listening / connected).
+    pub fn socket_listen(raw_handle: u32) -> i32 {
+        use smoltcp::socket::tcp;
+        // SAFETY: single-thread driver.
+        unsafe {
+            let sockets = match &mut *addr_of_mut!(SOCKETS) {
+                Some(s) => s,
+                None => return -3,
+            };
+            let slot = match SOCKET_HANDLE_FOR_BUF
+                .iter()
+                .position(|s| *s == Some(raw_handle))
+            {
+                Some(i) => i,
+                None => return -2,
+            };
+            let port = SOCKET_BOUND_PORT[slot];
+            if port == 0 {
+                return -2; // not bound
+            }
+            let handle = raw_to_handle(raw_handle);
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            match socket.listen(port) {
+                Ok(()) => 0,
+                Err(_) => -3,
+            }
+        }
+    }
+
     /// Tear down a TCP socket previously returned by
     /// `socket_create_tcp`. Returns 0 on success, `-2` (E_INVAL)
     /// if the handle is unknown.
@@ -711,6 +770,7 @@ mod nic_iface {
             let handle = raw_to_handle(raw_handle);
             sockets.remove(handle);
             SOCKET_HANDLE_FOR_BUF[slot] = None;
+            SOCKET_BOUND_PORT[slot] = 0;
             0
         }
     }
@@ -1285,6 +1345,12 @@ impl wari_driver_iface::NetDriver for Driver {
     fn socket_close(handle: u32) -> i32 {
         driver_socket_close(handle)
     }
+    fn socket_bind(handle: u32, ip_be: u32, port: u32) -> i32 {
+        driver_socket_bind(handle, ip_be, port)
+    }
+    fn socket_listen(handle: u32, backlog: u32) -> i32 {
+        driver_socket_listen(handle, backlog)
+    }
 }
 
 wari_driver_iface::wari_net_driver!(Driver);
@@ -1320,6 +1386,22 @@ pub fn driver_socket_close(handle: u32) -> i32 {
     nic_iface::socket_close(handle)
 }
 
+/// `socket_bind` body — qemu path. Stores the requested port
+/// inside the driver's per-handle state; the smoltcp `listen`
+/// call happens in `socket_listen`.
+#[cfg(feature = "qemu")]
+pub fn driver_socket_bind(handle: u32, ip_be: u32, port: u32) -> i32 {
+    nic_iface::socket_bind(handle, ip_be, port)
+}
+
+/// `socket_listen` body — qemu path. Hands the bound port to
+/// smoltcp's `tcp::Socket::listen`.
+#[cfg(feature = "qemu")]
+pub fn driver_socket_listen(handle: u32, backlog: u32) -> i32 {
+    let _ = backlog; // smoltcp single-pending only — backlog ignored
+    nic_iface::socket_listen(handle)
+}
+
 /// vf2 stub — net is the JH7110 GMAC Phase-1c TODO. Refuses
 /// every socket operation cleanly so a Tier-1 calling them on
 /// VF2 silicon gets a deterministic E_INVAL instead of a hang.
@@ -1331,4 +1413,14 @@ pub fn driver_socket_create(_proto: u32) -> i32 {
 #[cfg(feature = "vf2")]
 pub fn driver_socket_close(_handle: u32) -> i32 {
     -2 // E_INVAL
+}
+
+#[cfg(feature = "vf2")]
+pub fn driver_socket_bind(_handle: u32, _ip_be: u32, _port: u32) -> i32 {
+    -2
+}
+
+#[cfg(feature = "vf2")]
+pub fn driver_socket_listen(_handle: u32, _backlog: u32) -> i32 {
+    -2
 }

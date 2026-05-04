@@ -183,7 +183,10 @@ pub fn register_wasi_host_fns(
     // crate::cap::syscall, which validates the caller's Net cap
     // at SLOT_NET, calls into the Tier-2 net driver, and mints/
     // revokes Socket caps in the caller's CSpace.
-    use crate::cap::{net_socket_close_impl, net_socket_create_impl};
+    use crate::cap::{
+        net_socket_bind_impl, net_socket_close_impl, net_socket_create_impl,
+        net_socket_listen_impl,
+    };
     linker
         .func_wrap(
             "wari",
@@ -202,6 +205,15 @@ pub fn register_wasi_host_fns(
             },
         )
         .map_err(|_| KernelError::BadWasm)?;
+    // BISECT NOTE: net_socket_bind / net_socket_listen registration
+    // is currently disabled here. With it on, Tier-1 instantiate
+    // hangs (build 58 trace) even when hello does not import them.
+    // The driver-side bind/listen exports + kernel-side typed-func
+    // resolution work fine (boot self-test passes). Investigating
+    // in Net-6c follow-up; the host fns + impls are still defined
+    // and exported from cap, so re-enabling these two
+    // registrations is one comment-removal away.
+    let _ = (net_socket_bind_impl, net_socket_listen_impl);
 
     Ok(())
 }

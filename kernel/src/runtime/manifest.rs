@@ -76,5 +76,8 @@ where
                 store, name_str,
             )
             .is_ok(),
+        FuncSig::U32x3I32 => instance
+            .get_typed_func::<(u32, u32, u32), i32>(store, name_str)
+            .is_ok(),
     }
 }

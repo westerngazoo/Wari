@@ -61,6 +61,10 @@ pub struct Tier2NetHandle {
     /// `wari::socket_close(handle: u32) -> i32` — tears down a
     /// previously-allocated smoltcp socket.
     pub socket_close_fn: TypedFunc<u32, i32>,
+    /// `wari::socket_bind(handle, ip_be, port) -> i32` (Net-6c)
+    pub socket_bind_fn: TypedFunc<(u32, u32, u32), i32>,
+    /// `wari::socket_listen(handle, backlog) -> i32` (Net-6c)
+    pub socket_listen_fn: TypedFunc<(u32, u32), i32>,
 }
 
 /// Boot-initialized singleton. Set once by `install` from
@@ -148,6 +152,34 @@ pub unsafe fn socket_close(handle: u32) -> Result<i32, KernelError> {
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     h.socket_close_fn
         .call(&mut h.store, handle)
+        .map_err(|_| KernelError::DriverError)
+}
+
+/// PR Net-6c — bind a TCP socket to a local port via the driver.
+///
+/// # Safety
+/// Same as [`socket_create`].
+pub unsafe fn socket_bind(handle: u32, ip_be: u32, port: u32) -> Result<i32, KernelError> {
+    // SAFETY: INV-1 + INV-8.
+    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
+        .expect("TIER2_NET ref always valid (static)");
+    let h = slot.as_mut().ok_or(KernelError::DriverError)?;
+    h.socket_bind_fn
+        .call(&mut h.store, (handle, ip_be, port))
+        .map_err(|_| KernelError::DriverError)
+}
+
+/// PR Net-6c — mark a TCP socket as listening on its bound port.
+///
+/// # Safety
+/// Same as [`socket_create`].
+pub unsafe fn socket_listen(handle: u32, backlog: u32) -> Result<i32, KernelError> {
+    // SAFETY: INV-1 + INV-8.
+    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
+        .expect("TIER2_NET ref always valid (static)");
+    let h = slot.as_mut().ok_or(KernelError::DriverError)?;
+    h.socket_listen_fn
+        .call(&mut h.store, (handle, backlog))
         .map_err(|_| KernelError::DriverError)
 }
 
