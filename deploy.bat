@@ -61,24 +61,7 @@ wsl -d Ubuntu --cd /mnt/c/projects/wari -- bash -lc "make %MAKE_TARGET%" || (
 
 echo.
 echo === Verifying build ===
-REM Read .build_number, embedded tag, and ELF entry point. The Python
-REM one-liner runs in WSL because it is the cleanest way to parse the
-REM ELF header on this system; failure aborts the deploy.
-wsl -d Ubuntu --cd /mnt/c/projects/wari -- bash -lc ^
-  "test -s build/wari.bin || { echo 'build/wari.bin missing or empty'; exit 1; }; \
-   BUILD=$(cat .build_number); \
-   TAG=$(strings build/wari.bin | grep WARI-BUILD-TAG- | head -1); \
-   ENTRY=$(python3 -c 'import struct; f=open(\"target/riscv64gc-unknown-none-elf/release/wari\",\"rb\"); d=f.read(0x100); print(hex(struct.unpack(\"<Q\", d[0x18:0x20])[0]))'); \
-   echo \"  .build_number:          $BUILD\"; \
-   echo \"  embedded tag:           $TAG\"; \
-   echo \"  kernel ELF entry:       $ENTRY\"; \
-   echo \"  expected entry:         %EXPECTED_ENTRY%\"; \
-   if [ \"$ENTRY\" != \"%EXPECTED_ENTRY%\" ]; then \
-     echo ''; \
-     echo \"VERIFY FAILED: entry point $ENTRY does not match expected %EXPECTED_ENTRY%\"; \
-     echo \"               (target=%TARGET% — wrong make rule produced this binary?)\"; \
-     exit 1; \
-   fi" || (
+wsl -d Ubuntu --cd /mnt/c/projects/wari -- bash scripts/verify-build.sh %EXPECTED_ENTRY% || (
     echo.
     echo VERIFY FAILED. Not committing.
     exit /b 1
