@@ -125,6 +125,22 @@ _wari_flash_and_verify() {
     return 0
 }
 
+# Visible countdown then reboot. Argument is the starting second
+# (e.g. 5 prints "5..4..3..2..1.." then reboots). Each tick goes
+# to the same line via \r so the operator can also read what
+# build / md5 was just printed before the screen blanks.
+_wari_countdown_and_reboot() {
+    local n="${1:-5}"
+    sync
+    while [ "$n" -gt 0 ]; do
+        printf "\rRebooting in %d second(s)... " "$n"
+        sleep 1
+        n=$((n - 1))
+    done
+    printf "\rRebooting now...                  \n"
+    reboot
+}
+
 wari() {
     case "${1:-help}" in
         upgrade|up)
@@ -146,10 +162,18 @@ wari() {
             _wari_pull_and_verify || return 1
             _wari_flash_and_verify || return 1
             echo ""
+            local flashed_build_after
+            flashed_build_after=$(_wari_embedded_build "$WARI_KERNEL")
             echo "========================================"
-            echo "  READY TO REBOOT into build $BUILD_NUM"
-            echo "  md5: $EXPECTED_MD5"
+            echo "  READY TO REBOOT"
+            echo "    embedded build:  $flashed_build_after"
+            echo "    .build_number:   $BUILD_NUM"
+            echo "    md5:             $EXPECTED_MD5"
             echo "========================================"
+            if [ "$flashed_build_after" != "$BUILD_NUM" ] && [ "$BUILD_NUM" != "?" ]; then
+                echo "WARNING: embedded ($flashed_build_after) != .build_number ($BUILD_NUM)"
+                echo "         Push side may have a stale cargo cache."
+            fi
             if [ -z "$skip_confirm" ]; then
                 read -r -p "Proceed? [y/N] " ans
                 case "$ans" in
@@ -157,9 +181,7 @@ wari() {
                     *) echo "Aborted. Kernel staged but not rebooted."; return 0 ;;
                 esac
             fi
-            echo "Rebooting in 2 s..."
-            sleep 2
-            reboot
+            _wari_countdown_and_reboot 5
             ;;
         reboot|rb)
             # Verify what's flashed is actually our latest before
@@ -167,11 +189,12 @@ wari() {
             if [ ! -s "$WARI_KERNEL" ]; then
                 echo "ERROR: $WARI_KERNEL missing or empty"; return 1
             fi
-            local build flashed_md5 expected_md5
+            local build flashed_md5 flashed_build expected_md5
             build=$(cat "$WARI_DIR/.build_number" 2>/dev/null || echo "?")
             flashed_md5=$(md5sum "$WARI_KERNEL" | awk '{print $1}')
+            flashed_build=$(_wari_embedded_build "$WARI_KERNEL")
             expected_md5=$(md5sum "$WARI_DIR/build/wari.bin" 2>/dev/null | awk '{print $1}')
-            echo "About to reboot into build $build"
+            echo "About to reboot into build $build (embedded tag: $flashed_build)"
             echo "  /boot/kernel.bin md5: $flashed_md5"
             echo "  repo  wari.bin   md5: $expected_md5"
             if [ "$flashed_md5" != "$expected_md5" ]; then
@@ -180,7 +203,7 @@ wari() {
                 read -r -p "Reboot anyway? [y/N] " ans
                 case "$ans" in y|Y|yes|YES) ;; *) return 0 ;; esac
             fi
-            sync; sleep 1; reboot
+            _wari_countdown_and_reboot 5
             ;;
         status|st)
             cd "$WARI_DIR" 2>/dev/null || { echo "ERROR: $WARI_DIR not found"; return 1; }
