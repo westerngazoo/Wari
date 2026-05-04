@@ -874,16 +874,13 @@ pub fn net_socket_create_impl(
 ) -> i32 {
     use crate::cap::boot::SLOT_NET;
 
-    crate::kprintln!(
-        "  [debug] net_socket_create_impl pid={} proto={} slot={}",
-        proc_id, proto, slot_for_cap
-    );
+    crate::kdebug!(net, "socket_create pid={} proto={} slot={}", proc_id, proto, slot_for_cap);
     if (proc_id as usize) >= MAX_PROCS {
-        crate::kprintln!("  [debug] -> E_INVAL (proc_id OOB)");
+        crate::kdebug!(net, "-> E_INVAL (proc_id OOB)");
         return E_INVAL;
     }
     if slot_for_cap >= CSPACE_SLOTS as u32 {
-        crate::kprintln!("  [debug] -> E_INVAL (slot OOB)");
+        crate::kdebug!(net, "-> E_INVAL (slot OOB)");
         return E_INVAL;
     }
     let slot_for_cap = slot_for_cap as u8;
@@ -892,26 +889,24 @@ pub fn net_socket_create_impl(
     let (net_cap, parent_id) = {
         let cs = cspaces();
         let cap = cs[proc_id as usize].slots[SLOT_NET as usize];
-        crate::kprintln!(
-            "  [debug] cap@SLOT_NET kind={:?} rights={:#x} empty={}",
-            cap.kind, cap.rights, cap.is_empty()
-        );
+        crate::kdebug!(net, "cap@SLOT_NET kind={:?} rights={:#x} empty={}",
+            cap.kind, cap.rights, cap.is_empty());
         if cap.is_empty() || !matches!(cap.kind, ObjectKind::Net) {
-            crate::kprintln!("  [debug] -> E_PERM (no Net cap)");
+            crate::kdebug!(net, "-> E_PERM (no Net cap)");
             return E_PERM;
         }
         if cap.rights & CAP_RIGHT_WRITE == 0 {
-            crate::kprintln!("  [debug] -> E_PERM (no WRITE)");
+            crate::kdebug!(net, "-> E_PERM (no WRITE)");
             return E_PERM;
         }
         if !cs[proc_id as usize].slots[slot_for_cap as usize].is_empty() {
-            crate::kprintln!("  [debug] -> E_PERM (target slot occupied)");
+            crate::kdebug!(net, "-> E_PERM (target slot occupied)");
             return E_PERM;
         }
         let gen = cs[proc_id as usize].generations[SLOT_NET as usize];
         (cap, CapId::new(proc_id, SLOT_NET, gen))
     };
-    crate::kprintln!("  [debug] cap check ok, calling driver...");
+    crate::kdebug!(net, "cap check ok, calling driver...");
 
     // 2. Dispatch into driver — returns smoltcp socket handle as
     //    positive i32 or negative errno.
@@ -919,11 +914,11 @@ pub fn net_socket_create_impl(
     // single-hart INV-1 + INV-8.
     let driver_ret = match unsafe { crate::runtime::tier2_net::socket_create(proto) } {
         Ok(v) => {
-            crate::kprintln!("  [debug] driver returned {}", v);
+            crate::kdebug!(net, "driver returned {}", v);
             v
         }
         Err(_) => {
-            crate::kprintln!("  [debug] -> E_NOMEM (driver trapped/uninstalled)");
+            crate::kdebug!(net, "-> E_NOMEM (driver trapped/uninstalled)");
             return E_NOMEM;
         }
     };

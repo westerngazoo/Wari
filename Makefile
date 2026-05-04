@@ -202,6 +202,29 @@ kernel-vf2: sign-uart-driver sign-net-driver build-hello
 	@ls -lh $(KERNEL_BIN)
 	@echo ">>> $(KERNEL_BIN) ready — build $(NEXT_BUILD)"
 
+# kernel-vf2 with the debug-kernel feature on. Adds kdebug!()
+# subsystem-tagged lines to the COM7 trace. Use for diagnostic
+# silicon runs only — production deploys use plain `kernel-vf2`.
+kernel-vf2-debug: sign-uart-driver sign-net-driver build-hello
+	@echo "  [build] kernel: VF2 + debug-kernel feature"
+	@echo $(NEXT_BUILD) > $(BUILD_FILE)
+	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
+	  cargo build --release --features vf2,debug-kernel --no-default-features
+	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+	@echo "  [build] kernel: build $(NEXT_BUILD), VF2 (DEBUG)"
+	@ls -lh $(KERNEL_BIN)
+
+# kernel-vf2 with both debug-kernel + trace-kernel on. Loudest
+# possible silicon trace; expect screens of output per second.
+kernel-vf2-trace: sign-uart-driver sign-net-driver build-hello
+	@echo "  [build] kernel: VF2 + debug-kernel + trace-kernel"
+	@echo $(NEXT_BUILD) > $(BUILD_FILE)
+	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
+	  cargo build --release --features vf2,trace-kernel --no-default-features
+	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+	@echo "  [build] kernel: build $(NEXT_BUILD), VF2 (TRACE)"
+	@ls -lh $(KERNEL_BIN)
+
 # One-command deploy: build, commit, push. Matches goose-os flow so
 # the VF2 device-side `wari go` script (Phase 1a port) pulls + flashes.
 deploy: kernel-vf2

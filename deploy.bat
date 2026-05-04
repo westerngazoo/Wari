@@ -21,9 +21,17 @@ REM        the operator knows exactly what landed
 REM ============================================================
 
 REM Parse args. Two-arg form: <target> <msg>. One-arg: <msg> only.
+REM Targets: vf2 (default, prod), vf2-debug (kdebug! on),
+REM          vf2-trace (kdebug! + ktrace! on), qemu.
 set "TARGET=vf2"
 if /I "%~1"=="vf2" (
     set "TARGET=vf2"
+    set "MSG=%~2"
+) else if /I "%~1"=="vf2-debug" (
+    set "TARGET=vf2-debug"
+    set "MSG=%~2"
+) else if /I "%~1"=="vf2-trace" (
+    set "TARGET=vf2-trace"
     set "MSG=%~2"
 ) else if /I "%~1"=="qemu" (
     set "TARGET=qemu"
@@ -36,6 +44,12 @@ if "%MSG%"=="" set "MSG=wari deploy"
 REM Map target -> make rule + expected ELF entry point.
 if "%TARGET%"=="vf2" (
     set "MAKE_TARGET=kernel-vf2"
+    set "EXPECTED_ENTRY=0x40200000"
+) else if "%TARGET%"=="vf2-debug" (
+    set "MAKE_TARGET=kernel-vf2-debug"
+    set "EXPECTED_ENTRY=0x40200000"
+) else if "%TARGET%"=="vf2-trace" (
+    set "MAKE_TARGET=kernel-vf2-trace"
     set "EXPECTED_ENTRY=0x40200000"
 ) else (
     set "MAKE_TARGET=build"

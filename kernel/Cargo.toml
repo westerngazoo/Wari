@@ -29,8 +29,17 @@ default = []
 # Platform selection — exactly one must be active at build time.
 qemu = []
 vf2  = []
-# Diagnostic mode — extra tracing in trap handlers. Never ship with this on.
+# Diagnostic mode — `kdebug!(subsys, ...)` macro emits subsystem-
+# tagged lines on the kernel console. Compiled out otherwise. Use
+# for high-level flow visibility (host fn entry, cap-check decision,
+# scheduler choice). Never ship to production with this on.
 debug-kernel = []
+# Hot-path tracing — `ktrace!(subsys, ...)` is noisier than
+# kdebug! and intended for "every dispatch, every cap lookup"-grade
+# instrumentation. Compiled out otherwise. Implies debug-kernel
+# semantics (additive). Pair with `--features vf2,trace-kernel` for
+# the loudest possible silicon trace.
+trace-kernel = ["debug-kernel"]
 
 [profile.release]
 panic = "abort"

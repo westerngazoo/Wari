@@ -49,3 +49,53 @@ macro_rules! kprintln {
         $crate::kputc::kputs("\r\n");
     }};
 }
+
+/// Subsystem-tagged debug print. Compiled out unless the
+/// `debug-kernel` feature is on. Use for diagnostic information
+/// that the operator wants in a debug-mode boot trace but not in
+/// production. The `subsys` token is stringified into the line
+/// so the trace can be filtered by subsystem at the receive side.
+///
+/// ```ignore
+/// kdebug!(net, "socket_create proto={} slot={}", proto, slot);
+/// ```
+///
+/// becomes (debug-kernel on):
+/// ```text
+///   [debug:net] socket_create proto=1 slot=8
+/// ```
+///
+/// and a no-op (zero bytes, zero cost) when debug-kernel is off.
+#[macro_export]
+macro_rules! kdebug {
+    ($subsys:ident, $($arg:tt)*) => {{
+        #[cfg(feature = "debug-kernel")]
+        {
+            $crate::kprintln!(
+                "  [debug:{}] {}",
+                ::core::stringify!($subsys),
+                ::core::format_args!($($arg)*)
+            );
+        }
+    }};
+}
+
+/// Subsystem-tagged trace print. Compiled out unless the
+/// `trace-kernel` feature is on. Trace is **noisier** than
+/// debug — for hot-path observability (every host fn dispatch,
+/// every cap lookup, every scheduler decision). Splitting trace
+/// from debug means a debug-build can capture the high-level
+/// flow without drowning the operator in per-instruction noise.
+#[macro_export]
+macro_rules! ktrace {
+    ($subsys:ident, $($arg:tt)*) => {{
+        #[cfg(feature = "trace-kernel")]
+        {
+            $crate::kprintln!(
+                "  [trace:{}] {}",
+                ::core::stringify!($subsys),
+                ::core::format_args!($($arg)*)
+            );
+        }
+    }};
+}
