@@ -1267,44 +1267,22 @@ pub fn driver_start() {
         // / "[net] smoltcp interface up" lines accordingly.
         let _ = nic_iface::init(mac);
     }
-    // PR Phase-1c-1 — first real read of the JH7110 GMAC0
-    // register window. Reads the GMAC version register at
-    // offset 0x110 (per DWMAC databook §6.1, the MAC_VERSION
-    // register reports the IP block ID + revision). On the
-    // JH7110 this should read as 0x10..0x51 — anything else
-    // (zeros, all-ones) means the MMIO mapping or clock gate
-    // is wrong. We don't yet bring up the link or DMA — that
-    // is Phase-1c-2 onwards. Net.initialized stays false so
-    // the kernel still logs '[net] virtio init failed' (the
-    // message will get a vf2-specific rename in Phase-1c-2).
-    #[cfg(feature = "vf2")]
-    {
-        const GMAC_VERSION_OFFSET: u32 = 0x110;
-        // SAFETY: extern host fn into the kernel's net_mmio
-        // surface, cap-gated by Net+READ. Address is inside the
-        // GMAC0 window now mapped by mem::kvm.
-        let version = unsafe {
-            wari_net_mmio_read32(plat::NIC_BASE + GMAC_VERSION_OFFSET)
-        };
-        // Without a kprintln equivalent in WASM (no driver
-        // stdout in Phase-1c-1), stash the version into a
-        // never-read static so a future kernel-side debug path
-        // can pull it out via a host fn, AND keep the imports
-        // alive (LTO would otherwise drop the call).
-        // SAFETY: single-threaded driver init.
-        unsafe {
-            VF2_GMAC_VERSION = version;
-        }
-    }
+    // The vf2 path is a Phase-1c stub — return immediately, leave
+    // Net.initialized = false on the kernel side.
+    //
+    // The vf2 binary still needs the same WASM imports as qemu so
+    // its manifest (which declares them) passes the sign-tool's
+    // cross-check (PR DI-5). LTO strips unused imports — to keep
+    // them alive WITHOUT actually invoking them (some have kernel
+    // side effects, e.g. nic_set_mac unconditionally sets
+    // Net.initialized = true), we reference each host fn through
+    // a `#[used]` function-pointer static. The pointer reference
+    // forces the linker to retain the WASM import; the function
+    // is never called from Rust code on vf2.
+    //
+    // Phase-1c GMAC work replaces this scaffold by *actually
+    // using* the imports for real hardware.
 }
-
-/// Holds the JH7110 GMAC0 version register value read at boot.
-/// Phase-1c-2 will expose this via a kernel host fn so the
-/// operator can confirm the GMAC bring-up sequence got real
-/// hardware on the line.
-#[cfg(feature = "vf2")]
-#[no_mangle]
-pub static mut VF2_GMAC_VERSION: u32 = 0xDEAD_BEEF;
 
 // Keep the qemu-side host-fn imports alive in the vf2 binary so
 // its manifest still cross-checks. Each static is a function-

@@ -47,17 +47,6 @@ const VIRTIO_MMIO_BASE: usize = 0x1000_1000;
 #[cfg(feature = "qemu")]
 const VIRTIO_MMIO_LEN:  usize = 0x8000;
 
-/// JH7110 GMAC0 register window — 64 KiB at `0x16030000` covers
-/// every register group the Phase-1c driver touches (MAC config,
-/// MMC counters, MTL queues, DMA channel-N descriptors). Cfg-gated
-/// since QEMU virt has no GMAC. Added in PR Phase-1c-1 — without
-/// this mapping, the first MMIO read from the vf2 net driver
-/// would page-fault before reaching the device.
-#[cfg(feature = "vf2")]
-const GMAC0_MMIO_BASE: usize = 0x1603_0000;
-#[cfg(feature = "vf2")]
-const GMAC0_MMIO_LEN:  usize = 0x1_0000;
-
 // ── Linker symbol accessors ─────────────────────────────────────
 
 extern "C" {
@@ -178,8 +167,6 @@ pub fn init() -> Result<(), KernelError> {
     map_range(root, PLIC_MMIO_BASE, PLIC_MMIO_BASE + PLIC_MMIO_LEN, KERNEL_RW)?;
     #[cfg(feature = "qemu")]
     map_range(root, VIRTIO_MMIO_BASE, VIRTIO_MMIO_BASE + VIRTIO_MMIO_LEN, KERNEL_RW)?;
-    #[cfg(feature = "vf2")]
-    map_range(root, GMAC0_MMIO_BASE, GMAC0_MMIO_BASE + GMAC0_MMIO_LEN, KERNEL_RW)?;
 
     kprintln!("  [kvm] root pt at {:#x}", root);
 
