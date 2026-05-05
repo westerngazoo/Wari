@@ -717,7 +717,7 @@ macro_rules! wari_uart_driver {
 /// adding them to the manifest would make the sign-tool refuse
 /// the binary as "manifest declares an import the wasm does not
 /// request". Re-add them when the driver actually calls them.
-pub const NET_MANIFEST_SIZE: usize = manifest_size(9, 6);
+pub const NET_MANIFEST_SIZE: usize = manifest_size(9, 7);
 
 /// Declare a Tier-2 network driver.
 ///
@@ -844,6 +844,7 @@ macro_rules! wari_net_driver {
                     (b"wari", b"nic_attach_queue", $crate::FuncSig::U32x5I32),
                     (b"wari", b"nic_queue_notify", $crate::FuncSig::U32I32),
                     (b"wari", b"lin_mem_base",     $crate::FuncSig::UnitU64),
+                    (b"wari", b"drv_log_u32",      $crate::FuncSig::U32xU32I32),
                 ],
             );
     };

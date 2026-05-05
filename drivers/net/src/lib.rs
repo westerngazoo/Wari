@@ -164,6 +164,12 @@ extern "C" {
     #[link_name = "nic_set_mac"]
     fn wari_nic_set_mac(mac_low: u32, mac_high: u32) -> i32;
 
+    /// PR Phase-1c-2 — diagnostic line. Driver passes a tag word
+    /// + a value; kernel formats both onto COM7. Use sparingly:
+    /// boot-time register dumps, milestone markers. Returns 0.
+    #[link_name = "drv_log_u32"]
+    fn wari_drv_log_u32(tag: u32, val: u32) -> i32;
+
     #[allow(dead_code)]
     #[link_name = "notification_wait"]
     fn wari_notification_wait(slot: u32) -> i32;
@@ -1242,6 +1248,12 @@ fn init_virtio() -> Result<[u8; 6], ()> {
 /// `run_tier2_net` will see this and log an error rather than the
 /// success line.
 pub fn driver_start() {
+    // PR Phase-1c-2: log a milestone marker so the kernel-side
+    // boot trace shows "the driver _start has begun executing".
+    // tag = ASCII 'WAR\0' = 0x57415200.
+    // SAFETY: extern host-fn call (Net+ no-cap-required diagnostic).
+    let _ = unsafe { wari_drv_log_u32(0x57415200, 0xC0DE_0001) };
+
     #[cfg(feature = "qemu")]
     {
         let mac = match init_virtio() {
@@ -1267,6 +1279,22 @@ pub fn driver_start() {
         // / "[net] smoltcp interface up" lines accordingly.
         let _ = nic_iface::init(mac);
     }
+
+    // PR Phase-1c-2 — read the JH7110 GMAC0 version register and
+    // hand it to the kernel for COM7 logging. tag = 'GMAC' =
+    // 0x474D4143. Value = whatever's at GMAC offset 0x110, which
+    // per DWMAC databook §6.1 reads as the IP block's version
+    // (typical: 0x10..0x51). Anything that's NOT 0xffffffff or 0
+    // means the GMAC is responding.
+    #[cfg(feature = "vf2")]
+    {
+        const GMAC_VERSION_OFFSET: u32 = 0x110;
+        // SAFETY: extern host-fn — kernel cap-checks Net+READ and
+        // bounds-checks the address (now mapped post Phase-1c-1.6).
+        let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + GMAC_VERSION_OFFSET) };
+        let _ = unsafe { wari_drv_log_u32(0x474D4143, v) };
+    }
+
     // The vf2 path is a Phase-1c stub — return immediately, leave
     // Net.initialized = false on the kernel side.
     //

@@ -298,6 +298,24 @@ pub fn register_net_host_fns(
         .func_wrap("wari", "net_mmio_read32", host_net_mmio_read32)
         .map_err(|_| KernelError::BadWasm)?;
 
+    // PR Phase-1c-2 — generic diagnostic line for the net driver.
+    // The driver passes a u32 + a tag word; the kernel formats both
+    // onto COM7 as '[net:drv] tag=<hex> val=<hex>'. Used in the vf2
+    // path to report the GMAC version register at boot, and on qemu
+    // to log virtio milestones. Always-on (not gated by debug-kernel)
+    // because the driver only calls it at init time, so the cost is
+    // a small fixed number of UART bytes per boot.
+    linker
+        .func_wrap(
+            "wari",
+            "drv_log_u32",
+            |_: Caller<'_, Tier2HostState>, tag: u32, val: u32| -> i32 {
+                crate::kprintln!("[net:drv] tag={:#010x} val={:#010x}", tag, val);
+                0
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
     // Shared cap-management + notification surface, with the net
     // driver's proc_id baked into each closure.
     use crate::cap::{
