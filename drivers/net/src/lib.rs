@@ -1297,6 +1297,50 @@ fn mdio_read_phy(gmac_base: u32, phy_addr: u32, reg: u32) -> u32 {
     data & 0xFFFF
 }
 
+/// PR Phase-1c-5 — DWMAC MDIO Clause-22 write.
+///
+/// Mirror of `mdio_read_phy`. Writes `value` (low 16 bits) into
+/// the PHY register at `(phy_addr, reg)`. Same busy-poll + timeout
+/// behaviour. Returns 0 on success, `-1` on timeout.
+#[cfg(feature = "vf2")]
+fn mdio_write_phy(gmac_base: u32, phy_addr: u32, reg: u32, value: u16) -> i32 {
+    const MAC_MDIO_ADDRESS_OFFSET: u32 = 0x200;
+    const MAC_MDIO_DATA_OFFSET:    u32 = 0x204;
+    const GB: u32                      = 1 << 0;
+    const GOC_WRITE: u32               = 0b01 << 2; // Clause-22 write
+    const CR_CSR_DIV_26: u32           = 4 << 8;
+
+    // SAFETY: extern host fn.
+    let _ = unsafe {
+        wari_net_mmio_write32(gmac_base + MAC_MDIO_DATA_OFFSET, value as u32)
+    };
+
+    let cmd = GB
+        | GOC_WRITE
+        | CR_CSR_DIV_26
+        | ((reg & 0x1F) << 16)
+        | ((phy_addr & 0x1F) << 21);
+    // SAFETY: same.
+    let _ = unsafe {
+        wari_net_mmio_write32(gmac_base + MAC_MDIO_ADDRESS_OFFSET, cmd)
+    };
+
+    let mut tries = 0u32;
+    loop {
+        // SAFETY: same.
+        let s = unsafe {
+            wari_net_mmio_read32(gmac_base + MAC_MDIO_ADDRESS_OFFSET)
+        };
+        if s & GB == 0 {
+            return 0;
+        }
+        tries += 1;
+        if tries > 100_000 {
+            return -1;
+        }
+    }
+}
+
 pub fn driver_start() {
     // PR Phase-1c-2: log a milestone marker so the kernel-side
     // boot trace shows "the driver _start has begun executing".
@@ -1422,6 +1466,61 @@ pub fn driver_start() {
         let phyid2 = mdio_read_phy(plat::NIC_BASE, 0, 3);
         let _ = unsafe { wari_drv_log_u32(0x5048_5901, phyid1) }; // 'PHY\1'
         let _ = unsafe { wari_drv_log_u32(0x5048_5902, phyid2) }; // 'PHY\2'
+
+        // PR Phase-1c-5 — IEEE 802.3 auto-negotiation.
+        //
+        // PHY register map (Clause 22 standard):
+        //   0x00 = Basic Control
+        //          bit 12 = AN enable
+        //          bit  9 = AN restart
+        //          bit  6 = speed[1] (with bit 13 = speed[0])
+        //          bit 13 = speed[0] (00=10, 01=100, 10=1000)
+        //          bit  8 = duplex (1=full)
+        //   0x01 = Basic Status
+        //          bit  5 = AN complete
+        //          bit  2 = link up
+        //   0x04 = AN advertisement (10/100 capability)
+        //   0x09 = 1000BASE-T control (1000Mb advertisement)
+        //   0x0A = 1000BASE-T status (1000Mb negotiation result)
+        //
+        // Sequence:
+        //   1. log current Basic Control + Basic Status
+        //   2. enable + restart AN by writing reg 0 = 0x1200
+        //      (bit 12 AN enable + bit 9 AN restart)
+        //   3. poll Basic Status bit 5 (AN done) ~100 ms budget
+        //   4. log final Basic Status + 1000BASE-T status
+
+        // Step 1 — pre-AN snapshot.
+        let bc_pre = mdio_read_phy(plat::NIC_BASE, 0, 0);
+        let bs_pre = mdio_read_phy(plat::NIC_BASE, 0, 1);
+        let _ = unsafe { wari_drv_log_u32(0x5048_5910, bc_pre) }; // 'PHY\x10'
+        let _ = unsafe { wari_drv_log_u32(0x5048_5911, bs_pre) }; // 'PHY\x11'
+
+        // Step 2 — kick AN.
+        let kick_rc = mdio_write_phy(plat::NIC_BASE, 0, 0, 0x1200);
+        let _ = unsafe { wari_drv_log_u32(0x5048_5912, kick_rc as u32) };
+
+        // Step 3 — poll AN-complete bit. ~50k MDIO reads is ≈
+        // 50k × ~µs ≈ 50 ms; YT8531C autoneg typically resolves
+        // in <100 ms.
+        let mut an_tries = 0u32;
+        let bs_final = loop {
+            let s = mdio_read_phy(plat::NIC_BASE, 0, 1);
+            if s & (1 << 5) != 0 {
+                break s;
+            }
+            an_tries += 1;
+            if an_tries > 50_000 {
+                break s; // timeout; log whatever the status was
+            }
+        };
+        let _ = unsafe { wari_drv_log_u32(0x5048_5913, bs_final) };
+        let _ = unsafe { wari_drv_log_u32(0x5048_5914, an_tries) };
+
+        // Step 4 — 1000BASE-T status (reg 0x0A): bit 11 = "1000Mb
+        // full duplex resolved", bit 10 = "1000Mb half".
+        let gig_status = mdio_read_phy(plat::NIC_BASE, 0, 0x0A);
+        let _ = unsafe { wari_drv_log_u32(0x5048_5915, gig_status) };
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
