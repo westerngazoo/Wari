@@ -52,17 +52,30 @@ _wari_pull_and_verify() {
     local local_head remote_head
     local_head=$(git rev-parse HEAD)
     remote_head=$(git rev-parse origin/main)
-    echo "  local  HEAD: ${local_head:0:10}"
-    echo "  remote HEAD: ${remote_head:0:10}"
+    echo "  local  HEAD:  ${local_head:0:10}"
+    echo "  remote HEAD:  ${remote_head:0:10}"
 
     if [ "$local_head" = "$remote_head" ]; then
         echo "  (already at latest — no pull needed)"
     else
+        # Snapshot the wari-upgrade.sh hash before the reset; if the
+        # reset brings in a new version of THIS script, we need to
+        # re-source it in the caller's shell so the next 'wari ...'
+        # invocation uses the new function. Caller signal: we set
+        # WARI_SCRIPT_CHANGED=1 and the top-level wari() catches it.
+        local script_path="scripts/wari-upgrade.sh"
+        local script_before script_after
+        script_before=$(md5sum "$script_path" 2>/dev/null | awk '{print $1}')
         echo "Hard-reset to origin/main..."
         git reset --hard origin/main 2>&1 | sed 's/^/  /' || {
             echo "ERROR: git reset failed"
             return 1
         }
+        script_after=$(md5sum "$script_path" 2>/dev/null | awk '{print $1}')
+        if [ "$script_before" != "$script_after" ]; then
+            echo "  >>> $script_path changed in this pull"
+            export WARI_SCRIPT_CHANGED=1
+        fi
     fi
 
     if [ ! -s build/wari.bin ]; then
@@ -146,6 +159,18 @@ wari() {
         upgrade|up)
             echo "=== Wari Upgrade ==="
             _wari_pull_and_verify || return 1
+            # If the pull brought in a new version of this script,
+            # re-source it so the next call uses the fresh function.
+            # Then transparently re-invoke the same command so the
+            # operator never has to remember to source manually.
+            if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
+                echo "  re-sourcing scripts/wari-upgrade.sh and continuing..."
+                unset WARI_SCRIPT_CHANGED
+                # shellcheck source=/dev/null
+                source "$WARI_DIR/scripts/wari-upgrade.sh"
+                wari "$@"
+                return $?
+            fi
             _wari_flash_and_verify || return 1
             echo ""
             echo "  Build $BUILD_NUM ready in $WARI_KERNEL"
@@ -160,6 +185,16 @@ wari() {
             [ "${2:-}" = "-y" ] && skip_confirm=1
             echo "=== Wari Go ==="
             _wari_pull_and_verify || return 1
+            # If the pull brought in a new wari-upgrade.sh, re-source
+            # and re-invoke. The operator never has to source by hand.
+            if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
+                echo "  re-sourcing scripts/wari-upgrade.sh and continuing..."
+                unset WARI_SCRIPT_CHANGED
+                # shellcheck source=/dev/null
+                source "$WARI_DIR/scripts/wari-upgrade.sh"
+                wari "$@"
+                return $?
+            fi
             _wari_flash_and_verify || return 1
             echo ""
             local flashed_build_after
