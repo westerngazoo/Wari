@@ -1290,63 +1290,63 @@ pub fn driver_start() {
         let _ = unsafe { wari_drv_log_u32(0x474D4143, v) };
     }
 
-    // PR Phase-1c-3c — enable GMAC0 bus clocks via SYSCRG + STGCRG.
+    // PR Phase-1c-3d — correct GMAC0 bring-up via AON CRG.
     //
-    // Build 74 dump showed:
-    //   SYSCRG +0x190..0x198 = 0x08 / 0x02 / 0x0a — bit 31 (the
-    //     JH7110 clock-enable bit) is clear; lower bits are the
-    //     pre-set dividers from U-Boot.
-    //   SYSCRG +0x2FC          = 0x07e7fe00 — bits 3 + 4 (GMAC0_AHB
-    //     and GMAC0_AXI per vendor-SDK convention) are 0, meaning
-    //     reset is already deasserted.
-    //   STGCRG +0xEC / 0xF0    = 0x00000000 — also gated, dividers
-    //     unset; setting bit 31 alone won't be enough but it's a
-    //     valid first move.
+    // Build 75/76 result + Linux-mainline cross-check (clk-starfive-
+    // jh7110-aon.c) revealed the misdiagnosis: GMAC0's AHB/AXI/TX/RX
+    // clock gates live in AON CRG (0x17000000), NOT SYSCRG. The
+    // SYSCRG offsets 0x190/0x194/0x198 we poked earlier are GMAC1's
+    // gates (id 100/101/102) — that's why bit 31 was being silently
+    // dropped: their parent path was off, and GMAC1 is irrelevant
+    // anyway. Reverting those misdirected writes — they had no effect
+    // on GMAC0.
     //
-    // Strategy: read-modify-write |= 0x80000000 on each gate.
-    // Re-read the GMAC version register after to see if we're in.
-    // No reset writes (already deasserted, don't poke).
+    // Correct sequence (Linux mainline, AON CRG offsets):
+    //   AONCRG +0x08 = gmac0_ahb gate (id 2)  -> set bit 31
+    //   AONCRG +0x0C = gmac0_axi gate (id 3)  -> set bit 31
+    //   AONCRG +0x38 = AON reset assert word  -> clear bits 0+1
+    //                  (bit 0 = GMAC0_AXI rst, bit 1 = GMAC0_AHB rst).
+    //                  AONCRG +0x3C is the reset status; deassert
+    //                  is bootloader-default but write 0s anyway
+    //                  to be definite.
     //
-    // Tag scheme (this iteration):
-    //   'GMAC' = pre-poke GMAC version (matches build 73/74)
-    //   'GmaC' = post-poke GMAC version (lowercase 'mac' to spot
-    //            the change-of-state line)
-    //   'EnaC' / 'enac' = post-write SYSCRG / STGCRG verify reads
+    // After: read GMAC0+0x110. If non-zero, we have first contact
+    // with the DWMAC IP block on real silicon. JH7110 ships DWMAC
+    // v5.20 → expected version byte 0x52 (or v5.10 → 0x51).
     #[cfg(feature = "vf2")]
     {
-        const SYSCRG_BASE: u32 = 0x1302_0000;
-        const STGCRG_BASE: u32 = 0x1023_0000;
+        const AONCRG_BASE: u32 = 0x1700_0000;
         const ENABLE_BIT:  u32 = 0x8000_0000;
+        const AONRST_OFF:  u32 = 0x38;
+        const GMAC0_AXI_AHB_RST_MASK: u32 = 0x3; // bits 0 and 1
 
-        // Helper: read, OR enable, write back.
-        // SAFETY block scoped to each call below.
-        for off in [0x190u32, 0x194, 0x198] {
-            let cur = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
-            let _ = unsafe {
-                wari_net_mmio_write32(SYSCRG_BASE + off, cur | ENABLE_BIT)
-            };
-        }
-        for off in [0xECu32, 0xF0] {
-            let cur = unsafe { wari_net_mmio_read32(STGCRG_BASE + off) };
-            let _ = unsafe {
-                wari_net_mmio_write32(STGCRG_BASE + off, cur | ENABLE_BIT)
-            };
-        }
+        // Step 1: enable AHB clock gate.
+        let _ = unsafe {
+            wari_net_mmio_write32(AONCRG_BASE + 0x08, ENABLE_BIT)
+        };
+        // Step 2: enable AXI clock gate.
+        let _ = unsafe {
+            wari_net_mmio_write32(AONCRG_BASE + 0x0C, ENABLE_BIT)
+        };
+        // Step 3: deassert GMAC0 reset (clear bits 0+1).
+        let rst_cur = unsafe { wari_net_mmio_read32(AONCRG_BASE + AONRST_OFF) };
+        let _ = unsafe {
+            wari_net_mmio_write32(AONCRG_BASE + AONRST_OFF,
+                rst_cur & !GMAC0_AXI_AHB_RST_MASK)
+        };
 
-        // Verify the writes landed.
-        for off in [0x190u32, 0x194, 0x198] {
-            let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
-            let tag = 0x456E_6100 | (off & 0xFF); // 'Ena\0' + off
-            let _ = unsafe { wari_drv_log_u32(tag, v) };
-        }
-        for off in [0xECu32, 0xF0] {
-            let v = unsafe { wari_net_mmio_read32(STGCRG_BASE + off) };
-            let tag = 0x656E_6100 | (off & 0xFF); // 'ena\0' + off
-            let _ = unsafe { wari_drv_log_u32(tag, v) };
-        }
+        // Verify each write landed. Tags spell 'Aon0' / 'Aon1' /
+        // 'Aon8' / 'AonR' so the trace shows what's at each offset.
+        let v08 = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x08) };
+        let _ = unsafe { wari_drv_log_u32(0x416F_6E08, v08) };
+        let v0c = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x0C) };
+        let _ = unsafe { wari_drv_log_u32(0x416F_6E0C, v0c) };
+        let v38 = unsafe { wari_net_mmio_read32(AONCRG_BASE + AONRST_OFF) };
+        let _ = unsafe { wari_drv_log_u32(0x416F_6E38, v38) };
+        let v3c = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x3C) };
+        let _ = unsafe { wari_drv_log_u32(0x416F_6E3C, v3c) };
 
-        // Re-read the GMAC version. Different tag so the trace
-        // shows BEFORE (GMAC) and AFTER (GmaC) side by side.
+        // Re-read GMAC version — this is the line that matters.
         const GMAC_VERSION_OFFSET: u32 = 0x110;
         let v_after = unsafe {
             wari_net_mmio_read32(plat::NIC_BASE + GMAC_VERSION_OFFSET)
