@@ -47,15 +47,15 @@ use crate::kprintln;
 /// Cost: ~13 extra UART writes (sub-millisecond at 115,200 baud).
 pub fn stage_banner(build: &str, hart_id: usize) {
     kprintln!();
-    kprintln!("       #####");
-    kprintln!("       #   #");
+    kprintln!("        #####");
+    kprintln!("        #   #");
     kprintln!("  ##### #   # #####");
     kprintln!("  #               #");
     kprintln!("  #     WARI      #");
     kprintln!("  #               #");
     kprintln!("  ##### #   # #####");
-    kprintln!("       #   #");
-    kprintln!("       #####");
+    kprintln!("        #   #");
+    kprintln!("        #####");
     kprintln!();
     kprintln!("  Soberanía tecnológica, tierra y libertad.");
     kprintln!("                          — The Geese Collective");
