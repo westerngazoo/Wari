@@ -1290,41 +1290,68 @@ pub fn driver_start() {
         let _ = unsafe { wari_drv_log_u32(0x474D4143, v) };
     }
 
-    // PR Phase-1c-3b — read-only diagnostic dump of the JH7110
-    // STGCRG / SYSCRG clock+reset state. Tells us whether the GMAC
-    // bus clocks are gated and whether the GMAC reset is asserted,
-    // so the next iteration can write the right enable bits without
-    // guessing at the JH7110 register layout.
+    // PR Phase-1c-3c — enable GMAC0 bus clocks via SYSCRG + STGCRG.
     //
-    // Tags spell ASCII so they're greppable in COM7:
-    //   'CRG.': SYSCRG  bank dump (we sample register groups by
-    //           reading every 4-byte slot in a small range and
-    //           looking for non-zero patterns)
-    //   'crg.': STGCRG  same idea
+    // Build 74 dump showed:
+    //   SYSCRG +0x190..0x198 = 0x08 / 0x02 / 0x0a — bit 31 (the
+    //     JH7110 clock-enable bit) is clear; lower bits are the
+    //     pre-set dividers from U-Boot.
+    //   SYSCRG +0x2FC          = 0x07e7fe00 — bits 3 + 4 (GMAC0_AHB
+    //     and GMAC0_AXI per vendor-SDK convention) are 0, meaning
+    //     reset is already deasserted.
+    //   STGCRG +0xEC / 0xF0    = 0x00000000 — also gated, dividers
+    //     unset; setting bit 31 alone won't be enough but it's a
+    //     valid first move.
     //
-    // We sample 4 representative offsets per bank rather than the
-    // whole 64 KiB so the boot trace stays readable. Offsets chosen
-    // by inspection of the StarFive vendor SDK clk-jh7110-* drivers:
-    // these ranges land on the GMAC clock-gate registers + the
-    // reset-deassert register.
+    // Strategy: read-modify-write |= 0x80000000 on each gate.
+    // Re-read the GMAC version register after to see if we're in.
+    // No reset writes (already deasserted, don't poke).
+    //
+    // Tag scheme (this iteration):
+    //   'GMAC' = pre-poke GMAC version (matches build 73/74)
+    //   'GmaC' = post-poke GMAC version (lowercase 'mac' to spot
+    //            the change-of-state line)
+    //   'EnaC' / 'enac' = post-write SYSCRG / STGCRG verify reads
     #[cfg(feature = "vf2")]
     {
         const SYSCRG_BASE: u32 = 0x1302_0000;
         const STGCRG_BASE: u32 = 0x1023_0000;
-        // SYSCRG offsets that vendor SDK comments associate with
-        // GMAC0 and STG-bus clocks (read-only here).
-        for off in [0x190u32, 0x194, 0x198, 0x2FC] {
+        const ENABLE_BIT:  u32 = 0x8000_0000;
+
+        // Helper: read, OR enable, write back.
+        // SAFETY block scoped to each call below.
+        for off in [0x190u32, 0x194, 0x198] {
+            let cur = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
+            let _ = unsafe {
+                wari_net_mmio_write32(SYSCRG_BASE + off, cur | ENABLE_BIT)
+            };
+        }
+        for off in [0xECu32, 0xF0] {
+            let cur = unsafe { wari_net_mmio_read32(STGCRG_BASE + off) };
+            let _ = unsafe {
+                wari_net_mmio_write32(STGCRG_BASE + off, cur | ENABLE_BIT)
+            };
+        }
+
+        // Verify the writes landed.
+        for off in [0x190u32, 0x194, 0x198] {
             let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
-            // Pack the offset into the tag's low 16 bits so we can
-            // tell which register reads what.
-            let tag = 0x4352_4700 | (off & 0xFF); // 'CRG\0' + off
+            let tag = 0x456E_6100 | (off & 0xFF); // 'Ena\0' + off
             let _ = unsafe { wari_drv_log_u32(tag, v) };
         }
-        for off in [0x04u32, 0x74, 0xEC, 0xF0] {
+        for off in [0xECu32, 0xF0] {
             let v = unsafe { wari_net_mmio_read32(STGCRG_BASE + off) };
-            let tag = 0x6372_6700 | (off & 0xFF); // 'crg\0' + off
+            let tag = 0x656E_6100 | (off & 0xFF); // 'ena\0' + off
             let _ = unsafe { wari_drv_log_u32(tag, v) };
         }
+
+        // Re-read the GMAC version. Different tag so the trace
+        // shows BEFORE (GMAC) and AFTER (GmaC) side by side.
+        const GMAC_VERSION_OFFSET: u32 = 0x110;
+        let v_after = unsafe {
+            wari_net_mmio_read32(plat::NIC_BASE + GMAC_VERSION_OFFSET)
+        };
+        let _ = unsafe { wari_drv_log_u32(0x476D_6143, v_after) }; // 'GmaC'
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
