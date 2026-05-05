@@ -51,7 +51,7 @@ pub fn stage_banner(build: &str, hart_id: usize) {
     kprintln!("        #   #");
     kprintln!("  ##### #   # #####");
     kprintln!("  #               #");
-    kprintln!("  #     WARI      #");
+    kprintln!("  #      WARI     #");
     kprintln!("  #               #");
     kprintln!("  ##### #   # #####");
     kprintln!("        #   #");
