@@ -1247,6 +1247,56 @@ fn init_virtio() -> Result<[u8; 6], ()> {
 /// `Net.initialized = false` on the kernel side. The kernel-side
 /// `run_tier2_net` will see this and log an error rather than the
 /// success line.
+/// PR Phase-1c-4 — DWMAC MDIO Clause-22 read.
+///
+/// Encodes a (PHY addr, register) tuple into MAC_MDIO_ADDRESS
+/// (GMAC0 + 0x200), kicks the busy bit, polls for completion, and
+/// returns the low 16 bits of MAC_MDIO_DATA (GMAC0 + 0x204) as a
+/// `u32`. Times out after ~100k spin iterations and returns
+/// `0xFFFF_FFFE` so the trace makes a timeout obvious vs a
+/// floating-bus `0xFFFF_FFFF`.
+#[cfg(feature = "vf2")]
+fn mdio_read_phy(gmac_base: u32, phy_addr: u32, reg: u32) -> u32 {
+    const MAC_MDIO_ADDRESS_OFFSET: u32 = 0x200;
+    const MAC_MDIO_DATA_OFFSET:    u32 = 0x204;
+    const GB: u32                      = 1 << 0;
+    const GOC_READ: u32                = 0b11 << 2; // Clause-22 read
+    const CR_CSR_DIV_26: u32           = 4 << 8;    // CSR/26 — safe default
+
+    let cmd = GB
+        | GOC_READ
+        | CR_CSR_DIV_26
+        | ((reg & 0x1F) << 16)
+        | ((phy_addr & 0x1F) << 21);
+
+    // SAFETY: extern host fn into the kernel's net_mmio surface.
+    let _ = unsafe {
+        wari_net_mmio_write32(gmac_base + MAC_MDIO_ADDRESS_OFFSET, cmd)
+    };
+
+    // Poll busy bit. PHY responses settle in ~µs; cap iterations
+    // generously so a stuck-busy doesn't hang the boot.
+    let mut tries = 0u32;
+    loop {
+        // SAFETY: same.
+        let s = unsafe {
+            wari_net_mmio_read32(gmac_base + MAC_MDIO_ADDRESS_OFFSET)
+        };
+        if s & GB == 0 {
+            break;
+        }
+        tries += 1;
+        if tries > 100_000 {
+            return 0xFFFF_FFFE;
+        }
+    }
+    // SAFETY: same.
+    let data = unsafe {
+        wari_net_mmio_read32(gmac_base + MAC_MDIO_DATA_OFFSET)
+    };
+    data & 0xFFFF
+}
+
 pub fn driver_start() {
     // PR Phase-1c-2: log a milestone marker so the kernel-side
     // boot trace shows "the driver _start has begun executing".
@@ -1352,6 +1402,26 @@ pub fn driver_start() {
             wari_net_mmio_read32(plat::NIC_BASE + GMAC_VERSION_OFFSET)
         };
         let _ = unsafe { wari_drv_log_u32(0x476D_6143, v_after) }; // 'GmaC'
+
+        // Phase-1c-4 — read PHY ID via the GMAC's MDIO subblock.
+        //
+        // VF2 wires a Motorcomm YT8531C at PHY MDIO address 0 to
+        // GMAC0 (RGMII). Reading IEEE-802.3 standard PHY registers
+        // 2 and 3 yields the OUI / model / revision: for the
+        // YT8531C we expect PHYID1 ≈ 0x4F51 and PHYID2 with
+        // OUI bits + model 0xE91B.
+        //
+        // DWMAC4 MAC_MDIO_ADDRESS (offset 0x200) format:
+        //   bit  0     GB     busy / start
+        //   bits 3:2   GOC    operation (00=write, 11=read C22)
+        //   bits 11:8  CR     CSR clock range (4 = CSR/26)
+        //   bits 20:16 RDA    register address (5b)
+        //   bits 25:21 PA     PHY address (5b)
+        // Data lands in the low 16 bits of MAC_MDIO_DATA (0x204).
+        let phyid1 = mdio_read_phy(plat::NIC_BASE, 0, 2);
+        let phyid2 = mdio_read_phy(plat::NIC_BASE, 0, 3);
+        let _ = unsafe { wari_drv_log_u32(0x5048_5901, phyid1) }; // 'PHY\1'
+        let _ = unsafe { wari_drv_log_u32(0x5048_5902, phyid2) }; // 'PHY\2'
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
