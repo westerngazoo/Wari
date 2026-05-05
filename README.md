@@ -1,97 +1,98 @@
-# Un comunicado de The Geese Collective
+# A Statement from The Geese Collective
 
-La nube no está en el cielo. Está en Virginia, en Dublín, en
-Singapur. Tiene dueños, tiene cercas, tiene aduanas. Cuando un
-hospital de Oaxaca guarda los expedientes de sus pacientes, los
-guarda en territorio que no es suyo, bajo leyes que no votó, en
-hardware que no puede abrir. Esto no es un detalle técnico. Es
-la forma del siglo XXI de una pelea vieja.
+Cloud infrastructure is not abstract. It resides in specific
+jurisdictions — Virginia, Dublin, Singapore — operated by a small
+number of providers and governed by the laws of the countries that
+host them. When a hospital in Oaxaca stores patient records, those
+records sit on hardware it cannot inspect, in territory it does not
+control, under legal frameworks its citizens did not shape. This is
+not a peripheral technical concern. It is a question of digital
+sovereignty.
 
-En 1910 dijimos *tierra y libertad* porque la tierra era el medio
-de producción y nos la habían quitado. En 2026 decimos *soberanía
-tecnológica, tierra y libertad* porque el medio de producción
-ahora también es el datacenter, el kernel, el silicio, el modelo
-de IA que decide quién recibe crédito y quién no. Tres empresas
-hospedan la vida digital del sur global. Eso es colonialismo con
-mejor marketing.
+The concentration of global compute and data services in the hands
+of three providers has become a structural risk for the public
+sector across the global south. Continuity of service, data
+residency, lawful access, and supply-chain transparency all depend
+on decisions made elsewhere. Latin American institutions deserve
+infrastructure whose ownership, governance, and inspectability they
+can verify directly.
 
-No estamos contra la tecnología. Estamos por quién la posee. Wari
-es una herramienta — un sistema operativo nativo de WASM para
-RISC-V, AGPL-3.0, sin telemetría, sin puertas traseras, sin
-permiso pedido a nadie. No es un producto. No se renta. No se
-vende. Se comparte, porque las herramientas se comparten — no se
-alquilan.
+Wari is one contribution to that goal: a WASM-native operating
+system for RISC-V, released under AGPL-3.0, with no telemetry and
+no undocumented interfaces. It is not a commercial product. It is a
+shared engineering asset, intended to be adopted, audited, and
+extended by the institutions that depend on it.
 
-No pedimos permiso. Construimos.
+Built to be shared, not rented.
 
 — The Geese Collective
 
 ---
 
-![Wari corriendo en silicio real — VisionFive 2, primer boot](docs/assets/first-boot-vf2.png)
+![Wari running on real silicon — VisionFive 2, first boot](docs/assets/first-boot-vf2.png)
 
-*Wari v0 build 12, booteando en una VisionFive 2 (JH7110, RISC-V RV64GC).
-Salida UART por COM7. Primer "Hello from Wari" sobre silicio real —
-abril 2026.*
+*Wari v0 build 12, booting on a VisionFive 2 (JH7110, RISC-V RV64GC).
+UART output over COM7. First "Hello from Wari" on real silicon —
+April 2026.*
 
 ---
 
 # Wari
 
-Un sistema operativo nativo de WASM para RISC-V, formalmente
-verificable, dirigido a infraestructura cloud soberana en
-Latinoamérica.
+A WASM-native operating system for RISC-V, designed for formal
+verification and intended for sovereign cloud infrastructure in
+Latin America.
 
-**Estado:** Phase 1a cerrada. Booteando en silicio VisionFive 2.
-Phase 1b (capacidades + scheduler + IPC + driver Tier-2 de red)
-en planeación.
+**Status:** Phase 1a complete. Booting on VisionFive 2 silicon.
+Phase 1b (capabilities, scheduler, IPC, and Tier-2 network driver)
+in planning.
 
-## Qué hace a Wari diferente
+## Design principles
 
-- **Modelo de proceso WASM-only.** Nada de ELF en el ABI de cliente,
-  jamás.
-- **Sandbox de dos tiers.** Código de cliente (Tier 1, MMU + WASM) y
-  drivers (Tier 2, WASM-only) son ambos módulos WASM, ejecutados con
-  privilegios distintos vía grants de capacidades.
-- **Kernel nativo diminuto.** Tier 0 son ~5–10 KLOC de Rust, escala
-  de verificación formal.
-- **Soberanía LATAM.** Hardware abierto (RISC-V) + drivers abiertos
-  (`.wasm` auditable) + computación confidencial (CoVE, Phase 3) +
-  silicio custom (GAPU FPGA, Phase 3).
+- **WASM-only process model.** No ELF in the client ABI, at any
+  layer.
+- **Two-tier sandbox.** Client code (Tier 1, MMU + WASM) and drivers
+  (Tier 2, WASM-only) are both WASM modules, executed at distinct
+  privilege levels through capability grants.
+- **Minimal native kernel.** Tier 0 is approximately 5–10 KLOC of
+  Rust, sized for formal verification.
+- **Sovereign technology stack.** Open hardware (RISC-V), open
+  drivers (auditable `.wasm`), confidential computing (CoVE,
+  Phase 3), and custom silicon (GAPU FPGA, Phase 3).
 
-Ver `docs/book/` para la derivación narrativa (Volume 2 de
+See `docs/book/` for the full design rationale (Volume 2 of
 *The Goose Factor*).
 
-## Corriendo en VisionFive 2
+## Running on VisionFive 2
 
-Phase-1a cerró con un harness de deploy funcional para silicio
-RISC-V real. El flujo de día a día:
+Phase 1a closed with a working deployment harness for real RISC-V
+silicon. The day-to-day workflow:
 
 ```bash
-make deploy                  # máquina de dev: build wari.bin, push a GitHub
-wari go                      # en la VF2: pull, copiar a /boot/kernel.bin, reboot
+make deploy                  # dev machine: build wari.bin, push to GitHub
+wari go                      # on the VF2: pull, copy to /boot/kernel.bin, reboot
 ```
 
-El bringup inicial (clonar el repo en el dispositivo, instalar la
-función de shell `wari`) está documentado en
-[`docs/vf2-bringup.md`](docs/vf2-bringup.md). La salida de boot
-aparece en COM7 — ver el doc para el banner esperado.
+Initial bringup (cloning the repository on the device and
+installing the `wari` shell function) is documented in
+[`docs/vf2-bringup.md`](docs/vf2-bringup.md). Boot output appears
+on COM7 — see the document for the expected banner.
 
-## Empezando
+## Getting started
 
-Si llegaste a contribuir, leer en este orden:
+For contributors, recommended reading order:
 
-1. `CLAUDE.md` — reglas, invariantes, fases
-2. `docs/architecture.md` — arquitectura actual
-3. `docs/prior-art.md` — qué heredamos y qué rechazamos
-4. `docs/invariants.md` — el catálogo `INV-N`
-5. `docs/pr-workflow.md` — cómo proponer un cambio
-6. `docs/testing.md` — capas de test + cobertura adversarial
-7. `docs/security-model.md` — modelo de amenazas
+1. `CLAUDE.md` — rules, invariants, phases
+2. `docs/architecture.md` — current architecture
+3. `docs/prior-art.md` — what we adopt and what we reject
+4. `docs/invariants.md` — the `INV-N` catalogue
+5. `docs/pr-workflow.md` — how to propose a change
+6. `docs/testing.md` — test layers and adversarial coverage
+7. `docs/security-model.md` — threat model
 8. `docs/book/` — Wari, Volume 2
 
-## Licencia
+## License
 
-AGPL-3.0-only. Ver [`LICENSE`](LICENSE).
+AGPL-3.0-only. See [`LICENSE`](LICENSE).
 
-Las herramientas se comparten. No se alquilan.
+Built to be shared, not rented.
