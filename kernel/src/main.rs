@@ -99,7 +99,7 @@ const BOOT_HART_ID: usize = 0;
 #[no_mangle]
 pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
     mmio::uart_ns16550::init();
-    kprintln!("Wari v0 build {} boot OK, hart {}", BUILD, BOOT_HART_ID);
+    boot::stage_banner(BUILD, BOOT_HART_ID);
 
     if let Err(e) = mem::kvm::init() {
         kprintln!("MMU init failed: {:?}", e);
