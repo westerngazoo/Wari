@@ -109,12 +109,31 @@ pub const fn is_uart_mmio_addr(addr: usize) -> bool {
 /// Window Validity) to the exact register set the driver is
 /// licensed to touch.
 ///
-/// Phase 1b QEMU range: `[0x10008000, 0x10008100)` — VirtIO-net
-/// MMIO transport.
-/// Phase 1c VF2 range:  `[0x16030000, 0x16040000)` — JH7110 GMAC eth0.
+/// QEMU range: `[0x10008000, 0x10008100)` — VirtIO-net MMIO.
+/// VF2 ranges (Phase-1c-3b): GMAC0 + the three JH7110 clock+reset
+/// generators the driver needs to bring the GMAC out of idle.
 #[inline]
 pub const fn is_net_mmio_addr(addr: usize) -> bool {
-    addr >= NET_MMIO_BASE && addr < NET_MMIO_BASE + NET_MMIO_LEN
+    if addr >= NET_MMIO_BASE && addr < NET_MMIO_BASE + NET_MMIO_LEN {
+        return true;
+    }
+    #[cfg(feature = "vf2")]
+    {
+        // STGCRG — owns the STG-domain GMAC0 reset bit + bus clocks.
+        if addr >= 0x1023_0000 && addr < 0x1024_0000 {
+            return true;
+        }
+        // SYSCRG — owns NOC_BUS_STG_AXI which the GMAC0 AXI port
+        // depends on, plus several GMAC0_* clock gates.
+        if addr >= 0x1302_0000 && addr < 0x1303_0000 {
+            return true;
+        }
+        // AONCRG — read-only diagnostic for AON-domain state.
+        if addr >= 0x1700_0000 && addr < 0x1701_0000 {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

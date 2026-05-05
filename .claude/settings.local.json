@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -rn '$\\($arg' /mnt/c/projects/wari/kernel/src/)"
+    ]
+  }
+}

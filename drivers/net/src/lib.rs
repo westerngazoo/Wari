@@ -1280,12 +1280,7 @@ pub fn driver_start() {
         let _ = nic_iface::init(mac);
     }
 
-    // PR Phase-1c-2 — read the JH7110 GMAC0 version register and
-    // hand it to the kernel for COM7 logging. tag = 'GMAC' =
-    // 0x474D4143. Value = whatever's at GMAC offset 0x110, which
-    // per DWMAC databook §6.1 reads as the IP block's version
-    // (typical: 0x10..0x51). Anything that's NOT 0xffffffff or 0
-    // means the GMAC is responding.
+    // PR Phase-1c-2 — read the JH7110 GMAC0 version register.
     #[cfg(feature = "vf2")]
     {
         const GMAC_VERSION_OFFSET: u32 = 0x110;
@@ -1293,6 +1288,43 @@ pub fn driver_start() {
         // bounds-checks the address (now mapped post Phase-1c-1.6).
         let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + GMAC_VERSION_OFFSET) };
         let _ = unsafe { wari_drv_log_u32(0x474D4143, v) };
+    }
+
+    // PR Phase-1c-3b — read-only diagnostic dump of the JH7110
+    // STGCRG / SYSCRG clock+reset state. Tells us whether the GMAC
+    // bus clocks are gated and whether the GMAC reset is asserted,
+    // so the next iteration can write the right enable bits without
+    // guessing at the JH7110 register layout.
+    //
+    // Tags spell ASCII so they're greppable in COM7:
+    //   'CRG.': SYSCRG  bank dump (we sample register groups by
+    //           reading every 4-byte slot in a small range and
+    //           looking for non-zero patterns)
+    //   'crg.': STGCRG  same idea
+    //
+    // We sample 4 representative offsets per bank rather than the
+    // whole 64 KiB so the boot trace stays readable. Offsets chosen
+    // by inspection of the StarFive vendor SDK clk-jh7110-* drivers:
+    // these ranges land on the GMAC clock-gate registers + the
+    // reset-deassert register.
+    #[cfg(feature = "vf2")]
+    {
+        const SYSCRG_BASE: u32 = 0x1302_0000;
+        const STGCRG_BASE: u32 = 0x1023_0000;
+        // SYSCRG offsets that vendor SDK comments associate with
+        // GMAC0 and STG-bus clocks (read-only here).
+        for off in [0x190u32, 0x194, 0x198, 0x2FC] {
+            let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
+            // Pack the offset into the tag's low 16 bits so we can
+            // tell which register reads what.
+            let tag = 0x4352_4700 | (off & 0xFF); // 'CRG\0' + off
+            let _ = unsafe { wari_drv_log_u32(tag, v) };
+        }
+        for off in [0x04u32, 0x74, 0xEC, 0xF0] {
+            let v = unsafe { wari_net_mmio_read32(STGCRG_BASE + off) };
+            let tag = 0x6372_6700 | (off & 0xFF); // 'crg\0' + off
+            let _ = unsafe { wari_drv_log_u32(tag, v) };
+        }
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
