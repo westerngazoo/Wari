@@ -1654,11 +1654,70 @@ pub fn driver_start() {
             let _ = unsafe { wari_drv_log_u32(0x4253_5703, bm2) };     // 'BSW\3' = post-force-clear
         }
 
-        // Re-dump 4 representative DMA channel-0 regs. If reset
-        // really cleared, we should see something other than 0
-        // for at least DMA_CH0_CONTROL (default = 0x00000000 + a
-        // few enable bits) or RING_LENGTH (will still be 0 but
-        // writes will now stick — Phase-1c-6c verifies that).
+        // PR Phase-1c-6c — enable SYSCRG upstream clocks.
+        //
+        // Build 84 trace showed DMA SWR stuck at 1 even after
+        // explicit force-clear. The DMA engine can't complete
+        // its reset because upstream parent clocks aren't
+        // running:
+        //   SYSCRG +0x024  AHB0 (id 9)            — parent of GMAC0_AHB
+        //   SYSCRG +0x180  NOC_BUS_STG_AXI (id 96) — parent of GMAC0_AXI
+        // Linux marks these CLK_IS_CRITICAL and assumes U-Boot
+        // keeps them on; on VF2 that assumption may not hold
+        // after U-Boot's Ethernet probe finishes.
+        //
+        // Read both, log, and OR-in 0x80000000 if not already
+        // set. Then retry the DMA SWR clear.
+        const SYSCRG_BASE: u32 = 0x1302_0000;
+        const ENABLE_BIT:  u32 = 0x8000_0000;
+
+        for (off, tag_low) in [
+            (0x024u32, 0x24u32), // AHB0
+            (0x180,    0x80),    // NOC_BUS_STG_AXI
+        ] {
+            let pre = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
+            let tag_pre = 0x5550_0000 | tag_low; // 'UP\0\0' + low
+            let _ = unsafe { wari_drv_log_u32(tag_pre, pre) };
+
+            if pre & ENABLE_BIT == 0 {
+                let _ = unsafe {
+                    wari_net_mmio_write32(SYSCRG_BASE + off, pre | ENABLE_BIT)
+                };
+                let post = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
+                let tag_post = 0x5570_0000 | tag_low; // 'Up\0\0' + low
+                let _ = unsafe { wari_drv_log_u32(tag_post, post) };
+            }
+        }
+
+        // Retry the DMA soft-reset clear now that upstream is on.
+        let mut wait_iters_2 = 0u32;
+        let mut bm_2 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
+        while bm_2 & SWR_BIT != 0 && wait_iters_2 < 100_000 {
+            bm_2 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
+            wait_iters_2 += 1;
+        }
+        let _ = unsafe { wari_drv_log_u32(0x5257_5201, wait_iters_2) }; // 'RWR\1' = retry iters
+        let _ = unsafe { wari_drv_log_u32(0x5257_5202, bm_2) };          // 'RWR\2' = bus_mode after retry
+
+        // If still set even after upstream clocks: trigger a
+        // fresh SWR cycle (write 1) so the engine restarts the
+        // reset with clocks now running.
+        if bm_2 & SWR_BIT != 0 {
+            let _ = unsafe {
+                wari_net_mmio_write32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL, SWR_BIT)
+            };
+            let mut tries_3 = 0u32;
+            let mut bm_3 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
+            while bm_3 & SWR_BIT != 0 && tries_3 < 100_000 {
+                bm_3 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
+                tries_3 += 1;
+            }
+            let _ = unsafe { wari_drv_log_u32(0x5257_5203, tries_3) }; // 'RWR\3' = re-trigger iters
+            let _ = unsafe { wari_drv_log_u32(0x5257_5204, bm_3) };
+        }
+
+        // Final dump of 4 representative DMA channel-0 regs to
+        // confirm the engine is alive.
         for (off, tag_low) in [
             (0x1100u32, 0x80u32), // CONTROL
             (0x1104,    0x84),    // TX_CONTROL
