@@ -310,7 +310,24 @@ pub fn register_net_host_fns(
             "wari",
             "drv_log_u32",
             |_: Caller<'_, Tier2HostState>, tag: u32, val: u32| -> i32 {
+                // Always-on. For boot-time milestones the operator
+                // expects to see on stock builds.
                 crate::kprintln!("[net:drv] tag={:#010x} val={:#010x}", tag, val);
+                0
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "drv_trace_u32",
+            |_: Caller<'_, Tier2HostState>, tag: u32, val: u32| -> i32 {
+                // Hot-path. Compiled out unless `debug-kernel` is on.
+                // Identical wire format so the operator can grep
+                // both '[net:drv]' (always) and '[debug:drv]' lines
+                // (debug-kernel only).
+                crate::kdebug!(drv, "tag={:#010x} val={:#010x}", tag, val);
+                let _ = (tag, val); // silence unused on prod
                 0
             },
         )

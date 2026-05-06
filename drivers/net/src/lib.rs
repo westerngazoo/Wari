@@ -1496,24 +1496,49 @@ pub fn driver_start() {
         let _ = unsafe { wari_drv_log_u32(0x5048_5910, bc_pre) }; // 'PHY\x10'
         let _ = unsafe { wari_drv_log_u32(0x5048_5911, bs_pre) }; // 'PHY\x11'
 
-        // Step 2 — kick AN.
-        let kick_rc = mdio_write_phy(plat::NIC_BASE, 0, 0, 0x1200);
-        let _ = unsafe { wari_drv_log_u32(0x5048_5912, kick_rc as u32) };
+        // Step 2 — DON'T restart AN if it already converged.
+        // Build 80 trace showed bs_pre = 0x796D (bits 2 + 5 set
+        // = link up + AN complete) — U-Boot already brought up
+        // the link. Restarting AN drops the link for ~100 ms.
+        // Only kick AN if either link is down or AN hasn't
+        // completed yet.
+        const BS_LINK_UP:    u32 = 1 << 2;
+        const BS_AN_COMPLETE:u32 = 1 << 5;
+        let already_linked = (bs_pre & BS_LINK_UP) != 0
+                          && (bs_pre & BS_AN_COMPLETE) != 0;
+        if already_linked {
+            // Tag 0x12 retains its position in the trace so the
+            // boot-line layout doesn't shift; value 0xA17EAD11 =
+            // 'already' marker.
+            let _ = unsafe { wari_drv_log_u32(0x5048_5912, 0xA17E_AD11) };
+        } else {
+            let _ = mdio_write_phy(plat::NIC_BASE, 0, 0, 0x1200);
+            let _ = unsafe { wari_drv_log_u32(0x5048_5912, 0x0000_0000) };
+        }
 
-        // Step 3 — poll AN-complete bit. ~50k MDIO reads is ≈
-        // 50k × ~µs ≈ 50 ms; YT8531C autoneg typically resolves
-        // in <100 ms.
-        let mut an_tries = 0u32;
-        let bs_final = loop {
-            let s = mdio_read_phy(plat::NIC_BASE, 0, 1);
-            if s & (1 << 5) != 0 {
-                break s;
-            }
-            an_tries += 1;
-            if an_tries > 50_000 {
-                break s; // timeout; log whatever the status was
-            }
-        };
+        // Step 3 — poll AN-complete bit. Budget 500k MDIO reads
+        // ≈ ~500 ms wall-clock; covers YT8531C's worst-case
+        // ~250 ms convergence. Skipped if already_linked.
+        let bs_final;
+        let an_tries;
+        if already_linked {
+            bs_final = bs_pre;
+            an_tries = 0;
+        } else {
+            let mut tries = 0u32;
+            let s_final = loop {
+                let s = mdio_read_phy(plat::NIC_BASE, 0, 1);
+                if s & BS_AN_COMPLETE != 0 && s & BS_LINK_UP != 0 {
+                    break s;
+                }
+                tries += 1;
+                if tries > 500_000 {
+                    break s;
+                }
+            };
+            bs_final = s_final;
+            an_tries = tries;
+        }
         let _ = unsafe { wari_drv_log_u32(0x5048_5913, bs_final) };
         let _ = unsafe { wari_drv_log_u32(0x5048_5914, an_tries) };
 
