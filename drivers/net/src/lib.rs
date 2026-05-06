@@ -1579,6 +1579,38 @@ pub fn driver_start() {
             let tag = 0x4857_0000 | tag_low; // 'HW\0\0' + tag_low
             let _ = unsafe { wari_drv_log_u32(tag, v) };
         }
+
+        // PR Phase-1c-6a — DMA channel-0 register dump. Reads
+        // every register the Phase-1c-6 ring-setup will eventually
+        // write, so we know:
+        //   - whether U-Boot left any descriptor pointers loaded
+        //   - the current DMA state (idle / suspended / running)
+        //   - which interrupts are already enabled
+        //   - the current head/tail pointers
+        // This is the last read-only diagnostic before Phase-1c-6
+        // starts allocating + writing.
+        for (off, tag_low) in [
+            (0x1100u32, 0x00u32), // DMA_CH0_CONTROL
+            (0x1104,    0x04),    // DMA_CH0_TX_CONTROL
+            (0x1108,    0x08),    // DMA_CH0_RX_CONTROL
+            (0x1110,    0x10),    // DMA_CH0_TXDESC_LIST_ADDR_HI
+            (0x1114,    0x14),    // DMA_CH0_TXDESC_LIST_ADDR
+            (0x1118,    0x18),    // DMA_CH0_RXDESC_LIST_ADDR_HI
+            (0x111C,    0x1C),    // DMA_CH0_RXDESC_LIST_ADDR
+            (0x1120,    0x20),    // DMA_CH0_TXDESC_TAIL_POINTER
+            (0x1128,    0x28),    // DMA_CH0_RXDESC_TAIL_POINTER
+            (0x112C,    0x2C),    // DMA_CH0_TXDESC_RING_LENGTH
+            (0x1130,    0x30),    // DMA_CH0_RXDESC_RING_LENGTH
+            (0x1134,    0x34),    // DMA_CH0_INTERRUPT_ENABLE
+            (0x1144,    0x44),    // DMA_CH0_CURRENT_APP_TXDESC
+            (0x114C,    0x4C),    // DMA_CH0_CURRENT_APP_RXDESC
+            (0x1160,    0x60),    // DMA_CH0_STATUS
+        ] {
+            // SAFETY: same.
+            let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + off) };
+            let tag = 0x444D_0000 | tag_low; // 'DM\0\0' + low
+            let _ = unsafe { wari_drv_log_u32(tag, v) };
+        }
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
