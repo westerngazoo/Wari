@@ -1668,8 +1668,8 @@ pub fn driver_start() {
         //
         // Read both, log, and OR-in 0x80000000 if not already
         // set. Then retry the DMA SWR clear.
+        // (ENABLE_BIT already declared earlier in this scope — reuse it.)
         const SYSCRG_BASE: u32 = 0x1302_0000;
-        const ENABLE_BIT:  u32 = 0x8000_0000;
 
         for (off, tag_low) in [
             (0x024u32, 0x24u32), // AHB0
