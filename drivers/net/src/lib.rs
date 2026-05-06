@@ -1521,6 +1521,39 @@ pub fn driver_start() {
         // full duplex resolved", bit 10 = "1000Mb half".
         let gig_status = mdio_read_phy(plat::NIC_BASE, 0, 0x0A);
         let _ = unsafe { wari_drv_log_u32(0x5048_5915, gig_status) };
+
+        // PR Phase-1c-5b — GMAC HW capability + DMA bus-mode dump.
+        //
+        // Now that the IP block is alive (clocks on, version
+        // 0x52 readable), read its self-reported feature
+        // registers. This tells us:
+        //   - how many TX/RX channels the silicon implements
+        //   - hash filter size, ARP offload, EEE, IEEE-1588
+        //   - DMA bus mode = current DMA engine state
+        // We need these numbers to size descriptor rings in
+        // Phase-1c-6 without guessing.
+        const MAC_CONFIG_OFFSET:      u32 = 0x000;
+        const MAC_HW_FEATURE0_OFFSET: u32 = 0x11C;
+        const MAC_HW_FEATURE1_OFFSET: u32 = 0x120;
+        const MAC_HW_FEATURE2_OFFSET: u32 = 0x124;
+        const MAC_HW_FEATURE3_OFFSET: u32 = 0x128;
+        const DMA_BUS_MODE_OFFSET:    u32 = 0x1000;
+        const DMA_SYS_BUS_MODE_OFF:   u32 = 0x1004;
+        for (off, tag_low) in [
+            (MAC_CONFIG_OFFSET,      0x00u32),
+            (MAC_HW_FEATURE0_OFFSET, 0xF0),
+            (MAC_HW_FEATURE1_OFFSET, 0xF1),
+            (MAC_HW_FEATURE2_OFFSET, 0xF2),
+            (MAC_HW_FEATURE3_OFFSET, 0xF3),
+            (DMA_BUS_MODE_OFFSET,    0xD0),
+            (DMA_SYS_BUS_MODE_OFF,   0xD1),
+        ] {
+            // SAFETY: extern host fn; addr is inside GMAC0 window
+            // mapped + cap-validated.
+            let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + off) };
+            let tag = 0x4857_0000 | tag_low; // 'HW\0\0' + tag_low
+            let _ = unsafe { wari_drv_log_u32(tag, v) };
+        }
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
