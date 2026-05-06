@@ -1611,6 +1611,64 @@ pub fn driver_start() {
             let tag = 0x444D_0000 | tag_low; // 'DM\0\0' + low
             let _ = unsafe { wari_drv_log_u32(tag, v) };
         }
+
+        // PR Phase-1c-6b — clear the DMA soft reset.
+        //
+        // Build 83 dump showed DMA_BUS_MODE = 0x00000001 — bit 0
+        // (SWR / software reset) is asserted, which is why every
+        // DMA channel-0 register reads 0: the engine is held in
+        // reset.
+        //
+        // Per DWMAC databook (DMA_BUS_MODE §6.10): SWR is
+        // write-1-to-trigger; the bit auto-clears when the engine
+        // finishes its reset cycle. Reading 1 means either we're
+        // mid-reset OR the bit needs to be re-poked.
+        //
+        // Strategy:
+        //   1. Read SWR. If 0, skip ahead.
+        //   2. If 1, poll up to 100k iterations for it to auto-
+        //      clear.
+        //   3. If still 1, explicitly write 0 (some integrations
+        //      require the clear).
+        //   4. Re-dump DMA_BUS_MODE + DMA channel-0 registers
+        //      (4 representative slots) to verify they're now
+        //      writable / reflecting their power-on defaults.
+        const DMA_BUS_MODE_OFFSET_FULL: u32 = 0x1000;
+        const SWR_BIT: u32 = 1 << 0;
+
+        let mut wait_iters = 0u32;
+        let mut bm = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
+        while bm & SWR_BIT != 0 && wait_iters < 100_000 {
+            bm = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
+            wait_iters += 1;
+        }
+        let _ = unsafe { wari_drv_log_u32(0x4253_5701, wait_iters) }; // 'BSW\1' = poll iters
+        let _ = unsafe { wari_drv_log_u32(0x4253_5702, bm) };          // 'BSW\2' = bus_mode after poll
+
+        if bm & SWR_BIT != 0 {
+            // Force-clear by writing without bit 0.
+            let _ = unsafe {
+                wari_net_mmio_write32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL, bm & !SWR_BIT)
+            };
+            let bm2 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
+            let _ = unsafe { wari_drv_log_u32(0x4253_5703, bm2) };     // 'BSW\3' = post-force-clear
+        }
+
+        // Re-dump 4 representative DMA channel-0 regs. If reset
+        // really cleared, we should see something other than 0
+        // for at least DMA_CH0_CONTROL (default = 0x00000000 + a
+        // few enable bits) or RING_LENGTH (will still be 0 but
+        // writes will now stick — Phase-1c-6c verifies that).
+        for (off, tag_low) in [
+            (0x1100u32, 0x80u32), // CONTROL
+            (0x1104,    0x84),    // TX_CONTROL
+            (0x1108,    0x88),    // RX_CONTROL
+            (0x1160,    0xE0),    // STATUS
+        ] {
+            let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + off) };
+            let tag = 0x4332_0000 | tag_low; // 'C2\0' + low
+            let _ = unsafe { wari_drv_log_u32(tag, v) };
+        }
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
