@@ -2067,6 +2067,45 @@ pub fn driver_start() {
         // set (no frame received yet, DMA owns the buffer).
         let rdes3_0 = unsafe { VF2_RX_RING.descs[0][3] };
         let _ = unsafe { wari_drv_log_u32(0x5244_4533, rdes3_0) }; // 'RDE3'
+
+        // PR Phase-1c-6h — clear sticky DMA_CH0_STATUS bits and
+        // wait briefly to see if any frame arrives (broadcast
+        // ARP responses, switch chatter, neighbour discovery
+        // from other LAN hosts).
+        //
+        // DMA_CH0_STATUS interrupt bits are write-1-to-clear.
+        // Writing 0x484 clears TBU+RBU+ETI from prior states.
+        // Then a busy-wait loop (no sleep in WASM driver), then
+        // re-read STATUS, the RX descriptor, and the
+        // DMA_CH0_CURRENT_APP_RXDESC pointer to see what the
+        // engine is doing.
+        let _ = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1160, 0x0000_FFFF)
+        };
+
+        // Crude busy-wait — ~10 million NIC-base reads ≈ tens of
+        // ms wall-clock. Plenty of time for a few RX frames in
+        // typical LAN traffic.
+        let mut spin = 0u32;
+        while spin < 5_000_000 {
+            spin += 1;
+        }
+
+        // Post-wait diagnostics. Tags 'PoSt' family.
+        let post_status = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1160) };
+        let _ = unsafe { wari_drv_log_u32(0x506F_5301, post_status) }; // PoS\1
+
+        let post_rx_curr = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x114C) };
+        let _ = unsafe { wari_drv_log_u32(0x506F_5302, post_rx_curr) }; // PoS\2 (current RX descriptor pointer)
+
+        let post_rdes3_0 = unsafe { VF2_RX_RING.descs[0][3] };
+        let _ = unsafe { wari_drv_log_u32(0x506F_5303, post_rdes3_0) }; // PoS\3
+
+        // If a frame arrived, the buffer's first 4 bytes are the
+        // start of the Ethernet header (dst MAC bytes 0..3). Log
+        // them so we can recognise the sender at a glance.
+        let frame_word0 = unsafe { (VF2_RX_BUFS.bufs[0].as_ptr() as *const u32).read_unaligned() };
+        let _ = unsafe { wari_drv_log_u32(0x506F_5304, frame_word0) }; // PoS\4 first 4B of buf
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
