@@ -2106,6 +2106,77 @@ pub fn driver_start() {
         // them so we can recognise the sender at a glance.
         let frame_word0 = unsafe { (VF2_RX_BUFS.bufs[0].as_ptr() as *const u32).read_unaligned() };
         let _ = unsafe { wari_drv_log_u32(0x506F_5304, frame_word0) }; // PoS\4 first 4B of buf
+
+        // PR Phase-1c-6i — bypass the MAC's address filter.
+        //
+        // Build 92 trace showed clean DMA status post-clear but
+        // no RX activity. The MAC's default packet filter only
+        // accepts frames whose dst MAC matches MAC_ADDR0 (which
+        // we never programmed — reads as zeros, AE=0 on JH7110
+        // post-reset → MAC accepts NOTHING).
+        //
+        // Two writes to fix:
+        //   MAC_ADDRESS0_HIGH (0x300) = 0x80004084  (AE=1 + bytes 5-4 of MAC = 84:40)
+        //   MAC_ADDRESS0_LOW  (0x304) = 0x390000C7? (bytes 3-0 = 39:00:CF:6C reversed)
+        //   actually MAC = 6c:cf:39:00:40:84
+        //   LO = bytes [3:0] = 39 00 cf 6c LE → 0x390000? hmm
+        //   The DWMAC stores MAC bytes [0..3] in MAC_ADDRESS0_LO
+        //   little-endian, bytes [4..5] in MAC_ADDRESS0_HIGH low 16
+        //   bits. So:
+        //     LO = (b[3]<<24)|(b[2]<<16)|(b[1]<<8)|b[0]
+        //        = 0x003900CF | wait
+        //   For MAC = 6c:cf:39:00:40:84:
+        //     b0=0x6c, b1=0xcf, b2=0x39, b3=0x00, b4=0x40, b5=0x84
+        //     LO = (b3<<24)|(b2<<16)|(b1<<8)|b0
+        //        = 0x00000000 | 0x00390000 | 0x0000CF00 | 0x0000006C
+        //        = 0x0039CF6C
+        //     HI = (AE<<31) | (b5<<8) | b4
+        //        = 0x80000000 | 0x00008400 | 0x00000040
+        //        = 0x80008440
+        //
+        //   Belt-and-braces: also enable promiscuous mode in
+        //   MAC_PACKET_FILTER (0x008) bit 0. That makes the MAC
+        //   accept every frame regardless of dst MAC, so even if
+        //   the addr programming is wrong we still see traffic.
+        let mac_lo: u32 = 0x0039_CF6C;
+        let mac_hi: u32 = 0x8000_8440;
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x300, mac_hi) };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x304, mac_lo) };
+
+        // MAC_PACKET_FILTER: PR bit 0 = promiscuous (accept all).
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x008, 0x0000_0001) };
+
+        // Verify-read.
+        let mac_hi_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x300) };
+        let mac_lo_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x304) };
+        let pf_rb     = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x008) };
+        let _ = unsafe { wari_drv_log_u32(0x4D41_4348, mac_hi_rb) }; // 'MACH'
+        let _ = unsafe { wari_drv_log_u32(0x4D41_434C, mac_lo_rb) }; // 'MACL'
+        let _ = unsafe { wari_drv_log_u32(0x4D41_4346, pf_rb) };     // 'MACF'
+
+        // Clear status sticky bits again, longer wait.
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1160, 0x0000_FFFF) };
+        let mut spin2 = 0u32;
+        while spin2 < 20_000_000 {
+            spin2 += 1;
+        }
+
+        // Second-look diagnostics. Tags 'Wt2_' family.
+        let st2 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1160) };
+        let _ = unsafe { wari_drv_log_u32(0x5774_3201, st2) };
+
+        // Walk the first 4 RX descriptors looking for OWN cleared.
+        for i in 0..4u32 {
+            let r = unsafe { VF2_RX_RING.descs[i as usize][3] };
+            let tag = 0x5774_3300 | i;
+            let _ = unsafe { wari_drv_log_u32(tag, r) };
+        }
+
+        // Also dump first 4 bytes of buffer 0 again.
+        let w2 = unsafe {
+            (VF2_RX_BUFS.bufs[0].as_ptr() as *const u32).read_unaligned()
+        };
+        let _ = unsafe { wari_drv_log_u32(0x5774_3204, w2) };
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
