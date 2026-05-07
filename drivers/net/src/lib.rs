@@ -322,6 +322,29 @@ static mut RX_BUFS: [PacketBuffer; RX_BUF_COUNT] = [const {
 #[no_mangle]
 pub static mut TX_BUF: PacketBuffer = PacketBuffer { bytes: [0; ETH_FRAME_MAX] };
 
+// PR Phase-1c-6e — VF2 GMAC0 DMA descriptor rings.
+// 16 descriptors × 16 bytes = 256 B each. repr(C, align(16))
+// satisfies the DWMAC4 16-byte alignment requirement; the
+// physical address handed to the DMA engine is `lin_mem_base()
+// + (&VF2_TX_RING.descs[0] as u32)`.
+#[cfg(feature = "vf2")]
+#[repr(C, align(16))]
+pub struct VF2DmaRing {
+    pub descs: [[u32; 4]; 16],
+}
+
+#[cfg(feature = "vf2")]
+#[no_mangle]
+pub static mut VF2_TX_RING: VF2DmaRing = VF2DmaRing {
+    descs: [[0u32; 4]; 16],
+};
+
+#[cfg(feature = "vf2")]
+#[no_mangle]
+pub static mut VF2_RX_RING: VF2DmaRing = VF2DmaRing {
+    descs: [[0u32; 4]; 16],
+};
+
 /// Driver-side ring index tracking. Phase-1b keeps it simple — no
 /// wraparound logic beyond the `% QUEUE_SIZE` masking; rx_used_seen
 /// monotonically advances and the kernel's idle loop (Phase-2+)
@@ -1773,6 +1796,70 @@ pub fn driver_start() {
         ] {
             let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + off) };
             let tag = 0x4332_0000 | tag_low; // 'C2\0' + low
+            let _ = unsafe { wari_drv_log_u32(tag, v) };
+        }
+
+        // PR Phase-1c-6e — program TX/RX descriptor ring base
+        // addresses + ring lengths. DMA is alive; write the
+        // pointers and verify-read.
+        //
+        // Ring sizing: 16 descriptors × 16 bytes = 256 B per ring.
+        // VF2_DMA_RINGS holds both rings + 16 RX buffers (1536 B
+        // each = 24 KiB). Total static = ~24.5 KiB in driver
+        // linmem.
+        //
+        // Physical address = lin_mem_base() + linmem-offset of
+        // the ring static. The kernel side translates via
+        // page-table mappings — wasm32 pointers ARE the linmem
+        // offset (driver is wasm32, 32-bit ptrs).
+        let lin_base = unsafe { wari_lin_mem_base() };
+
+        let tx_ring_off = unsafe {
+            core::ptr::addr_of!(VF2_TX_RING.descs) as u32
+        };
+        let rx_ring_off = unsafe {
+            core::ptr::addr_of!(VF2_RX_RING.descs) as u32
+        };
+        let tx_pa: u64 = lin_base + tx_ring_off as u64;
+        let rx_pa: u64 = lin_base + rx_ring_off as u64;
+
+        // Tags: 'TXp' / 'RXp' carry the ring physical address
+        // for visibility before we hand them to the DMA engine.
+        let _ = unsafe { wari_drv_log_u32(0x5458_7048, (tx_pa >> 32) as u32) }; // TXpH
+        let _ = unsafe { wari_drv_log_u32(0x5458_704C, tx_pa as u32) };          // TXpL
+        let _ = unsafe { wari_drv_log_u32(0x5258_7048, (rx_pa >> 32) as u32) }; // RXpH
+        let _ = unsafe { wari_drv_log_u32(0x5258_704C, rx_pa as u32) };          // RXpL
+
+        // Write TX ring base (high then low; per DWMAC databook
+        // the engine latches LOW writes once HIGH is set).
+        let _ = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1110, (tx_pa >> 32) as u32)
+        };
+        let _ = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1114, tx_pa as u32)
+        };
+        // Write RX ring base.
+        let _ = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1118, (rx_pa >> 32) as u32)
+        };
+        let _ = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x111C, rx_pa as u32)
+        };
+        // Ring lengths — 16 entries each (DMA expects N-1).
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x112C, 15) };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1130, 15) };
+
+        // Verify-read all 6 slots.
+        for (off, tag_low) in [
+            (0x1110u32, 0xA0u32), // TX_BASE_HI
+            (0x1114,    0xA4),    // TX_BASE_LO
+            (0x1118,    0xA8),    // RX_BASE_HI
+            (0x111C,    0xAC),    // RX_BASE_LO
+            (0x112C,    0xBC),    // TX_RING_LEN
+            (0x1130,    0xC0),    // RX_RING_LEN
+        ] {
+            let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + off) };
+            let tag = 0x4456_0000 | tag_low; // 'DV\0\0' + low
             let _ = unsafe { wari_drv_log_u32(tag, v) };
         }
     }
