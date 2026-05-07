@@ -2017,7 +2017,8 @@ pub fn driver_start() {
         // Then DMA_CH0_RX_CONTROL.RBSZ_x_0 (bits 14:1) carries
         // the buffer size. For 1536 we write (1536 << 1) = 0xC00
         // into bits 14:1 alongside SR + RXPBL.
-        let bufs_off = core::ptr::addr_of!(VF2_RX_BUFS.bufs) as u32;
+        // SAFETY: addr-of read on a module-static; no deref here.
+        let bufs_off = unsafe { core::ptr::addr_of!(VF2_RX_BUFS.bufs) as u32 };
         let bufs_pa: u64 = lin_base + bufs_off as u64;
         let _ = unsafe { wari_drv_log_u32(0x5258_4248, (bufs_pa >> 32) as u32) }; // 'RXBH'
         let _ = unsafe { wari_drv_log_u32(0x5258_424C, bufs_pa as u32) };          // 'RXBL'
