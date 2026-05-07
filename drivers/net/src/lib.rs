@@ -345,6 +345,46 @@ pub static mut VF2_RX_RING: VF2DmaRing = VF2DmaRing {
     descs: [[0u32; 4]; 16],
 };
 
+/// PR Phase-1c-6f — first-packet TX buffer.
+///
+/// Holds a 64-byte broadcast ARP request so the first frame
+/// the GMAC ever transmits is meaningful traffic (a switch
+/// will respond, a Wireshark on a mirror port will recognise
+/// the protocol). Pre-filled at module scope so the descriptor
+/// just points at it.
+///
+/// Wire format (broadcast ARP "who-has 192.168.122.1?"):
+///   00..05  dst MAC = ff:ff:ff:ff:ff:ff (broadcast)
+///   06..0B  src MAC = 6c:cf:39:00:40:84 (VF2 MAC0 from EEPROM)
+///   0C..0D  ethertype = 0x0806 (ARP)
+///   0E..0F  HTYPE = 0x0001 (Ethernet)
+///   10..11  PTYPE = 0x0800 (IPv4)
+///   12      HLEN  = 6
+///   13      PLEN  = 4
+///   14..15  OPER  = 0x0001 (request)
+///   16..1B  SHA = 6c:cf:39:00:40:84
+///   1C..1F  SPA = 192.168.122.10
+///   20..25  THA = 00 00 00 00 00 00
+///   26..29  TPA = 192.168.122.1
+///   2A..3F  zero pad to 64 bytes
+#[cfg(feature = "vf2")]
+#[no_mangle]
+pub static VF2_FIRST_PKT: [u8; 64] = [
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,             // dst broadcast
+    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84,             // src VF2 MAC0
+    0x08, 0x06,                                     // ethertype ARP
+    0x00, 0x01,                                     // HTYPE Ethernet
+    0x08, 0x00,                                     // PTYPE IPv4
+    0x06, 0x04,                                     // HLEN/PLEN
+    0x00, 0x01,                                     // OPER request
+    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84,             // SHA
+    0xC0, 0xA8, 0x7A, 0x0A,                         // SPA 192.168.122.10
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,             // THA
+    0xC0, 0xA8, 0x7A, 0x01,                         // TPA 192.168.122.1
+    // pad to 64
+    0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,
+];
+
 /// Driver-side ring index tracking. Phase-1b keeps it simple — no
 /// wraparound logic beyond the `% QUEUE_SIZE` masking; rx_used_seen
 /// monotonically advances and the kernel's idle loop (Phase-2+)
@@ -1862,6 +1902,82 @@ pub fn driver_start() {
             let tag = 0x4456_0000 | tag_low; // 'DV\0\0' + low
             let _ = unsafe { wari_drv_log_u32(tag, v) };
         }
+
+        // PR Phase-1c-6f — populate one TX descriptor with a
+        // 64-byte broadcast ARP, enable MAC TX/RX, start DMA TX,
+        // kick the tail pointer. First Wari frame on real wire.
+        //
+        // DWMAC4 normal TX descriptor layout:
+        //   TDES0: buffer-1 address bits 31:0
+        //   TDES1: buffer-1 address bits 63:32
+        //   TDES2: bits 13:0  = buffer-1 length
+        //          bit  31    = IOC (interrupt on completion)
+        //   TDES3: bits 14:0  = total frame length
+        //          bit  28    = FD (first descriptor)
+        //          bit  29    = LD (last descriptor)
+        //          bit  31    = OWN (1 = DMA owns; 0 = SW)
+        //
+        // Pkt PA = lin_mem_base + linmem-offset of VF2_FIRST_PKT.
+        let pkt_off = core::ptr::addr_of!(VF2_FIRST_PKT) as u32;
+        let pkt_pa: u64 = lin_base + pkt_off as u64;
+        let _ = unsafe { wari_drv_log_u32(0x504B_5448, (pkt_pa >> 32) as u32) }; // 'PKTH'
+        let _ = unsafe { wari_drv_log_u32(0x504B_544C, pkt_pa as u32) };          // 'PKTL'
+
+        // SAFETY: VF2_TX_RING is module-static; this is the only
+        // writer and runs once at boot before DMA reads it.
+        unsafe {
+            let d = &mut VF2_TX_RING.descs[0];
+            d[0] = pkt_pa as u32;             // TDES0 PA low
+            d[1] = (pkt_pa >> 32) as u32;     // TDES1 PA high
+            d[2] = 64;                        // TDES2 buf len = 64
+            d[3] = 0x8000_0000                // OWN
+                 | 0x2000_0000                // LD
+                 | 0x1000_0000                // FD
+                 | 64;                        // total length 64
+        }
+
+        // MAC_CONFIG = 0x0000_0003 (TE | RE) — enable transmit + receive
+        // SAFETY: extern host fn into kernel net_mmio surface.
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x000, 0x3) };
+
+        // DMA_CH0_TX_CONTROL: set ST (bit 0) — start transmit.
+        // Default TXPBL = 1 (lower bits 21:16). Use 0x0010_0001
+        // (TXPBL=1, ST=1).
+        let _ = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1104, 0x0010_0001)
+        };
+        // DMA_CH0_RX_CONTROL: set SR (bit 0). RXPBL=1, RBSZ field
+        // bits 14:1 left at 0 for now (Phase-1c-6g sets 1536).
+        let _ = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1108, 0x0010_0001)
+        };
+
+        // Tail pointer: write address of descriptor[1] (one past
+        // the last ready descriptor). DWMAC starts processing
+        // when current head < tail.
+        let tx_tail_pa: u32 = (lin_base + tx_ring_off as u64 + 16) as u32;
+        let _ = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1120, tx_tail_pa)
+        };
+
+        // Verify-read post-write state.
+        for (off, tag_low) in [
+            (0x000u32,  0xC0u32), // MAC_CONFIG
+            (0x1104,    0xC4),    // TX_CONTROL
+            (0x1108,    0xC8),    // RX_CONTROL
+            (0x1120,    0xCC),    // TX_TAIL
+            (0x1160,    0xD0),    // DMA_CH0_STATUS
+        ] {
+            let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + off) };
+            let tag = 0x4754_0000 | tag_low; // 'GT\0\0' + low
+            let _ = unsafe { wari_drv_log_u32(tag, v) };
+        }
+
+        // Read TDES3 of descriptor[0] back from linmem to see if
+        // DMA cleared the OWN bit (= packet sent).
+        // SAFETY: same — module static, single accessor.
+        let tdes3 = unsafe { VF2_TX_RING.descs[0][3] };
+        let _ = unsafe { wari_drv_log_u32(0x5444_4533, tdes3) }; // 'TDE3'
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
