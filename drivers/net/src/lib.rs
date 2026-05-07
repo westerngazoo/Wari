@@ -1689,6 +1689,53 @@ pub fn driver_start() {
             }
         }
 
+        // PR Phase-1c-6d — enable the rest of GMAC0's datapath
+        // clocks. Build 86 trace showed AHB/AXI + upstream are
+        // on but DMA SWR still won't clear; the engine can't
+        // flush its state machines without TX/RX clocks running.
+        //
+        // Per Linux mainline clk-starfive-jh7110-aon.c +
+        // clk-starfive-jh7110-sys.c, GMAC0's complete clock
+        // tree:
+        //   AON (already done): +0x08 ahb, +0x0C axi
+        //   AON (NEW):           +0x14 tx (GMUX, mux=0=gtxclk)
+        //                         +0x20 rx_inv (bit 30 = invert for RGMII)
+        //   SYS (NEW):           +0x1B0 gtxclk (GDIV, en + div=5 for 1Gbps)
+        //                         +0x1B4 ptp    (GDIV, en + div=10)
+        //                         +0x1B8 phy    (GDIV, en + div=30 for MDC)
+        //                         +0x1BC gtxc   (gate, en)
+        //
+        // Note: +0x10 rmii_rtx + +0x18 tx_inv + +0x1C rx are
+        // intentionally untouched — defaults are correct for
+        // RGMII (VF2 phy mode).
+        const AONCRG_BASE_2: u32 = 0x1700_0000;
+
+        // AON datapath: tx GMUX with mux=0 (parent gmac0_gtxclk)
+        let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x14, ENABLE_BIT) };
+        // AON: rx_inv bit 30 set for RGMII
+        let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x20, 0x4000_0000) };
+
+        // SYS: gtxclk = enable + divider 5 (PLL0 1000MHz / 5 = 200MHz GTX clock)
+        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B0, ENABLE_BIT | 0x5) };
+        // SYS: ptp = enable + divider 10
+        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B4, ENABLE_BIT | 0xA) };
+        // SYS: phy MDC = enable + divider 30 (~16MHz from 500MHz)
+        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B8, ENABLE_BIT | 0x1E) };
+        // SYS: gtxc gate (parent gmac0_gtxclk)
+        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1BC, ENABLE_BIT) };
+
+        // Verify-read each. Tags 'AOn' / 'SyS' + low byte.
+        for off in [0x14u32, 0x20] {
+            let v = unsafe { wari_net_mmio_read32(AONCRG_BASE_2 + off) };
+            let tag = 0x414F_6E00 | (off & 0xFF); // 'AOn\0' + low
+            let _ = unsafe { wari_drv_log_u32(tag, v) };
+        }
+        for off in [0x1B0u32, 0x1B4, 0x1B8, 0x1BC] {
+            let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
+            let tag = 0x5379_5300 | (off & 0xFF); // 'SyS\0' + low
+            let _ = unsafe { wari_drv_log_u32(tag, v) };
+        }
+
         // Retry the DMA soft-reset clear now that upstream is on.
         let mut wait_iters_2 = 0u32;
         let mut bm_2 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
