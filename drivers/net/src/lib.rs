@@ -345,6 +345,27 @@ pub static mut VF2_RX_RING: VF2DmaRing = VF2DmaRing {
     descs: [[0u32; 4]; 16],
 };
 
+/// PR Phase-1c-6g — RX buffers, one per descriptor.
+///
+/// 16 buffers × 1536 bytes = 24 KiB. Each RX descriptor in
+/// VF2_RX_RING points to one of these slots; the GMAC writes
+/// incoming frames into them and clears the OWN bit when done.
+///
+/// 1536 B = standard Ethernet MTU (1500) + headroom for VLAN
+/// tag + alignment. DMA_CH0_RX_CONTROL.RBSZ tells the engine
+/// this is the per-descriptor buffer size.
+#[cfg(feature = "vf2")]
+#[repr(C, align(64))]
+pub struct VF2RxBuffers {
+    pub bufs: [[u8; 1536]; 16],
+}
+
+#[cfg(feature = "vf2")]
+#[no_mangle]
+pub static mut VF2_RX_BUFS: VF2RxBuffers = VF2RxBuffers {
+    bufs: [[0u8; 1536]; 16],
+};
+
 /// PR Phase-1c-6f — first-packet TX buffer.
 ///
 /// Holds a 64-byte broadcast ARP request so the first frame
@@ -1978,6 +1999,73 @@ pub fn driver_start() {
         // SAFETY: same — module static, single accessor.
         let tdes3 = unsafe { VF2_TX_RING.descs[0][3] };
         let _ = unsafe { wari_drv_log_u32(0x5444_4533, tdes3) }; // 'TDE3'
+
+        // PR Phase-1c-6g — populate RX ring + set RBSZ.
+        //
+        // Build 89 trace showed DMA_CH0_STATUS bit 7 (RBU =
+        // RX Buffer Unavailable). The DMA engine wants to write
+        // received bytes somewhere but no descriptors are armed.
+        //
+        // Each RX descriptor:
+        //   RDES0   buffer-1 PA low
+        //   RDES1   buffer-1 PA high
+        //   RDES2   buffer-2 PA (unused, 0)
+        //   RDES3   bit 24 = BUF1V (buffer 1 valid)
+        //           bit 30 = IOC (interrupt on completion)
+        //           bit 31 = OWN (1 = DMA owns)
+        //
+        // Then DMA_CH0_RX_CONTROL.RBSZ_x_0 (bits 14:1) carries
+        // the buffer size. For 1536 we write (1536 << 1) = 0xC00
+        // into bits 14:1 alongside SR + RXPBL.
+        let bufs_off = core::ptr::addr_of!(VF2_RX_BUFS.bufs) as u32;
+        let bufs_pa: u64 = lin_base + bufs_off as u64;
+        let _ = unsafe { wari_drv_log_u32(0x5258_4248, (bufs_pa >> 32) as u32) }; // 'RXBH'
+        let _ = unsafe { wari_drv_log_u32(0x5258_424C, bufs_pa as u32) };          // 'RXBL'
+
+        // Fill all 16 RX descriptors. Each buffer is 1536 B
+        // apart. SAFETY: module static, single writer at boot.
+        unsafe {
+            for i in 0..16 {
+                let bp: u64 = bufs_pa + (i as u64) * 1536;
+                let d = &mut VF2_RX_RING.descs[i];
+                d[0] = bp as u32;             // RDES0 PA low
+                d[1] = (bp >> 32) as u32;     // RDES1 PA high
+                d[2] = 0;                     // RDES2 unused
+                d[3] = 0x8000_0000            // OWN
+                     | 0x4000_0000            // IOC
+                     | 0x0100_0000;           // BUF1V
+            }
+        }
+
+        // Re-write DMA_CH0_RX_CONTROL with the buffer size.
+        // (1 << 0)=SR | (1536 << 1)=RBSZ | (1 << 16)=RXPBL
+        let rx_ctrl = 0x0001_0000u32 | (1536u32 << 1) | 0x1;
+        let _ = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1108, rx_ctrl)
+        };
+
+        // RX tail pointer = ring base + 16 descriptors × 16 B
+        // = "all 16 descs are armed".
+        let rx_tail_pa: u32 = (lin_base + rx_ring_off as u64 + 16 * 16) as u32;
+        let _ = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1128, rx_tail_pa)
+        };
+
+        // Verify reads.
+        let rx_ctrl_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1108) };
+        let _ = unsafe { wari_drv_log_u32(0x5258_43E0, rx_ctrl_rb) }; // 'RXC\xE0'
+
+        let rx_tail_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1128) };
+        let _ = unsafe { wari_drv_log_u32(0x5258_43E1, rx_tail_rb) }; // 'RXC\xE1'
+
+        // Read DMA_CH0_STATUS again — bit 7 (RBU) should clear.
+        let status_2 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1160) };
+        let _ = unsafe { wari_drv_log_u32(0x5374_4132, status_2) }; // 'StA2'
+
+        // Read RDES3 of descriptor[0] — OWN bit should still be
+        // set (no frame received yet, DMA owns the buffer).
+        let rdes3_0 = unsafe { VF2_RX_RING.descs[0][3] };
+        let _ = unsafe { wari_drv_log_u32(0x5244_4533, rdes3_0) }; // 'RDE3'
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
