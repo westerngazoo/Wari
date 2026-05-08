@@ -345,6 +345,39 @@ pub static mut VF2_RX_RING: VF2DmaRing = VF2DmaRing {
     descs: [[0u32; 4]; 16],
 };
 
+/// PR Phase-1c-7 — TX buffer pool for the vf2 GMAC0 path. Mirrors
+/// the RX pool: 16 × 1536 byte buffers, each bound to one entry
+/// in VF2_TX_RING. The smoltcp Device::transmit token writes into
+/// the next slot, hands the buffer to smoltcp's `consume(len, f)`
+/// closure, then publishes the descriptor to the DMA engine and
+/// bumps the TX tail pointer.
+#[cfg(feature = "vf2")]
+#[repr(C, align(64))]
+pub struct VF2TxBuffers {
+    pub bufs: [[u8; 1536]; 16],
+}
+
+#[cfg(feature = "vf2")]
+#[no_mangle]
+pub static mut VF2_TX_BUFS: VF2TxBuffers = VF2TxBuffers {
+    bufs: [[0u8; 1536]; 16],
+};
+
+/// VF2 driver-side state owned by the smoltcp Device impl. Set
+/// once at boot from `driver_start`'s vf2 branch; read by every
+/// poll/transmit call.
+#[cfg(feature = "vf2")]
+pub mod vf2_state {
+    /// Linear-memory physical-base reported by the kernel via
+    /// `wari_lin_mem_base()`. Added to wasm32 linmem offsets to
+    /// produce kernel-visible PAs for descriptor pointers.
+    pub static mut LIN_BASE: u64 = 0;
+    /// Round-robin TX descriptor index. Wraps at 16.
+    pub static mut TX_NEXT: usize = 0;
+    /// Round-robin RX descriptor index for the receive walk.
+    pub static mut RX_NEXT: usize = 0;
+}
+
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
 ///
 /// 16 buffers × 1536 bytes = 24 KiB. Each RX descriptor in
@@ -702,14 +735,23 @@ pub fn driver_rx_recycle(desc_idx: u32) -> i32 {
 // the exported `poll(timestamp_ms)` function which advances
 // `Interface::poll`.
 
-#[cfg(feature = "qemu")]
+// Platform-neutral as of PR Phase-1c-7: smoltcp `Interface`,
+// `SocketSet`, the socket buffer pool, and the public surface
+// (init / poll / socket_create_tcp / socket_bind / socket_listen
+// / socket_close) are identical across qemu and vf2. The ONLY
+// platform-specific piece is which `NicDevice` we attach — the
+// qemu module reads/writes virtio-net rings, the vf2 module
+// reads/writes JH7110 GMAC0 DMA descriptor rings.
 mod nic_iface {
     use core::ptr::addr_of_mut;
     use smoltcp::iface::{Config, Interface, SocketSet, SocketStorage};
     use smoltcp::time::Instant;
     use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
+    #[cfg(feature = "qemu")]
     use super::phy::NicDevice;
+    #[cfg(feature = "vf2")]
+    use super::vf2_phy::NicDevice;
 
     /// Phase-1b QEMU demo IP (per net design doc §10 Q1). QEMU
     /// slirp's default subnet is 192.168.122.0/24 with gateway
@@ -955,18 +997,12 @@ mod nic_iface {
 /// any state, 0 if idle. Negative on init failure (vf2 stub or
 /// nic_iface not initialized).
 pub fn driver_poll(timestamp_ms: u64) -> i32 {
-    #[cfg(feature = "qemu")]
-    {
-        if nic_iface::poll(timestamp_ms) {
-            1
-        } else {
-            0
-        }
-    }
-    #[cfg(feature = "vf2")]
-    {
-        let _ = timestamp_ms;
-        -1
+    // PR Phase-1c-7 — both platforms share the same `nic_iface`
+    // entrypoint now that vf2 has its own NicDevice impl.
+    if nic_iface::poll(timestamp_ms) {
+        1
+    } else {
+        0
     }
 }
 
@@ -1150,6 +1186,200 @@ pub mod phy {
             compiler_fence(Ordering::SeqCst);
             let _ = tx_send(tx_buf_off, total_len as u32);
             r
+        }
+    }
+}
+
+// ── VF2 GMAC0 smoltcp Device impl (PR Phase-1c-7) ────────────────
+//
+// Mirror of the qemu `phy` module above, but reads from the JH7110
+// GMAC0 DMA descriptor rings instead of VirtIO virtqueues.
+// Smoltcp's `Interface::poll` calls into this through the `Device`
+// trait the same way it does for qemu — the upper-layer code in
+// `nic_iface` is platform-neutral.
+
+#[cfg(feature = "vf2")]
+pub mod vf2_phy {
+    use super::{
+        vf2_state, wari_net_mmio_write32, VF2_RX_BUFS, VF2_RX_RING,
+        VF2_TX_BUFS, VF2_TX_RING,
+    };
+    use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+    use smoltcp::time::Instant;
+
+    /// Zero-sized Device handle. All state lives in module-level
+    /// statics (`VF2_*_RING`, `VF2_*_BUFS`, `vf2_state::*`); the
+    /// struct is just the type smoltcp can name.
+    pub struct NicDevice;
+
+    impl NicDevice {
+        pub const fn new() -> Self {
+            Self
+        }
+    }
+
+    impl Default for NicDevice {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// Standard Ethernet MTU. The GMAC accepts up to 1518 (1500
+    /// + Ethernet header); smoltcp passes us payload up to MTU.
+    const SMOLTCP_MTU: usize = 1500;
+
+    /// JH7110 GMAC0 base address (mirror of `super::plat::NIC_BASE`
+    /// for vf2 builds — re-declared locally to keep this module
+    /// self-contained).
+    const GMAC_BASE: u32 = 0x1603_0000;
+    const DMA_CH0_TX_TAIL: u32 = 0x1120;
+
+    /// DWMAC4 RDES3 status bits.
+    const RDES3_OWN: u32 = 0x8000_0000;
+
+    /// DWMAC4 TDES3 — OWN | LD | FD set with packet length in low 15.
+    const TDES3_OWN: u32 = 0x8000_0000;
+    const TDES3_LD:  u32 = 0x2000_0000;
+    const TDES3_FD:  u32 = 0x1000_0000;
+
+    impl Device for NicDevice {
+        type RxToken<'a> = Vf2NicRxToken;
+        type TxToken<'a> = Vf2NicTxToken;
+
+        fn capabilities(&self) -> DeviceCapabilities {
+            let mut caps = DeviceCapabilities::default();
+            caps.medium = Medium::Ethernet;
+            caps.max_transmission_unit = SMOLTCP_MTU;
+            // GMAC offloads are off; smoltcp computes/verifies all
+            // checksums.
+            caps
+        }
+
+        fn receive(
+            &mut self,
+            _ts: Instant,
+        ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+            // Round-robin walk over the 16 RX descriptors looking
+            // for one whose OWN bit was cleared by the DMA engine.
+            // Start from RX_NEXT so consecutive frames pick up
+            // descriptors in order.
+            // SAFETY: single-threaded driver; static muts are the
+            // only data path. Module-static read of OWN bit is
+            // atomic at the 32-bit-aligned word level on RISC-V.
+            unsafe {
+                let start = vf2_state::RX_NEXT;
+                for n in 0..16usize {
+                    let i = (start + n) % 16;
+                    let rdes3 = VF2_RX_RING.descs[i][3];
+                    if rdes3 & RDES3_OWN == 0 {
+                        // Frame received in slot i. Length is in
+                        // RDES3 bits 14:0.
+                        let len = (rdes3 & 0x7FFF) as u16;
+                        vf2_state::RX_NEXT = (i + 1) % 16;
+                        return Some((
+                            Vf2NicRxToken { idx: i, len },
+                            Vf2NicTxToken { idx: vf2_state::TX_NEXT },
+                        ));
+                    }
+                }
+            }
+            None
+        }
+
+        fn transmit(&mut self, _ts: Instant) -> Option<Self::TxToken<'_>> {
+            // SAFETY: same as above.
+            unsafe {
+                let i = vf2_state::TX_NEXT;
+                let tdes3 = VF2_TX_RING.descs[i][3];
+                if tdes3 & TDES3_OWN != 0 {
+                    // DMA hasn't released this slot yet; back-pressure.
+                    return None;
+                }
+                Some(Vf2NicTxToken { idx: i })
+            }
+        }
+    }
+
+    pub struct Vf2NicRxToken {
+        idx: usize,
+        len: u16,
+    }
+
+    impl RxToken for Vf2NicRxToken {
+        fn consume<R, F>(self, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            // SAFETY: single-threaded driver; this slot's buffer is
+            // exclusively ours until we re-arm the descriptor at the
+            // bottom of this function.
+            let result = unsafe {
+                let buf = &mut VF2_RX_BUFS.bufs[self.idx][..self.len as usize];
+                f(buf)
+            };
+
+            // Re-arm: re-point the descriptor at the same buffer
+            // and set OWN | IOC | BUF1V so DMA can write the next
+            // frame here.
+            // SAFETY: same.
+            unsafe {
+                let bp: u64 = vf2_state::LIN_BASE
+                    + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[self.idx]) as u32) as u64;
+                let d = &mut VF2_RX_RING.descs[self.idx];
+                d[0] = bp as u32;
+                d[1] = (bp >> 32) as u32;
+                d[2] = 0;
+                d[3] = 0xC100_0000; // OWN | IOC | BUF1V
+            }
+            result
+        }
+    }
+
+    pub struct Vf2NicTxToken {
+        idx: usize,
+    }
+
+    impl TxToken for Vf2NicTxToken {
+        fn consume<R, F>(self, len: usize, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            let i = self.idx;
+
+            // SAFETY: TX_BUFS[i] is exclusively ours until we
+            // publish via the descriptor write below.
+            let result = unsafe {
+                let buf = &mut VF2_TX_BUFS.bufs[i][..len];
+                f(buf)
+            };
+
+            // Publish: descriptor + bump tail.
+            // SAFETY: same scoping invariants.
+            unsafe {
+                let bp: u64 = vf2_state::LIN_BASE
+                    + (core::ptr::addr_of!(VF2_TX_BUFS.bufs[i]) as u32) as u64;
+                let d = &mut VF2_TX_RING.descs[i];
+                d[0] = bp as u32;
+                d[1] = (bp >> 32) as u32;
+                d[2] = len as u32; // TDES2 buffer-1 length
+                d[3] = TDES3_OWN | TDES3_LD | TDES3_FD | (len as u32 & 0x7FFF);
+
+                // Round-robin advance.
+                let next = (i + 1) % 16;
+                vf2_state::TX_NEXT = next;
+
+                // Tail = address of next descriptor (DWMAC processes
+                // descriptors while CURR < TAIL). Store fence first
+                // so DMA sees our descriptor write before the kick.
+                core::sync::atomic::compiler_fence(
+                    core::sync::atomic::Ordering::SeqCst,
+                );
+                let tail_pa: u32 = (vf2_state::LIN_BASE
+                    + (core::ptr::addr_of!(VF2_TX_RING.descs[next]) as u32) as u64)
+                    as u32;
+                let _ = wari_net_mmio_write32(GMAC_BASE + DMA_CH0_TX_TAIL, tail_pa);
+            }
+            result
         }
     }
 }
@@ -2333,6 +2563,48 @@ pub fn driver_start() {
         }
         let f0_2 = unsafe { (VF2_RX_BUFS.bufs[0].as_ptr() as *const u32).read_unaligned() };
         let _ = unsafe { wari_drv_log_u32(0x4275_4632, f0_2) }; // 'BuF2'
+
+        // PR Phase-1c-7 — wire smoltcp on top of the GMAC bring-up.
+        //
+        // Steps:
+        //   1. stash lin_base for the smoltcp Device impl
+        //   2. derive MAC from MAC_ADDR0 readback (which we already
+        //      programmed in 1c-6i to 6c:cf:39:00:40:84)
+        //   3. nic_iface::init(mac) — builds smoltcp Interface +
+        //      empty SocketSet
+        //   4. wari_nic_set_mac(...) — kernel-side: sets
+        //      Net.initialized = true so run_tier2_net runs
+        //      tier2_net::install, after which the kernel idle
+        //      loop calls driver_poll(tick) every iteration =
+        //      continuous RX drain.
+
+        unsafe {
+            vf2_state::LIN_BASE = lin_base;
+        }
+
+        // MAC bytes from EEPROM (programmed earlier into MAC_ADDR0):
+        // 6c:cf:39:00:40:84 → low = 0x0039CF6C, high = 0x80008440
+        // (high has AE bit; pull the bytes from the constant we
+        // already have).
+        let mac: [u8; 6] = [0x6c, 0xCF, 0x39, 0x00, 0x40, 0x84];
+
+        // Kick smoltcp Interface up. nic_iface owns the static
+        // INTERFACE / SOCKETS slots; init populates them.
+        if nic_iface::init(mac).is_err() {
+            // Init failure leaves Net.initialized = false; the
+            // kernel logs '[net] virtio init failed' as before.
+            return;
+        }
+
+        // Tell the kernel we're ready. mac_low = bytes 3..0,
+        // mac_high = bytes 5..4 (matches qemu path).
+        let mac_low = (mac[0] as u32)
+            | ((mac[1] as u32) << 8)
+            | ((mac[2] as u32) << 16)
+            | ((mac[3] as u32) << 24);
+        let mac_high = (mac[4] as u32) | ((mac[5] as u32) << 8);
+        // SAFETY: extern host fn. Kernel cap-checks Net+WRITE.
+        let _ = unsafe { wari_nic_set_mac(mac_low, mac_high) };
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
