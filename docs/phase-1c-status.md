@@ -76,6 +76,29 @@ wire-up) doesn't re-derive the boot sequence.
 +0x1160 <- 0x0000FFFF                           # DMA_CH0_STATUS: W1C clear stale flags
 ```
 
+## RX intermittency — diagnosed (May 2026)
+
+A second-opinion analysis ranks the hypotheses for why RX worked
+on one boot and not on subsequent ones:
+
+| Hypothesis | Likelihood | Why |
+|---|---|---|
+| **(a) Network genuinely quiet during busy-wait window** | **~80%** | 50M-iter spin = ~few hundred ms wall-clock. LAN broadcast cadence (mDNS ~1–2s, ARP ~30–60s, IPv6 RA ~200s) means a sub-second window catches a frame 30–50% of the time. The successful boot proves the entire datapath (PHY → MAC → MTL → DMA write-back) works end-to-end at least once; bimodal "perfect or nothing" pattern matches (a) exactly. |
+| (c) `lin_mem_base()` PA/VA confusion | ~10% | Hard to reconcile with the successful boot's correct ring + buffer addresses. Sanity check: log `lin_mem_base()` once and verify it's in DDR (`0x40000000..=0x13FFFFFFF`), 8-byte aligned. |
+| (d) Missing `fence ow,ow` before RX_TAIL store | ~5% | JH7110 GMAC is IO-coherent for DDR, but U74 store buffer still needs a fence so DMA fetches the descriptor with the OWN bit we just wrote. Cheap insurance to add. |
+| (f) RPF / FIFO interaction | ~3% | RPF only forces *descriptor* polling, doesn't gate FIFO. Read MTL_RXQ0_DEBUG (+0xD38) on a stuck boot to confirm FIFO isn't backed up. |
+| (b) MAC_RX_FLOW_CTRL / RFD threshold | ~1% | Defaults off; we never enabled it. |
+| (e) YT8531C RGMII delay miscalibration | <1% | Would produce consistent CRC-fail or link flap, not bimodal "perfect or silent." 1Gbps full-duplex link wouldn't latch cleanly at all if delays were wrong. (For completeness: YT8531C RX-delay lives in extended reg `0x10` page `0xa001`, bits 13:10.) |
+
+**Decision: stop debugging intermittency, ship Phase-1c-7.** With
+smoltcp's `Interface::poll` running every kernel idle iteration,
+RX gets drained as packets arrive instead of relying on a
+one-shot busy-wait. Hit-rate goes from "30-50% per boot" to
+"100%, draining continuously."
+
+Add the `fence ow,ow` insurance write at the same time — costs
+nothing.
+
 ## Phase-1c-7 execution plan (substantive)
 
 One PR, one boot to validate. Files touched:
