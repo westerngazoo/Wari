@@ -2177,6 +2177,70 @@ pub fn driver_start() {
             (VF2_RX_BUFS.bufs[0].as_ptr() as *const u32).read_unaligned()
         };
         let _ = unsafe { wari_drv_log_u32(0x5774_3204, w2) };
+
+        // PR Phase-1c-6j — configure MTL RX queue 0.
+        //
+        // DWMAC4 has two layers between the GMAC IP and the
+        // wire: MTL (Media Transmission Layer, internal FIFO
+        // scheduling) and the DMA engine. We configured DMA
+        // already; MTL RXQ0 still defaults to disabled, which
+        // is why frames are silently dropped before they reach
+        // the descriptor.
+        //
+        // MTL_RXQ0_OPERATION_MODE @ 0xD30:
+        //   bit  5     RSF        Receive Store-and-Forward
+        //   bits 19:8  RQS        Receive Queue Size = (FIFO/256)-1
+        //                         JH7110 RX FIFO = 2 KiB → RQS = 7
+        //
+        // Write 0x00000720 = (7 << 8) | (1 << 5).
+        //
+        // Also re-write MTL_TXQ0_OPERATION_MODE @ 0xD00 to be
+        // explicit even though TX worked with defaults:
+        //   bit  1     TSF        Transmit Store-and-Forward
+        //   bits  3:2  TXQEN      Transmit Queue Enable
+        //                         (10 = enable as default queue)
+        //   bits 24:16 TQS        Transmit Queue Size — 32 KiB / 256
+        //                         - 1 = 0x7F
+        const MTL_TXQ0_OP_MODE: u32 = 0xD00;
+        const MTL_RXQ0_OP_MODE: u32 = 0xD30;
+        // TX: TSF | TXQEN=10b (enabled) | TQS=0x7F
+        let tx_q_op = (1u32 << 1) | (0b10 << 2) | (0x7F << 16);
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + MTL_TXQ0_OP_MODE, tx_q_op) };
+        // RX: RSF | RQS=7
+        let rx_q_op = (1u32 << 5) | (7 << 8);
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + MTL_RXQ0_OP_MODE, rx_q_op) };
+
+        // Verify-read.
+        let txq_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + MTL_TXQ0_OP_MODE) };
+        let rxq_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + MTL_RXQ0_OP_MODE) };
+        let _ = unsafe { wari_drv_log_u32(0x4D54_4C54, txq_rb) }; // 'MTLT'
+        let _ = unsafe { wari_drv_log_u32(0x4D54_4C52, rxq_rb) }; // 'MTLR'
+
+        // Long wait, re-check.
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1160, 0x0000_FFFF) };
+        let mut spin3 = 0u32;
+        while spin3 < 30_000_000 {
+            spin3 += 1;
+        }
+
+        let st3 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1160) };
+        let _ = unsafe { wari_drv_log_u32(0x5774_3301, st3) }; // Wt3\1
+
+        // Walk all 16 RX descs looking for OWN cleared.
+        for i in 0..16u32 {
+            let r = unsafe { VF2_RX_RING.descs[i as usize][3] };
+            // Only log if changed (not still 0xC1000000).
+            if r != 0xC100_0000 {
+                let tag = 0x5230_0000 | (i & 0xFF);
+                let _ = unsafe { wari_drv_log_u32(tag, r) };
+            }
+        }
+
+        // Final: dump first 4 bytes of buf 0 + buf 1.
+        let f0 = unsafe { (VF2_RX_BUFS.bufs[0].as_ptr() as *const u32).read_unaligned() };
+        let f1 = unsafe { (VF2_RX_BUFS.bufs[1].as_ptr() as *const u32).read_unaligned() };
+        let _ = unsafe { wari_drv_log_u32(0x4275_4630, f0) }; // 'BuF0'
+        let _ = unsafe { wari_drv_log_u32(0x4275_4631, f1) }; // 'BuF1'
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
