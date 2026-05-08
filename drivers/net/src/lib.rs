@@ -2241,6 +2241,68 @@ pub fn driver_start() {
         let f1 = unsafe { (VF2_RX_BUFS.bufs[1].as_ptr() as *const u32).read_unaligned() };
         let _ = unsafe { wari_drv_log_u32(0x4275_4630, f0) }; // 'BuF0'
         let _ = unsafe { wari_drv_log_u32(0x4275_4631, f1) }; // 'BuF1'
+
+        // PR Phase-1c-6k — DMA RX IRQ enable + RPF + send a 2nd ARP
+        // to generate traffic, then re-check.
+        //
+        // DMA_CH0_INTERRUPT_ENABLE @ 0x1134:
+        //   bit 0  = TIE  Transmit Interrupt Enable
+        //   bit 6  = RIE  Receive Interrupt Enable
+        //   bit 14 = AIE  Abnormal Interrupt Enable
+        //   bit 15 = NIE  Normal Interrupt Enable
+        // Without this set, status bits like RI may not assert
+        // even when the engine IS receiving frames.
+        let ie = (1u32 << 0) | (1 << 6) | (1 << 14) | (1 << 15);
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1134, ie) };
+
+        // Re-write DMA_CH0_RX_CONTROL with RPF (bit 31) set —
+        // forces the RX descriptor processor to poll continuously
+        // rather than wait for a tail-pointer update. Belt-and-
+        // braces in case our tail-pointer write didn't kick the
+        // engine out of idle.
+        let rx_ctrl_rpf = 0x8000_0000u32 | 0x0001_0000 | (1536u32 << 1) | 0x1;
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1108, rx_ctrl_rpf) };
+
+        // Re-fire a TX broadcast ARP so any switch/AP/router on
+        // the LAN responds and we get RX traffic in our wait
+        // window. Reuse VF2_FIRST_PKT — descriptor 1.
+        let pkt_pa_2: u64 = lin_base + (core::ptr::addr_of!(VF2_FIRST_PKT) as u32) as u64;
+        unsafe {
+            let d = &mut VF2_TX_RING.descs[1];
+            d[0] = pkt_pa_2 as u32;
+            d[1] = (pkt_pa_2 >> 32) as u32;
+            d[2] = 64;
+            d[3] = 0xB000_0040; // OWN | LD | FD | length 64
+        }
+        // Update TX tail pointer to descriptor[2].
+        let new_tx_tail: u32 = (lin_base + tx_ring_off as u64 + 32) as u32;
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1120, new_tx_tail) };
+
+        // Verify-reads.
+        let ie_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1134) };
+        let rxc_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1108) };
+        let _ = unsafe { wari_drv_log_u32(0x4945_4E54, ie_rb) }; // 'IENT'
+        let _ = unsafe { wari_drv_log_u32(0x5258_4332, rxc_rb) }; // 'RXC2'
+
+        // Long wait, last check.
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1160, 0x0000_FFFF) };
+        let mut spin4 = 0u32;
+        while spin4 < 50_000_000 {
+            spin4 += 1;
+        }
+
+        let st4 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1160) };
+        let _ = unsafe { wari_drv_log_u32(0x5374_3401, st4) }; // 'St4\1'
+
+        for i in 0..16u32 {
+            let r = unsafe { VF2_RX_RING.descs[i as usize][3] };
+            if r != 0xC100_0000 {
+                let tag = 0x5234_0000 | (i & 0xFF);
+                let _ = unsafe { wari_drv_log_u32(tag, r) };
+            }
+        }
+        let f0_2 = unsafe { (VF2_RX_BUFS.bufs[0].as_ptr() as *const u32).read_unaligned() };
+        let _ = unsafe { wari_drv_log_u32(0x4275_4632, f0_2) }; // 'BuF2'
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
