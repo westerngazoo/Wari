@@ -1796,6 +1796,11 @@ pub fn driver_start() {
 
         // AON datapath: tx GMUX with mux=0 (parent gmac0_gtxclk)
         let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x14, ENABLE_BIT) };
+        // AON: gmac0_rx MUX (id 7) — bit 31 enable + mux=0 (rgmii_rxin)
+        // CRITICAL: missed in earlier builds. Without this the RX
+        // datapath has no clock; frames deserialize but never reach
+        // MTL.
+        let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x1C, ENABLE_BIT) };
         // AON: rx_inv bit 30 set for RGMII
         let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x20, 0x4000_0000) };
 
@@ -1809,7 +1814,9 @@ pub fn driver_start() {
         let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1BC, ENABLE_BIT) };
 
         // Verify-read each. Tags 'AOn' / 'SyS' + low byte.
-        for off in [0x14u32, 0x20] {
+        // Dump full GMAC0 cluster: 0x08 ahb, 0x0C axi, 0x10 rmii_rtx,
+        // 0x14 tx, 0x18 tx_inv, 0x1C rx, 0x20 rx_inv.
+        for off in [0x08u32, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20] {
             let v = unsafe { wari_net_mmio_read32(AONCRG_BASE_2 + off) };
             let tag = 0x414F_6E00 | (off & 0xFF); // 'AOn\0' + low
             let _ = unsafe { wari_drv_log_u32(tag, v) };
