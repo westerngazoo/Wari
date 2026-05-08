@@ -132,6 +132,10 @@ pub const fn is_net_mmio_addr(addr: usize) -> bool {
         if addr >= 0x1700_0000 && addr < 0x1701_0000 {
             return true;
         }
+        // AON SYSCON — phy-interface-select for GMAC0 (Phase-1c-6L).
+        if addr >= 0x1701_0000 && addr < 0x1701_1000 {
+            return true;
+        }
     }
     false
 }

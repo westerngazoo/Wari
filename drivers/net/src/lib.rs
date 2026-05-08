@@ -1773,6 +1773,29 @@ pub fn driver_start() {
             }
         }
 
+        // PR Phase-1c-6L — JH7110 AON SYSCON GMAC0 phy-mode select.
+        //
+        // BEFORE enabling gmac0_rx (AONCRG +0x1C), we have to
+        // route the PHY's RXC clock pin into the AON CRG. That
+        // routing is gated by the AON SYSCON at 0x17010000 +
+        // offset 0x0C, bits 20:18 = phy_intf_sel:
+        //   0x1 = RGMII   (VF2 default)
+        //   0x4 = RMII
+        //
+        // Without this, the gmac0_rx gate silently rejects the
+        // enable bit because its parent isn't toggling. Read-
+        // modify-write to set bit 18 and clear bits 20:19.
+        const AON_SYSCON_BASE: u32 = 0x1701_0000;
+        const PHY_INTF_OFFSET: u32 = 0x0C;
+        let pi_pre = unsafe { wari_net_mmio_read32(AON_SYSCON_BASE + PHY_INTF_OFFSET) };
+        let _ = unsafe { wari_drv_log_u32(0x5049_5F50, pi_pre) }; // 'PI_P' pre
+        let pi_new = (pi_pre & !(0x7 << 18)) | (0x1 << 18);
+        let _ = unsafe {
+            wari_net_mmio_write32(AON_SYSCON_BASE + PHY_INTF_OFFSET, pi_new)
+        };
+        let pi_post = unsafe { wari_net_mmio_read32(AON_SYSCON_BASE + PHY_INTF_OFFSET) };
+        let _ = unsafe { wari_drv_log_u32(0x5049_5F4E, pi_post) }; // 'PI_N' new
+
         // PR Phase-1c-6d — enable the rest of GMAC0's datapath
         // clocks. Build 86 trace showed AHB/AXI + upstream are
         // on but DMA SWR still won't clear; the engine can't

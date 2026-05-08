@@ -85,6 +85,17 @@ const AONCRG_MMIO_BASE: usize = 0x1700_0000;
 #[cfg(feature = "vf2")]
 const AONCRG_MMIO_LEN:  usize = 0x1_0000;
 
+/// JH7110 always-on syscon. 4 KiB at 0x17010000 — separate from
+/// AON CRG. Holds the GMAC0 phy-interface-mode select field
+/// (offset 0x0C, bits 20:18), which routes the RGMII RX clock
+/// from the PHY pad into the AON CRG. Without this set, the
+/// gmac0_rx gate at AONCRG+0x1C silently rejects the enable
+/// bit because its parent (gmac0_rgmii_rxin) is not toggling.
+#[cfg(feature = "vf2")]
+const AON_SYSCON_MMIO_BASE: usize = 0x1701_0000;
+#[cfg(feature = "vf2")]
+const AON_SYSCON_MMIO_LEN:  usize = 0x1000;
+
 // ── Linker symbol accessors ─────────────────────────────────────
 
 extern "C" {
@@ -211,6 +222,7 @@ pub fn init() -> Result<(), KernelError> {
         map_range(root, STGCRG_MMIO_BASE, STGCRG_MMIO_BASE + STGCRG_MMIO_LEN, KERNEL_RW)?;
         map_range(root, SYSCRG_MMIO_BASE, SYSCRG_MMIO_BASE + SYSCRG_MMIO_LEN, KERNEL_RW)?;
         map_range(root, AONCRG_MMIO_BASE, AONCRG_MMIO_BASE + AONCRG_MMIO_LEN, KERNEL_RW)?;
+        map_range(root, AON_SYSCON_MMIO_BASE, AON_SYSCON_MMIO_BASE + AON_SYSCON_MMIO_LEN, KERNEL_RW)?;
     }
 
     kprintln!("  [kvm] root pt at {:#x}", root);
