@@ -756,7 +756,10 @@ mod nic_iface {
     /// Phase-1b QEMU demo IP (per net design doc §10 Q1). QEMU
     /// slirp's default subnet is 192.168.122.0/24 with gateway
     /// 192.168.122.1; we take 192.168.122.10.
-    const IP_OCTETS: [u8; 4] = [192, 168, 122, 10];
+    // Phase-1c-7 / build 100: matches the operator's home Wi-Fi
+    // subnet (192.168.100.0/24) so a laptop already on that LAN
+    // can ping/Test-NetConnection without subnet aliasing.
+    const IP_OCTETS: [u8; 4] = [192, 168, 100, 10];
     const IP_PREFIX_LEN: u8 = 24;
 
     /// SocketSet backing storage. Phase-1b reserves 4 socket slots
