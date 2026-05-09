@@ -2706,10 +2706,9 @@ wari_driver_iface::wari_net_driver!(Driver);
 // Phase-1b scope: TCP only (UDP returns E_INVAL until Net-6c).
 // vf2 build returns E_INVAL for both protos (Phase-1c GMAC).
 
-/// `socket_create` body — qemu path. Allocates a TCP smoltcp
-/// socket via the smoltcp::Interface, returns a packed handle
-/// (smoltcp::iface::SocketHandle as u32).
-#[cfg(feature = "qemu")]
+/// `socket_create` — platform-neutral as of Phase-1c-7. Allocates
+/// a TCP smoltcp socket via `nic_iface::socket_create_tcp`, returns
+/// a packed handle (smoltcp::iface::SocketHandle as u32).
 pub fn driver_socket_create(proto: u32) -> i32 {
     use wari_driver_iface::SocketProto;
     let Some(p) = SocketProto::from_raw(proto) else {
@@ -2721,46 +2720,15 @@ pub fn driver_socket_create(proto: u32) -> i32 {
     }
 }
 
-#[cfg(feature = "qemu")]
 pub fn driver_socket_close(handle: u32) -> i32 {
     nic_iface::socket_close(handle)
 }
 
-/// `socket_bind` body — qemu path. Stores the requested port
-/// inside the driver's per-handle state; the smoltcp `listen`
-/// call happens in `socket_listen`.
-#[cfg(feature = "qemu")]
 pub fn driver_socket_bind(handle: u32, ip_be: u32, port: u32) -> i32 {
     nic_iface::socket_bind(handle, ip_be, port)
 }
 
-/// `socket_listen` body — qemu path. Hands the bound port to
-/// smoltcp's `tcp::Socket::listen`.
-#[cfg(feature = "qemu")]
 pub fn driver_socket_listen(handle: u32, backlog: u32) -> i32 {
     let _ = backlog; // smoltcp single-pending only — backlog ignored
     nic_iface::socket_listen(handle)
-}
-
-/// vf2 stub — net is the JH7110 GMAC Phase-1c TODO. Refuses
-/// every socket operation cleanly so a Tier-1 calling them on
-/// VF2 silicon gets a deterministic E_INVAL instead of a hang.
-#[cfg(feature = "vf2")]
-pub fn driver_socket_create(_proto: u32) -> i32 {
-    -2 // E_INVAL
-}
-
-#[cfg(feature = "vf2")]
-pub fn driver_socket_close(_handle: u32) -> i32 {
-    -2 // E_INVAL
-}
-
-#[cfg(feature = "vf2")]
-pub fn driver_socket_bind(_handle: u32, _ip_be: u32, _port: u32) -> i32 {
-    -2
-}
-
-#[cfg(feature = "vf2")]
-pub fn driver_socket_listen(_handle: u32, _backlog: u32) -> i32 {
-    -2
 }
