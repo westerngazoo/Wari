@@ -149,7 +149,7 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
         // + one-time install pattern. `kmain` orders this call
         // before entering the idle loop that calls `tier2_net::poll`.
         unsafe { tier2_net::install(handle) };
-        kprintln!("[net] smoltcp interface up, listening on 192.168.122.10/24");
+        kprintln!("[net] smoltcp interface up, listening on 192.168.100.10/24");
 
         // PR Net-6a-2 — boot-time self-test of the socket driver
         // path. Net-6c extends to also exercise bind+listen on the
