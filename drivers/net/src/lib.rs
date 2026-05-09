@@ -1334,6 +1334,20 @@ pub mod vf2_phy {
             d[3] = 0xC100_0000; // OWN | IOC | BUF1V
             // Flush U74 store buffer so DMA fetches with OWN=1 set.
             core::arch::asm!("fence ow,ow", options(nostack, preserves_flags));
+            // Re-kick the RX_TAIL doorbell so DWMAC4 walks the
+            // descriptor we just rearmed. Without this, after the
+            // engine consumes all 16 boot-armed slots it sits at
+            // CURRENT == TAIL and stalls — RPF is supposed to
+            // mitigate but JH7110 may silently not honor bit 31
+            // of DMA_CH0_RX_CONTROL. Pointing tail at end-of-ring
+            // tells the engine "all 16 slots are ready"; the per-
+            // descriptor OWN bit decides which actually are.
+            let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
+            let rx_tail_pa: u32 =
+                (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
+            let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
+            // tag = 'rXTl' — RX tail doorbell write.
+            let _ = super::wari_drv_log_u32(0x7258_546C, rx_tail_pa);
             // tag = 'rXCn' + idx — diagnostic counter for re-arms.
             let tag = 0x7258_434E | ((idx as u32) & 0x0F);
             let _ = super::wari_drv_log_u32(tag, idx as u32);
