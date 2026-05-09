@@ -1367,7 +1367,7 @@ pub mod vf2_phy {
             // SAFETY: extern host fn.
             unsafe {
                 let tag = 0x7458_5478 | ((i as u32) & 0x0F);
-                let _ = wari_drv_log_u32(tag, len as u32);
+                let _ = super::wari_drv_log_u32(tag, len as u32);
             }
 
             // Publish: descriptor + bump tail.
