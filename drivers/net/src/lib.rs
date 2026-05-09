@@ -756,11 +756,11 @@ mod nic_iface {
     /// Phase-1b QEMU demo IP (per net design doc §10 Q1). QEMU
     /// slirp's default subnet is 192.168.122.0/24 with gateway
     /// 192.168.122.1; we take 192.168.122.10.
-    // Phase-1c-7 / build 105: dedicated test subnet (10.42.0.0/24)
-    // for direct-cable Windows-laptop ↔ VF2-eth0 testing. Avoids
-    // collision with the operator's Wi-Fi subnet (192.168.100.0/24)
-    // so Wi-Fi can stay up and `wari upgrade` keeps working over eth1.
-    const IP_OCTETS: [u8; 4] = [10, 42, 0, 10];
+    // Phase-1c-7 / build 106: back to operator's home Wi-Fi subnet
+    // (192.168.100.0/24). Direct-cable test (build 105 / 10.42.0.10)
+    // didn't work — USB-Ethernet adapter wasn't delivering frames.
+    // Router-based path proven to deliver frames to RX ring.
+    const IP_OCTETS: [u8; 4] = [192, 168, 100, 10];
     const IP_PREFIX_LEN: u8 = 24;
 
     /// SocketSet backing storage. Phase-1b reserves 4 socket slots
