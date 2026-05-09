@@ -1314,33 +1314,60 @@ pub mod vf2_phy {
         len: u16,
     }
 
+    /// Re-arm a single RX descriptor so DMA can write the next frame
+    /// into its buffer. Idempotent — safe to call from both
+    /// `consume` (the smoltcp-processed path) and `Drop` (the
+    /// dropped-without-consume path). The `fence ow,ow` after the
+    /// store ensures the U74 store buffer has flushed before the
+    /// next poll re-reads RDES3 — JH7110 GMAC is IO-coherent for
+    /// DDR, but a CPU-local store buffer can hide the update.
+    /// Also logs `rXCn`+idx so future traces can distinguish the
+    /// consumed-vs-leaked descriptor cases.
+    fn vf2_rx_rearm(idx: usize) {
+        unsafe {
+            let bp: u64 = vf2_state::LIN_BASE
+                + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
+            let d = &mut VF2_RX_RING.descs[idx];
+            d[0] = bp as u32;
+            d[1] = (bp >> 32) as u32;
+            d[2] = 0;
+            d[3] = 0xC100_0000; // OWN | IOC | BUF1V
+            // Flush U74 store buffer so DMA fetches with OWN=1 set.
+            core::arch::asm!("fence ow,ow", options(nostack, preserves_flags));
+            // tag = 'rXCn' + idx — diagnostic counter for re-arms.
+            let tag = 0x7258_434E | ((idx as u32) & 0x0F);
+            let _ = super::wari_drv_log_u32(tag, idx as u32);
+        }
+    }
+
     impl RxToken for Vf2NicRxToken {
-        fn consume<R, F>(self, f: F) -> R
+        fn consume<R, F>(mut self, f: F) -> R
         where
             F: FnOnce(&mut [u8]) -> R,
         {
             // SAFETY: single-threaded driver; this slot's buffer is
-            // exclusively ours until we re-arm the descriptor at the
-            // bottom of this function.
+            // exclusively ours until we re-arm the descriptor below.
             let result = unsafe {
                 let buf = &mut VF2_RX_BUFS.bufs[self.idx][..self.len as usize];
                 f(buf)
             };
-
-            // Re-arm: re-point the descriptor at the same buffer
-            // and set OWN | IOC | BUF1V so DMA can write the next
-            // frame here.
-            // SAFETY: same.
-            unsafe {
-                let bp: u64 = vf2_state::LIN_BASE
-                    + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[self.idx]) as u32) as u64;
-                let d = &mut VF2_RX_RING.descs[self.idx];
-                d[0] = bp as u32;
-                d[1] = (bp >> 32) as u32;
-                d[2] = 0;
-                d[3] = 0xC100_0000; // OWN | IOC | BUF1V
-            }
+            vf2_rx_rearm(self.idx);
+            // Mark as already-recycled so Drop is a no-op.
+            self.idx = usize::MAX;
             result
+        }
+    }
+
+    /// If smoltcp drops the RxToken without calling `consume` (it
+    /// can do this when no socket is interested in the frame, or
+    /// on certain error paths), the descriptor would leak with
+    /// OWN=0 forever, eventually freezing the RX ring after the
+    /// 16th leak. Drop guarantees re-arm in those cases too.
+    impl Drop for Vf2NicRxToken {
+        fn drop(&mut self) {
+            if self.idx != usize::MAX {
+                vf2_rx_rearm(self.idx);
+            }
         }
     }
 
