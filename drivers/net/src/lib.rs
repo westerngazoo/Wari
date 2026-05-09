@@ -1264,8 +1264,6 @@ pub mod vf2_phy {
         ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
             // Round-robin walk over the 16 RX descriptors looking
             // for one whose OWN bit was cleared by the DMA engine.
-            // Start from RX_NEXT so consecutive frames pick up
-            // descriptors in order.
             // SAFETY: single-threaded driver; static muts are the
             // only data path. Module-static read of OWN bit is
             // atomic at the 32-bit-aligned word level on RISC-V.
@@ -1279,6 +1277,13 @@ pub mod vf2_phy {
                         // RDES3 bits 14:0.
                         let len = (rdes3 & 0x7FFF) as u16;
                         vf2_state::RX_NEXT = (i + 1) % 16;
+                        // PR Phase-1c-7b — diagnostic: log every
+                        // RX hand-off so we can see whether the
+                        // kernel idle loop's poll → smoltcp →
+                        // Device::receive chain is actually
+                        // delivering frames. tag = 'rXFr' + idx.
+                        let tag = 0x7258_4672 | ((i as u32) & 0x0F);
+                        let _ = super::wari_drv_log_u32(tag, rdes3);
                         return Some((
                             Vf2NicRxToken { idx: i, len },
                             Vf2NicTxToken { idx: vf2_state::TX_NEXT },
@@ -1355,6 +1360,15 @@ pub mod vf2_phy {
                 let buf = &mut VF2_TX_BUFS.bufs[i][..len];
                 f(buf)
             };
+
+            // PR Phase-1c-7b — diagnostic: log every TX from
+            // smoltcp so we can see whether ARP/ICMP replies are
+            // making it down into the device. tag = 'tXTx' + idx.
+            // SAFETY: extern host fn.
+            unsafe {
+                let tag = 0x7458_5478 | ((i as u32) & 0x0F);
+                let _ = wari_drv_log_u32(tag, len as u32);
+            }
 
             // Publish: descriptor + bump tail.
             // SAFETY: same scoping invariants.

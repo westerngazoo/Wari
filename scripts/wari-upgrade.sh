@@ -209,13 +209,14 @@ wari() {
                 echo "WARNING: embedded ($flashed_build_after) != .build_number ($BUILD_NUM)"
                 echo "         Push side may have a stale cargo cache."
             fi
-            if [ -z "$skip_confirm" ]; then
-                read -r -p "Proceed? [y/N] " ans
-                case "$ans" in
-                    y|Y|yes|YES) ;;
-                    *) echo "Aborted. Kernel staged but not rebooted."; return 0 ;;
-                esac
-            fi
+            # The 5-second countdown IS the abort window — press
+            # Ctrl-C to bail out before reboot. Removed the
+            # 'Proceed? [y/N]' read prompt because it interacted
+            # badly with the auto-re-source path (the recursive
+            # `wari "$@"` call was swallowing the read's stdin
+            # and answering N silently, OR worse, defaulting to
+            # Y when the buffer had stale input).
+            local _unused="$skip_confirm" # keep -y arg compat
             _wari_countdown_and_reboot 5
             ;;
         reboot|rb)
