@@ -1359,6 +1359,11 @@ pub mod vf2_phy {
         where
             F: FnOnce(&mut [u8]) -> R,
         {
+            // Build-109 bracket: 'rXCe' (consume entry) — fires
+            // before the closure runs, so we can tell consume from
+            // Drop and prove smoltcp is actually processing the
+            // frame rather than silently leaking the token.
+            let _ = unsafe { super::wari_drv_log_u32(0x7258_4365, self.idx as u32) };
             // SAFETY: single-threaded driver; this slot's buffer is
             // exclusively ours until we re-arm the descriptor below.
             let result = unsafe {
@@ -1379,6 +1384,12 @@ pub mod vf2_phy {
     /// 16th leak. Drop guarantees re-arm in those cases too.
     impl Drop for Vf2NicRxToken {
         fn drop(&mut self) {
+            // Build-109 bracket: 'rXDr' (drop entry) — fires
+            // every time Rust drops the token, including the
+            // already-consumed case where idx == usize::MAX.
+            // val carries idx so we can see which slot was
+            // dropped without consume vs. which was consumed.
+            let _ = unsafe { super::wari_drv_log_u32(0x7258_4472, self.idx as u32) };
             if self.idx != usize::MAX {
                 vf2_rx_rearm(self.idx);
             }
