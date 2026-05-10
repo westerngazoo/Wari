@@ -1275,14 +1275,13 @@ pub mod vf2_phy {
             // yielded to smoltcp last time. By the time receive()
             // is called again the kernel idle loop has cycled
             // through one full smoltcp poll, so consume() has
-            // returned and the buffer is no longer in use. This
-            // happens entirely inside receive() (which we know
-            // runs — `rXFr` fires from here), bypassing any
-            // doubt about whether RxToken's consume / Drop are
-            // actually invoked by wasmi.
+            // returned and the buffer is no longer in use.
             unsafe {
                 if vf2_state::PREV_YIELDED != usize::MAX {
                     let prev = vf2_state::PREV_YIELDED;
+                    // tag = 'dPyR' (prev-yielded rearm path).
+                    // val = the slot index about to be rearmed.
+                    let _ = super::wari_drv_log_u32(0x6450_7952, prev as u32);
                     vf2_state::PREV_YIELDED = usize::MAX;
                     vf2_rx_rearm(prev);
                 }
@@ -1352,23 +1351,26 @@ pub mod vf2_phy {
     /// consumed-vs-leaked descriptor cases.
     fn vf2_rx_rearm(idx: usize) {
         unsafe {
+            // Build-111 saturation logs. Each one fires on a
+            // distinct line so we can see EXACTLY where we stop
+            // executing if anything goes wrong.
+            // tag = 'rRaE' (rearm enter). val = idx.
+            let _ = super::wari_drv_log_u32(0x7252_6145, idx as u32);
             let bp: u64 = vf2_state::LIN_BASE
                 + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
+            // tag = 'rRaB' (rearm buf addr computed). val = bp lo.
+            let _ = super::wari_drv_log_u32(0x7252_6142, bp as u32);
             let d = &mut VF2_RX_RING.descs[idx];
             d[0] = bp as u32;
             d[1] = (bp >> 32) as u32;
             d[2] = 0;
             d[3] = 0xC100_0000; // OWN | IOC | BUF1V
+            // tag = 'rRaW' (rearm wrote desc). val = idx.
+            let _ = super::wari_drv_log_u32(0x7252_6157, idx as u32);
             // Flush U74 store buffer so DMA fetches with OWN=1 set.
             core::arch::asm!("fence ow,ow", options(nostack, preserves_flags));
             // Re-kick the RX_TAIL doorbell so DWMAC4 walks the
-            // descriptor we just rearmed. Without this, after the
-            // engine consumes all 16 boot-armed slots it sits at
-            // CURRENT == TAIL and stalls — RPF is supposed to
-            // mitigate but JH7110 may silently not honor bit 31
-            // of DMA_CH0_RX_CONTROL. Pointing tail at end-of-ring
-            // tells the engine "all 16 slots are ready"; the per-
-            // descriptor OWN bit decides which actually are.
+            // descriptor we just rearmed.
             let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
             let rx_tail_pa: u32 =
                 (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
@@ -1378,6 +1380,9 @@ pub mod vf2_phy {
             // tag = 'rXCn' + idx — diagnostic counter for re-arms.
             let tag = 0x7258_434E | ((idx as u32) & 0x0F);
             let _ = super::wari_drv_log_u32(tag, idx as u32);
+            // tag = 'rRaX' (rearm exit) — proves we made it past
+            // the MMIO write to the doorbell.
+            let _ = super::wari_drv_log_u32(0x7252_6158, idx as u32);
         }
     }
 
