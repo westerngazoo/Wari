@@ -376,6 +376,14 @@ pub mod vf2_state {
     pub static mut TX_NEXT: usize = 0;
     /// Round-robin RX descriptor index for the receive walk.
     pub static mut RX_NEXT: usize = 0;
+    /// Build-110 wasmi-tolerant fix: index of the RX slot we
+    /// yielded to smoltcp on the previous `receive()` call. By the
+    /// time `receive()` is called again, smoltcp has finished with
+    /// the slot (consume returned + token dropped), so it's safe
+    /// to re-arm. `usize::MAX` = no slot pending re-arm. This
+    /// bypasses the Drop-impl path entirely in case wasmi/the
+    /// Rust→wasm pipeline isn't synthesizing Drop calls correctly.
+    pub static mut PREV_YIELDED: usize = usize::MAX;
 }
 
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
@@ -1263,6 +1271,22 @@ pub mod vf2_phy {
             &mut self,
             _ts: Instant,
         ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+            // Build-110 wasmi-tolerant fix: re-arm the slot we
+            // yielded to smoltcp last time. By the time receive()
+            // is called again the kernel idle loop has cycled
+            // through one full smoltcp poll, so consume() has
+            // returned and the buffer is no longer in use. This
+            // happens entirely inside receive() (which we know
+            // runs — `rXFr` fires from here), bypassing any
+            // doubt about whether RxToken's consume / Drop are
+            // actually invoked by wasmi.
+            unsafe {
+                if vf2_state::PREV_YIELDED != usize::MAX {
+                    let prev = vf2_state::PREV_YIELDED;
+                    vf2_state::PREV_YIELDED = usize::MAX;
+                    vf2_rx_rearm(prev);
+                }
+            }
             // Round-robin walk over the 16 RX descriptors looking
             // for one whose OWN bit was cleared by the DMA engine.
             // SAFETY: single-threaded driver; static muts are the
@@ -1285,6 +1309,9 @@ pub mod vf2_phy {
                         // delivering frames. tag = 'rXFr' + idx.
                         let tag = 0x7258_4672 | ((i as u32) & 0x0F);
                         let _ = super::wari_drv_log_u32(tag, rdes3);
+                        // Stash the slot so the NEXT receive()
+                        // call re-arms it (see top of fn).
+                        vf2_state::PREV_YIELDED = i;
                         return Some((
                             Vf2NicRxToken { idx: i, len },
                             Vf2NicTxToken { idx: vf2_state::TX_NEXT },
