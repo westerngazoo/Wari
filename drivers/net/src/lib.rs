@@ -1384,8 +1384,12 @@ pub mod vf2_phy {
             d[3] = 0xC100_0000; // OWN | IOC | BUF1V
             // tag = 'rRaW' (rearm wrote desc). val = idx.
             let _ = super::wari_drv_log_u32(0x7252_6157, idx as u32);
-            // Flush U74 store buffer so DMA fetches with OWN=1 set.
-            core::arch::asm!("fence ow,ow", options(nostack, preserves_flags));
+            // NOTE: build 107 had a RISC-V `fence ow,ow` here — but
+            // this code compiles to WASM, where inline asm is
+            // unstable and there's no concept of CPU-level fences.
+            // The next host-fn call (wari_net_mmio_write32 below)
+            // crosses the wasm→native boundary and naturally
+            // serializes, which is what we actually needed.
             // Re-kick the RX_TAIL doorbell so DWMAC4 walks the
             // descriptor we just rearmed.
             let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
