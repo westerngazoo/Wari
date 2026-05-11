@@ -1275,19 +1275,18 @@ pub mod vf2_phy {
             &mut self,
             _ts: Instant,
         ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-            // Build-113 throttled probe: every 16,384 calls
-            // (1 << 14), log the value of PREV_YIELDED on entry.
-            // wasmi interpreter is slow — 2^20 was too high to fire
-            // in 20s. 2^14 ≈ once every 0.1-1s depending on cadence.
+            // Build-114: fire dPrb every receive() call. wasmi is
+            // so slow that even 2^14 calls didn't accumulate in 20s.
+            // Logging on every call is fine — it just adds one log
+            // per call, same cadence as rXFr (which fires when a
+            // frame is found). Without ping the count is near-zero.
             // tag = 'dPrb'. val = PREV_YIELDED.
             unsafe {
+                let _ = super::wari_drv_log_u32(
+                    0x6450_7262,
+                    vf2_state::PREV_YIELDED as u32,
+                );
                 vf2_state::RX_CALL_COUNT = vf2_state::RX_CALL_COUNT.wrapping_add(1);
-                if vf2_state::RX_CALL_COUNT & ((1u64 << 14) - 1) == 0 {
-                    let _ = super::wari_drv_log_u32(
-                        0x6450_7262,
-                        vf2_state::PREV_YIELDED as u32,
-                    );
-                }
             }
             // Build-110 wasmi-tolerant fix: re-arm the slot we
             // yielded to smoltcp last time. By the time receive()
