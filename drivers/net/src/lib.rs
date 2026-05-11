@@ -384,6 +384,10 @@ pub mod vf2_state {
     /// bypasses the Drop-impl path entirely in case wasmi/the
     /// Rust→wasm pipeline isn't synthesizing Drop calls correctly.
     pub static mut PREV_YIELDED: usize = usize::MAX;
+    /// Build-112 diagnostic: counter of receive() entries. Used to
+    /// throttle a high-frequency log line so we don't drown the
+    /// UART but still get visibility into the hot path.
+    pub static mut RX_CALL_COUNT: u64 = 0;
 }
 
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
@@ -1271,6 +1275,21 @@ pub mod vf2_phy {
             &mut self,
             _ts: Instant,
         ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+            // Build-112 throttled probe: every 1,048,576 calls
+            // (~1 << 20), log the value of PREV_YIELDED on entry.
+            // If PREV_YIELDED is genuinely persisting across
+            // returns, we'll see non-MAX values periodically;
+            // if it's always MAX, the static mut isn't sticking.
+            // tag = 'dPrb'. val = PREV_YIELDED.
+            unsafe {
+                vf2_state::RX_CALL_COUNT = vf2_state::RX_CALL_COUNT.wrapping_add(1);
+                if vf2_state::RX_CALL_COUNT & ((1u64 << 20) - 1) == 0 {
+                    let _ = super::wari_drv_log_u32(
+                        0x6450_7262,
+                        vf2_state::PREV_YIELDED as u32,
+                    );
+                }
+            }
             // Build-110 wasmi-tolerant fix: re-arm the slot we
             // yielded to smoltcp last time. By the time receive()
             // is called again the kernel idle loop has cycled
