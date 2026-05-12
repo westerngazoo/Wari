@@ -60,6 +60,42 @@ reasoning before executing. Gustavo may overrule; Claude complies.
 
 \---
 
+## Build pipeline — NEVER `cd kernel && cargo build` alone
+
+The kernel `include_bytes!`s pre-built, signed Tier-2 driver wasm
+blobs (`build/drivers/net-{qemu,vf2}.signed.wasm`). Those wasm blobs
+are produced from `drivers/net/src/` — a **separate cargo crate**
+targeting `wasm32-unknown-unknown`. If you bypass `make` and run
+`cd kernel && cargo build` directly after editing driver source,
+cargo will happily embed the **last-known-good** driver blob,
+which may be many builds stale.
+
+This bit us in builds 107..114: a RISC-V `core::arch::asm!("fence
+ow,ow")` I added to driver code broke the wasm32 build, and cargo
+silently reused the build-106 artifact while the kernel banner read
+"build 114". Every diagnostic added to the driver during that window
+was a no-op because the kernel wasn't running our updated code.
+
+**Always build via `make`:**
+
+```bash
+make kernel-vf2     # rebuilds drivers/net wasm32 → signs → links kernel
+make build          # same flow for the QEMU variant
+```
+
+**Never run `cd kernel && cargo build` after touching driver code.**
+The kernel's `build.rs` now contains a stale-driver guard that greps
+the embedded signed wasm for a `WARI-DRV-BUILD-TAG-N` rodata string
+and fails the build if `N != WARI_BUILD`. If that check ever fires,
+run `make` and don't try to "fix" it by editing `build.rs`.
+
+When adding new driver code, **double-check it compiles to wasm32**.
+No inline asm. No RISC-V intrinsics. No `core::arch::asm!`. MMIO goes
+through `wari_net_mmio_*` host fns; CPU-fence semantics come for free
+when crossing the wasm→native boundary.
+
+\---
+
 ## PR Workflow — The Review Loop
 
 **No work lands on `main` without a PR review.** Every unit of work

@@ -33,4 +33,85 @@ fn main() {
     // Diagnosed May 2026 after VF2 stayed at "build 19" across ~10
     // deploys despite local + origin showing later numbers.
     println!("cargo:rerun-if-env-changed=WARI_BUILD");
+
+    // ── Stale-driver guard ────────────────────────────────────────
+    //
+    // The kernel `include_bytes!`s a signed Tier-2 net-driver wasm
+    // (`build/drivers/net-{qemu,vf2}.signed.wasm`). If you bypass
+    // `make kernel-vf2` and run `cd kernel && cargo build` after
+    // editing driver source, cargo will happily embed the last-
+    // known-good driver blob — which may be many builds stale.
+    //
+    // Builds 107..114 hit exactly this trap: a RISC-V `fence ow,ow`
+    // I added to driver code broke the wasm32 build, and cargo
+    // silently reused the build-106 artifact while the kernel
+    // banner read "build 114". Every diagnostic we added to the
+    // driver during that window was a no-op because the kernel
+    // wasn't running our updated code.
+    //
+    // Guard: grep the embedded signed wasm for the build tag the
+    // driver's own build.rs embedded, compare to our WARI_BUILD,
+    // fail loud if mismatched.
+    check_driver_blob_freshness(&dir);
+}
+
+/// Greps the platform-appropriate signed driver wasm for its
+/// embedded `WARI-DRV-BUILD-TAG-N` rodata string and asserts that
+/// `N == WARI_BUILD`. On mismatch, emits a `cargo::error` that
+/// stops the build with a clear remediation.
+///
+/// No-ops when `WARI_BUILD` is unset (e.g. `cargo check` from
+/// rust-analyzer in the IDE) — we'd rather not gate IDE flows on
+/// having a fully-staged signed blob.
+fn check_driver_blob_freshness(kernel_dir: &str) {
+    let Ok(want) = std::env::var("WARI_BUILD") else {
+        return;
+    };
+    let blob = if std::env::var("CARGO_FEATURE_VF2").is_ok() {
+        format!("{}/../build/drivers/net-vf2.signed.wasm", kernel_dir)
+    } else {
+        format!("{}/../build/drivers/net-qemu.signed.wasm", kernel_dir)
+    };
+    let bytes = match std::fs::read(&blob) {
+        Ok(b) => b,
+        Err(e) => {
+            println!(
+                "cargo::error=stale-driver-guard: cannot read {} ({}). \
+                 Run `make kernel-vf2` (or `make build`) — never `cd kernel && cargo build` alone.",
+                blob, e
+            );
+            return;
+        }
+    };
+    // Embedded tag format: literal ASCII "WARI-DRV-BUILD-TAG-N".
+    let needle = b"WARI-DRV-BUILD-TAG-";
+    let pos = bytes
+        .windows(needle.len())
+        .position(|w| w == needle);
+    let Some(pos) = pos else {
+        println!(
+            "cargo::error=stale-driver-guard: {} contains no WARI-DRV-BUILD-TAG. \
+             Driver wasm pre-dates the build-tag harness — rebuild with `make kernel-vf2`.",
+            blob
+        );
+        return;
+    };
+    let tail = &bytes[pos + needle.len()..];
+    let n_end = tail
+        .iter()
+        .position(|c| !c.is_ascii_digit())
+        .unwrap_or(tail.len());
+    let got = std::str::from_utf8(&tail[..n_end]).unwrap_or("?");
+    if got != want {
+        println!(
+            "cargo::error=stale-driver-guard: embedded driver build {} != WARI_BUILD {}. \
+             The signed driver wasm at {} is stale. Run `make kernel-vf2` \
+             — that rebuilds drivers/net to wasm32 BEFORE linking the kernel. \
+             Never run `cd kernel && cargo build` directly; cargo will happily \
+             reuse the last-known-good blob and the bug we're trying to fix \
+             will never reach silicon. (Diagnosed build 115, May 2026.)",
+            got, want, blob
+        );
+    }
+    println!("cargo:rerun-if-changed={}", blob);
 }

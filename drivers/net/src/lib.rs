@@ -61,6 +61,23 @@ compile_error!("wari-driver-net requires --features qemu or --features vf2.");
 #[cfg(all(feature = "qemu", feature = "vf2"))]
 compile_error!("wari-driver-net accepts only one of --features qemu / vf2.");
 
+/// Embedded build-number tag — the kernel's `build.rs` greps the
+/// signed wasm for this string and refuses to compile if it doesn't
+/// match the kernel's own `WARI_BUILD`. Catches the stale-driver
+/// class of bug (builds 107..114 silently shipped the 106 driver
+/// because a RISC-V `fence` instruction broke the wasm build but
+/// cargo kept using the last-known-good artifact).
+///
+/// `#[used]` keeps the linker from stripping the symbol even though
+/// nothing in the wasm references it; the string still lands in
+/// rodata and `strings(1)` can find it.
+#[used]
+#[no_mangle]
+pub static WARI_DRV_BUILD_TAG: &[u8] = concat!(
+    "WARI-DRV-BUILD-TAG-",
+    env!("WARI_BUILD"),
+).as_bytes();
+
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     // Tier-2 panics are bugs in signed code. The infinite loop is
