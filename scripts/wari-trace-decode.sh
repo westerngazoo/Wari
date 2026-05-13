@@ -19,11 +19,6 @@ decode_tag() {
         0x72584472) printf "rXDr  drop fired           " ;;
         0x7258434e) printf "rXCn  descriptor rearmed   " ;;
         0x7258546c) printf "rXTl  tail doorbell        " ;;
-        0x72526145) printf "rRaE  rearm entered        " ;;
-        0x72526142) printf "rRaB  rearm bp computed    " ;;
-        0x72526157) printf "rRaW  rearm desc written   " ;;
-        0x72526158) printf "rRaX  rearm exited         " ;;
-        0x64507952) printf "dPyR  prev-yielded rearm   " ;;
         0x64507262) printf "dPrb  receive probe        " ;;
         0x74585472) printf "tXTx  TX frame sent        " ;;
 

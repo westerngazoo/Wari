@@ -36,20 +36,20 @@ $ pbpaste | scripts/wari-trace-decode.sh
 
 ## Event tags (drivers/net/src/lib.rs)
 
-| Tag hex | ASCII | Source line | Fires when | val |
+| Tag hex | ASCII | Source | Fires when | val |
 |---|---|---|---|---|
-| `0x7258_4672` | `rXFr` | receive() finds OWN=0 | A new frame is yielded to smoltcp | `(idx<<24) \| (rdes3 & 0xFFFFFF)` |
-| `0x7258_4365` | `rXCe` | RxToken::consume entry | smoltcp processed the frame | slot idx |
-| `0x7258_4472` | `rXDr` | RxToken::drop entry | Rust dropped the token | slot idx or `0xFFFFFFFF` if already consumed |
-| `0x7258_434E` | `rXCn` | vf2_rx_rearm log | Descriptor was re-armed (OWN \| IOC \| BUF1V) | slot idx |
-| `0x7258_546C` | `rXTl` | vf2_rx_rearm doorbell | RX_TAIL register kicked | tail PA |
-| `0x7252_6145` | `rRaE` | vf2_rx_rearm enter | Rearm function called | slot idx |
-| `0x7252_6142` | `rRaB` | vf2_rx_rearm after addr math | Buffer PA computed | bp low 32 |
-| `0x7252_6157` | `rRaW` | vf2_rx_rearm after desc write | Descriptor words written | slot idx |
-| `0x7252_6158` | `rRaX` | vf2_rx_rearm exit | Function completed | slot idx |
-| `0x6450_7952` | `dPyR` | receive() prev-yielded path | About to rearm previously-yielded slot | prev idx |
-| `0x6450_7262` | `dPrb` | receive() probe | Periodic snapshot of PREV_YIELDED (throttled) | PREV_YIELDED value |
-| `0x7458_5472` | `tXTx` | TxToken::consume | smoltcp sent a frame | TDES3 |
+| `0x7258_4672` | `rXFr` | receive() finds OWN=0 | New frame yielded to smoltcp | `(idx<<24) \| (rdes3 & 0xFFFFFF)` |
+| `0x7258_4365` | `rXCe` | RxToken::consume entry | smoltcp called consume() | slot idx |
+| `0x7258_4472` | `rXDr` | RxToken::drop entry | Rust dropped the token | slot idx or `0xFFFFFFFF` if already-consumed |
+| `0x7258_434E` | `rXCn` | vf2_rx_rearm | Descriptor re-armed (OWN \| IOC \| BUF1V) | slot idx |
+| `0x7258_546C` | `rXTl` | vf2_rx_rearm | RX_TAIL doorbell kicked | tail PA |
+| `0x6450_7262` | `dPrb` | receive() change-detection probe | PREV_YIELDED's value flipped (logged once per flip) | PREV_YIELDED |
+| `0x7458_5472` | `tXTx` | TxToken::consume | smoltcp sent a frame | `(idx<<24) \| len` |
+
+Build 119 trimmed the per-step saturation tags `rRaE`/`rRaB`/`rRaW`/`rRaX`/`dPyR`
+that we added during the stale-driver hunt. The counters in `St**` subsume
+them — if you need step-level breakpoints back, add a new tag for the
+specific failure you're chasing rather than reviving the kitchen-sink set.
 
 ## Counter stats (build 118+)
 

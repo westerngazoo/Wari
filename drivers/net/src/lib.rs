@@ -835,11 +835,15 @@ mod nic_iface {
         [[0u8; SOCKET_TX_BUF_LEN]; SOCKET_BACKING_LEN];
     static mut SOCKET_RX_BUFS: [[u8; SOCKET_RX_BUF_LEN]; SOCKET_BACKING_LEN] =
         [[0u8; SOCKET_RX_BUF_LEN]; SOCKET_BACKING_LEN];
-    /// Maps SocketSet handle (raw u32) → buffer pair index, so
-    /// socket_close can free the pair when the smoltcp socket is
-    /// removed. `None` slot = free buffer pair.
-    static mut SOCKET_HANDLE_FOR_BUF: [Option<u32>; SOCKET_BACKING_LEN] =
-        [None; SOCKET_BACKING_LEN];
+    /// Per-slot smoltcp handle. `None` slot = free buffer pair.
+    /// Build 119: replaced an `Option<u32>` + mem::transmute round-
+    /// trip with the typed `SocketHandle` directly. The userspace-
+    /// visible handle is now the slot index (0..SOCKET_BACKING_LEN),
+    /// which is just as opaque and doesn't depend on smoltcp's
+    /// internal layout staying repr(transparent) across patch
+    /// releases.
+    static mut SOCKET_HANDLE_FOR_BUF: [Option<smoltcp::iface::SocketHandle>;
+        SOCKET_BACKING_LEN] = [None; SOCKET_BACKING_LEN];
     /// Per-buffer-slot bound port (set by socket_bind, consumed
     /// by socket_listen). 0 = unbound.
     static mut SOCKET_BOUND_PORT: [u16; SOCKET_BACKING_LEN] =
@@ -870,12 +874,11 @@ mod nic_iface {
             );
             let socket = tcp::Socket::new(rx_buf, tx_buf);
             let handle = sockets.add(socket);
-            // smoltcp's SocketHandle is opaque but reads as a usize
-            // index internally. Cast through Debug-derived shape:
-            // (handle as u32) is what we hand back to the kernel.
-            let raw = handle_to_raw(handle);
-            SOCKET_HANDLE_FOR_BUF[slot] = Some(raw);
-            Ok(raw as i32)
+            SOCKET_HANDLE_FOR_BUF[slot] = Some(handle);
+            // Userspace handle = slot index. Opaque enough; doesn't
+            // leak smoltcp's internal layout. Reverse lookup is
+            // just SOCKET_HANDLE_FOR_BUF[slot].
+            Ok(slot as i32)
         }
     }
 
@@ -887,13 +890,10 @@ mod nic_iface {
     pub fn socket_bind(raw_handle: u32, _ip_be: u32, port: u32) -> i32 {
         // SAFETY: single-thread driver.
         unsafe {
-            let slot = match SOCKET_HANDLE_FOR_BUF
-                .iter()
-                .position(|s| *s == Some(raw_handle))
-            {
-                Some(i) => i,
-                None => return -2,
-            };
+            let slot = raw_handle as usize;
+            if slot >= SOCKET_BACKING_LEN || SOCKET_HANDLE_FOR_BUF[slot].is_none() {
+                return -2;
+            }
             if port == 0 || port > u16::MAX as u32 {
                 return -2;
             }
@@ -914,18 +914,18 @@ mod nic_iface {
                 Some(s) => s,
                 None => return -3,
             };
-            let slot = match SOCKET_HANDLE_FOR_BUF
-                .iter()
-                .position(|s| *s == Some(raw_handle))
-            {
-                Some(i) => i,
+            let slot = raw_handle as usize;
+            if slot >= SOCKET_BACKING_LEN {
+                return -2;
+            }
+            let handle = match SOCKET_HANDLE_FOR_BUF[slot] {
+                Some(h) => h,
                 None => return -2,
             };
             let port = SOCKET_BOUND_PORT[slot];
             if port == 0 {
                 return -2; // not bound
             }
-            let handle = raw_to_handle(raw_handle);
             let socket = sockets.get_mut::<tcp::Socket>(handle);
             match socket.listen(port) {
                 Ok(()) => 0,
@@ -944,35 +944,19 @@ mod nic_iface {
                 Some(s) => s,
                 None => return -3,
             };
-            let slot = match SOCKET_HANDLE_FOR_BUF
-                .iter()
-                .position(|s| *s == Some(raw_handle))
-            {
-                Some(i) => i,
+            let slot = raw_handle as usize;
+            if slot >= SOCKET_BACKING_LEN {
+                return -2;
+            }
+            let handle = match SOCKET_HANDLE_FOR_BUF[slot] {
+                Some(h) => h,
                 None => return -2, // E_INVAL: unknown handle
             };
-            let handle = raw_to_handle(raw_handle);
             sockets.remove(handle);
             SOCKET_HANDLE_FOR_BUF[slot] = None;
             SOCKET_BOUND_PORT[slot] = 0;
             0
         }
-    }
-
-    /// Convert smoltcp's opaque `SocketHandle` to its raw u32
-    /// integer. smoltcp doesn't expose the inner index publicly;
-    /// we use a transmute that the same-version invariant makes
-    /// safe (both are repr(transparent) over usize internally).
-    fn handle_to_raw(h: smoltcp::iface::SocketHandle) -> u32 {
-        // SAFETY: SocketHandle is repr(transparent) over usize in
-        // smoltcp 0.11; we only round-trip the low 32 bits within
-        // a single instance lifetime. The reverse function below
-        // performs the inverse transmute.
-        unsafe { core::mem::transmute::<_, usize>(h) as u32 }
-    }
-    fn raw_to_handle(raw: u32) -> smoltcp::iface::SocketHandle {
-        // SAFETY: counterpart to handle_to_raw above.
-        unsafe { core::mem::transmute::<usize, _>(raw as usize) }
     }
 
     /// Build the smoltcp `Interface`. Called once from `_start`.
@@ -1334,17 +1318,16 @@ pub mod vf2_phy {
                     let _ = super::wari_drv_log_u32(0x5374_5478, vf2_state::C_TX_SENT);
                 }
             }
-            // Build-110 wasmi-tolerant fix: re-arm the slot we
-            // yielded to smoltcp last time. By the time receive()
-            // is called again the kernel idle loop has cycled
-            // through one full smoltcp poll, so consume() has
-            // returned and the buffer is no longer in use.
+            // Build-110 wasmi-tolerant fix, retained: re-arm the
+            // slot we yielded to smoltcp last time. By the time
+            // receive() is called again, smoltcp has finished with
+            // the slot (consume returned + token dropped). The
+            // dPyR diagnostic tag is gone (build 119) — rXCn on
+            // the next line of vf2_rx_rearm covers the same signal,
+            // and StRa in the periodic dump counts these calls.
             unsafe {
                 if vf2_state::PREV_YIELDED != usize::MAX {
                     let prev = vf2_state::PREV_YIELDED;
-                    // tag = 'dPyR' (prev-yielded rearm path).
-                    // val = the slot index about to be rearmed.
-                    let _ = super::wari_drv_log_u32(0x6450_7952, prev as u32);
                     vf2_state::PREV_YIELDED = usize::MAX;
                     vf2_rx_rearm(prev);
                 }
@@ -1417,43 +1400,35 @@ pub mod vf2_phy {
     /// consumed-vs-leaked descriptor cases.
     fn vf2_rx_rearm(idx: usize) {
         unsafe {
-            // Build-118: bump counter on entry — the rearm count
-            // appears in the periodic StRa stat dump, so even if
-            // every per-event log is throttled away we still see
-            // the rate over time. tag = 'rRaE'. val = idx.
+            // Bump counter for the periodic StRa stat dump. The
+            // earlier per-step rRaE/rRaB/rRaW/rRaX saturation tags
+            // are gone (build 119) — they were diagnostic crutches
+            // from the stale-driver hunt and the counters subsume
+            // them now. rXCn + rXTl below still emit per-event so
+            // operators can see EACH rearm in the trace if they
+            // need to.
             vf2_state::C_REARM_CALLS = vf2_state::C_REARM_CALLS.wrapping_add(1);
-            let _ = super::wari_drv_log_u32(0x7252_6145, idx as u32);
             let bp: u64 = vf2_state::LIN_BASE
                 + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
-            // tag = 'rRaB' (rearm buf addr computed). val = bp lo.
-            let _ = super::wari_drv_log_u32(0x7252_6142, bp as u32);
             let d = &mut VF2_RX_RING.descs[idx];
             d[0] = bp as u32;
             d[1] = (bp >> 32) as u32;
             d[2] = 0;
             d[3] = 0xC100_0000; // OWN | IOC | BUF1V
-            // tag = 'rRaW' (rearm wrote desc). val = idx.
-            let _ = super::wari_drv_log_u32(0x7252_6157, idx as u32);
-            // NOTE: build 107 had a RISC-V `fence ow,ow` here — but
-            // this code compiles to WASM, where inline asm is
-            // unstable and there's no concept of CPU-level fences.
-            // The next host-fn call (wari_net_mmio_write32 below)
-            // crosses the wasm→native boundary and naturally
-            // serializes, which is what we actually needed.
             // Re-kick the RX_TAIL doorbell so DWMAC4 walks the
-            // descriptor we just rearmed.
+            // descriptor we just rearmed. The host-fn call crosses
+            // the wasm→native boundary and naturally serializes,
+            // so no explicit fence is needed (and inline asm wouldn't
+            // compile to wasm anyway — that's how builds 107..114
+            // silently shipped a stale driver).
             let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
             let rx_tail_pa: u32 =
                 (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
             let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
             // tag = 'rXTl' — RX tail doorbell write.
             let _ = super::wari_drv_log_u32(0x7258_546C, rx_tail_pa);
-            // tag = 'rXCn' + idx — diagnostic counter for re-arms.
-            let tag = 0x7258_434E | ((idx as u32) & 0x0F);
-            let _ = super::wari_drv_log_u32(tag, idx as u32);
-            // tag = 'rRaX' (rearm exit) — proves we made it past
-            // the MMIO write to the doorbell.
-            let _ = super::wari_drv_log_u32(0x7252_6158, idx as u32);
+            // tag = 'rXCn' — descriptor re-armed. val = slot idx.
+            let _ = super::wari_drv_log_u32(0x7258_434E, idx as u32);
         }
     }
 
