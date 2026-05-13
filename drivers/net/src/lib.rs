@@ -808,7 +808,11 @@ mod nic_iface {
     // (192.168.100.0/24). Direct-cable test (build 105 / 10.42.0.10)
     // didn't work — USB-Ethernet adapter wasn't delivering frames.
     // Router-based path proven to deliver frames to RX ring.
-    const IP_OCTETS: [u8; 4] = [192, 168, 100, 10];
+    // Build 120: isolated test subnet on the spare OpenWrt router.
+    // Avoids collision with the operator's home Wi-Fi (192.168.100/24)
+    // so Wi-Fi can stay up for client work while the USB-Ethernet
+    // adapter handles the test subnet.
+    const IP_OCTETS: [u8; 4] = [192, 168, 50, 10];
     const IP_PREFIX_LEN: u8 = 24;
 
     /// SocketSet backing storage. Phase-1b reserves 4 socket slots
