@@ -34,7 +34,7 @@ DEPLOY_FILES := $(KERNEL_BIN) kernel/ abi-shared/ wasi/ apps/ drivers/ \
 .PHONY: help build build-hello build-uart-driver sign-uart-driver \
         build-net-driver sign-net-driver build-vf2 build-all \
         test run debug objdump clean \
-        kernel-vf2 flash-sd deploy \
+        kernel-vf2 flash-sd deploy verify \
         test-unit test-integration test-security test-fuzz \
         clippy fmt check audit
 
@@ -201,6 +201,31 @@ kernel-vf2: sign-uart-driver sign-net-driver build-hello
 	@echo "  [build] kernel: build $(NEXT_BUILD), VF2"
 	@ls -lh $(KERNEL_BIN)
 	@echo ">>> $(KERNEL_BIN) ready — build $(NEXT_BUILD)"
+
+# End-to-end build-coherence check. Greps the embedded WARI-*-BUILD-TAG
+# strings out of every artifact and compares them to .build_number.
+# If any mismatch → ABORT before flash. This is the operator-visible
+# half of the stale-driver guard (kernel/build.rs has the cargo-time
+# half). Runs in <1s; cheap to run before every flash.
+verify:
+	@TREE=$$(cat $(BUILD_FILE) 2>/dev/null || echo "?"); \
+	KBIN=$$(strings $(KERNEL_BIN) 2>/dev/null | grep '^WARI-BUILD-TAG-' | head -1 | sed 's/WARI-BUILD-TAG-//' || echo "?"); \
+	DVF2=$$(strings build/drivers/net-vf2.signed.wasm 2>/dev/null | grep '^WARI-DRV-BUILD-TAG-' | head -1 | sed 's/WARI-DRV-BUILD-TAG-//' || echo "?"); \
+	DQEM=$$(strings build/drivers/net-qemu.signed.wasm 2>/dev/null | grep '^WARI-DRV-BUILD-TAG-' | head -1 | sed 's/WARI-DRV-BUILD-TAG-//' || echo "?"); \
+	echo "Build artifact coherence:"; \
+	echo "   .build_number ............................... $$TREE"; \
+	echo "   $(KERNEL_BIN) embedded ...................... $$KBIN"; \
+	echo "   build/drivers/net-vf2.signed.wasm  embedded . $$DVF2"; \
+	echo "   build/drivers/net-qemu.signed.wasm embedded . $$DQEM"; \
+	echo ""; \
+	if [ "$$TREE" = "$$KBIN" ] && [ "$$TREE" = "$$DVF2" ] && [ "$$TREE" = "$$DQEM" ]; then \
+	  echo "   OK — all artifacts at build $$TREE"; \
+	else \
+	  echo "   MISMATCH — run 'make kernel-vf2' to rebuild everything."; \
+	  echo "              Bypassing this is how builds 107-114 shipped"; \
+	  echo "              a stale driver under a fresh-looking kernel."; \
+	  exit 1; \
+	fi
 
 # kernel-vf2 with the debug-kernel feature on. Adds kdebug!()
 # subsystem-tagged lines to the COM7 trace. Use for diagnostic

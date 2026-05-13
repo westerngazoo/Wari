@@ -405,6 +405,25 @@ pub mod vf2_state {
     /// throttle a high-frequency log line so we don't drown the
     /// UART but still get visibility into the hot path.
     pub static mut RX_CALL_COUNT: u64 = 0;
+
+    // ── Build-118 cumulative counters (see docs/diagnostic-tags.md) ──
+    //
+    // Bumped on each event; periodically dumped via the `St**` tag
+    // family. If `StCc` stays at zero after 30s of ping you know
+    // smoltcp isn't consuming — without the per-packet log spam that
+    // builds 107..114 needed to chase the same question.
+    pub static mut C_RECEIVE_CALLS: u32 = 0;
+    pub static mut C_FRAMES_FOUND: u32 = 0;
+    pub static mut C_CONSUME_CALLS: u32 = 0;
+    pub static mut C_DROP_CALLS: u32 = 0;
+    pub static mut C_REARM_CALLS: u32 = 0;
+    pub static mut C_TX_SENT: u32 = 0;
+
+    /// Change-detection memory for the `dPrb` probe. Initial sentinel
+    /// (`0xDEAD_BEEF`) forces the first sample to log so we get a
+    /// baseline. After that we only log when the value flips, which
+    /// turns a stuck-at-MAX bug from 100k log lines/sec into one.
+    pub static mut LAST_PREV_YIELDED_LOGGED: u32 = 0xDEAD_BEEF;
 }
 
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
@@ -1292,17 +1311,27 @@ pub mod vf2_phy {
             &mut self,
             _ts: Instant,
         ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-            // Build-117: dPrb served its purpose in 116 (proved
-            // receive() is hot-called and the fresh driver is
-            // running). Throttle to every 65536 calls so the
-            // signal stays visible without flooding.
+            // Build-118: change-detection dPrb + cumulative counter
+            // dump (see docs/diagnostic-tags.md). dPrb fires only
+            // when PREV_YIELDED's value flips — stuck-at-MAX bugs
+            // log once, then go silent until the value moves.
+            // The 6-line stat burst fires every ~65k receive() calls
+            // so we always have current event counters in the trace.
             unsafe {
+                vf2_state::C_RECEIVE_CALLS = vf2_state::C_RECEIVE_CALLS.wrapping_add(1);
                 vf2_state::RX_CALL_COUNT = vf2_state::RX_CALL_COUNT.wrapping_add(1);
+                let py = vf2_state::PREV_YIELDED as u32;
+                if py != vf2_state::LAST_PREV_YIELDED_LOGGED {
+                    vf2_state::LAST_PREV_YIELDED_LOGGED = py;
+                    let _ = super::wari_drv_log_u32(0x6450_7262, py);
+                }
                 if vf2_state::RX_CALL_COUNT & 0xFFFF == 0 {
-                    let _ = super::wari_drv_log_u32(
-                        0x6450_7262,
-                        vf2_state::PREV_YIELDED as u32,
-                    );
+                    let _ = super::wari_drv_log_u32(0x5374_5263, vf2_state::C_RECEIVE_CALLS);
+                    let _ = super::wari_drv_log_u32(0x5374_5266, vf2_state::C_FRAMES_FOUND);
+                    let _ = super::wari_drv_log_u32(0x5374_4363, vf2_state::C_CONSUME_CALLS);
+                    let _ = super::wari_drv_log_u32(0x5374_4463, vf2_state::C_DROP_CALLS);
+                    let _ = super::wari_drv_log_u32(0x5374_5261, vf2_state::C_REARM_CALLS);
+                    let _ = super::wari_drv_log_u32(0x5374_5478, vf2_state::C_TX_SENT);
                 }
             }
             // Build-110 wasmi-tolerant fix: re-arm the slot we
@@ -1335,13 +1364,16 @@ pub mod vf2_phy {
                         // RDES3 bits 14:0.
                         let len = (rdes3 & 0x7FFF) as u16;
                         vf2_state::RX_NEXT = (i + 1) % 16;
-                        // PR Phase-1c-7b — diagnostic: log every
-                        // RX hand-off so we can see whether the
-                        // kernel idle loop's poll → smoltcp →
-                        // Device::receive chain is actually
-                        // delivering frames. tag = 'rXFr' + idx.
-                        let tag = 0x7258_4672 | ((i as u32) & 0x0F);
-                        let _ = super::wari_drv_log_u32(tag, rdes3);
+                        // Build-118: log rXFr with idx in val.b3 (top
+                        // byte) and rdes3 in val.b2..b0. Old scheme
+                        // OR'd idx into the tag's low nibble, which
+                        // aliased pairs of slots (e.g. idx 0 & 2 both
+                        // logged as 0x72 because 0x72 already had bit
+                        // 1 set). See docs/diagnostic-tags.md.
+                        let val = ((i as u32) << 24) | (rdes3 & 0x00FF_FFFF);
+                        let _ = super::wari_drv_log_u32(0x7258_4672, val);
+                        vf2_state::C_FRAMES_FOUND =
+                            vf2_state::C_FRAMES_FOUND.wrapping_add(1);
                         // Stash the slot so the NEXT receive()
                         // call re-arms it (see top of fn).
                         vf2_state::PREV_YIELDED = i;
@@ -1385,10 +1417,11 @@ pub mod vf2_phy {
     /// consumed-vs-leaked descriptor cases.
     fn vf2_rx_rearm(idx: usize) {
         unsafe {
-            // Build-111 saturation logs. Each one fires on a
-            // distinct line so we can see EXACTLY where we stop
-            // executing if anything goes wrong.
-            // tag = 'rRaE' (rearm enter). val = idx.
+            // Build-118: bump counter on entry — the rearm count
+            // appears in the periodic StRa stat dump, so even if
+            // every per-event log is throttled away we still see
+            // the rate over time. tag = 'rRaE'. val = idx.
+            vf2_state::C_REARM_CALLS = vf2_state::C_REARM_CALLS.wrapping_add(1);
             let _ = super::wari_drv_log_u32(0x7252_6145, idx as u32);
             let bp: u64 = vf2_state::LIN_BASE
                 + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
@@ -1433,7 +1466,10 @@ pub mod vf2_phy {
             // before the closure runs, so we can tell consume from
             // Drop and prove smoltcp is actually processing the
             // frame rather than silently leaking the token.
-            let _ = unsafe { super::wari_drv_log_u32(0x7258_4365, self.idx as u32) };
+            unsafe {
+                vf2_state::C_CONSUME_CALLS = vf2_state::C_CONSUME_CALLS.wrapping_add(1);
+                let _ = super::wari_drv_log_u32(0x7258_4365, self.idx as u32);
+            }
             // SAFETY: single-threaded driver; this slot's buffer is
             // exclusively ours until we re-arm the descriptor below.
             let result = unsafe {
@@ -1457,9 +1493,10 @@ pub mod vf2_phy {
             // Build-109 bracket: 'rXDr' (drop entry) — fires
             // every time Rust drops the token, including the
             // already-consumed case where idx == usize::MAX.
-            // val carries idx so we can see which slot was
-            // dropped without consume vs. which was consumed.
-            let _ = unsafe { super::wari_drv_log_u32(0x7258_4472, self.idx as u32) };
+            unsafe {
+                vf2_state::C_DROP_CALLS = vf2_state::C_DROP_CALLS.wrapping_add(1);
+                let _ = super::wari_drv_log_u32(0x7258_4472, self.idx as u32);
+            }
             if self.idx != usize::MAX {
                 vf2_rx_rearm(self.idx);
             }
@@ -1484,13 +1521,12 @@ pub mod vf2_phy {
                 f(buf)
             };
 
-            // PR Phase-1c-7b — diagnostic: log every TX from
-            // smoltcp so we can see whether ARP/ICMP replies are
-            // making it down into the device. tag = 'tXTx' + idx.
-            // SAFETY: extern host fn.
+            // Build-118: clean tag (idx in val.b3), bump TX counter
+            // for the periodic StTx stat dump.
             unsafe {
-                let tag = 0x7458_5478 | ((i as u32) & 0x0F);
-                let _ = super::wari_drv_log_u32(tag, len as u32);
+                vf2_state::C_TX_SENT = vf2_state::C_TX_SENT.wrapping_add(1);
+                let val = ((i as u32) << 24) | ((len as u32) & 0x00FF_FFFF);
+                let _ = super::wari_drv_log_u32(0x7458_5472, val);
             }
 
             // Publish: descriptor + bump tail.
