@@ -1936,6 +1936,58 @@ pub fn driver_start() {
         let _ = unsafe { wari_drv_log_u32(0x5048_5901, phyid1) }; // 'PHY\1'
         let _ = unsafe { wari_drv_log_u32(0x5048_5902, phyid2) }; // 'PHY\2'
 
+        // PR Phase-1c-9 — YT8531C extended-register RGMII delay config.
+        //
+        // VF2 rev 1.3+ mainline DT (jh7110-starfive-visionfive-2-v1.3b
+        // .dts): rx-internal-delay-ps = 1500, tx-internal-delay-ps =
+        // 1500, tx-clk-1000-inverted.
+        //
+        // Without these the PHY samples RXD on the wrong RXC edge —
+        // ~99% CRC fail at the MAC, frames silently dropped. The
+        // spare-router L2 test on 2026-05-13 showed 1/118 ping
+        // success with Debian seeing the same frames perfectly on
+        // the same cable — classic RGMII timing margin signature.
+        //
+        // Extended-register protocol (motorcomm.c ytphy_write_ext):
+        //   write PHY reg 0x1E (PAGE_SELECT) = extended-reg address
+        //   write/read PHY reg 0x1F (PAGE_DATA)
+        //
+        // YT8521_RGMII_CONFIG1_REG = 0xA003:
+        //   bit  14    TX_CLK_SEL_INVERTED  (set: tx-clk-1000-inverted)
+        //   bits 13:10 RX_DELAY             (4-bit, 150 ps/step)
+        //   bits  7:4  FE_TX_DELAY (100M)   (4-bit, 150 ps/step)
+        //   bits  3:0  GE_TX_DELAY (1G)     (4-bit, 150 ps/step)
+        //
+        // 1500 ps / 150 ps = 10 = 0x0A.
+        // Final value: (1<<14) | (0x0A<<10) | (0x0A<<0) = 0x680A.
+        const YTPHY_PAGE_SELECT:        u32 = 0x1E;
+        const YTPHY_PAGE_DATA:          u32 = 0x1F;
+        const YT8521_RGMII_CONFIG1_REG: u16 = 0xA003;
+        const YT8531_RC1R_VF2_VALUE:    u16 = 0x680A;
+
+        // Pre-read so we know U-Boot's starting value.
+        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+                               YT8521_RGMII_CONFIG1_REG);
+        let rc1r_pre = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
+        let _ = unsafe { wari_drv_log_u32(0x5243_3152, rc1r_pre) }; // 'RC1R'
+
+        // Write delays + TX clock inversion.
+        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+                               YT8521_RGMII_CONFIG1_REG);
+        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA,
+                               YT8531_RC1R_VF2_VALUE);
+
+        // Verify-read.
+        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+                               YT8521_RGMII_CONFIG1_REG);
+        let rc1r_post = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
+        let _ = unsafe { wari_drv_log_u32(0x5243_3170, rc1r_post) }; // 'RC1p'
+
+        // Force re-AN if 0xA003 changed: YT8531C latches RXC delay
+        // at link-up. Without a re-AN the new delays don't take
+        // effect on the live link inherited from U-Boot.
+        let needs_relink = rc1r_pre != (YT8531_RC1R_VF2_VALUE as u32);
+
         // PR Phase-1c-5 — IEEE 802.3 auto-negotiation.
         //
         // PHY register map (Clause 22 standard):
@@ -1973,7 +2025,10 @@ pub fn driver_start() {
         // completed yet.
         const BS_LINK_UP:    u32 = 1 << 2;
         const BS_AN_COMPLETE:u32 = 1 << 5;
-        let already_linked = (bs_pre & BS_LINK_UP) != 0
+        // Build 121: if we changed 0xA003 (RGMII delays), force a
+        // fresh AN cycle — the new delays only latch at link-up.
+        let already_linked = !needs_relink
+                          && (bs_pre & BS_LINK_UP) != 0
                           && (bs_pre & BS_AN_COMPLETE) != 0;
         if already_linked {
             // Tag 0x12 retains its position in the trace so the
@@ -2372,9 +2427,14 @@ pub fn driver_start() {
                  | 64;                        // total length 64
         }
 
-        // MAC_CONFIG = 0x0000_0003 (TE | RE) — enable transmit + receive
+        // MAC_CONFIG = 0x0000_2003 (DM | TE | RE) — full-duplex +
+        // enable transmit + enable receive. Build 121: added DM
+        // bit (13) per Linux mainline stmmac_mac_link_up for
+        // 1Gbps full-duplex links. Default DM=0 is half-duplex
+        // which causes the MAC to misinterpret incoming frames
+        // as collisions on a switched link.
         // SAFETY: extern host fn into kernel net_mmio surface.
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x000, 0x3) };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x000, 0x2003) };
 
         // DMA_CH0_TX_CONTROL: set ST (bit 0) — start transmit.
         // Default TXPBL = 1 (lower bits 21:16). Use 0x0010_0001
