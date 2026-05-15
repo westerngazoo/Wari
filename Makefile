@@ -120,11 +120,13 @@ build-net-driver:
 	@echo "  [build] net driver: building both platform variants (QEMU + VF2)"
 	@echo "          (kernel/src/runtime/net_blob.rs cfg-selects which one is embedded)"
 	@echo "  [build] net driver: QEMU variant (VirtIO-net)"
-	@cd drivers/net && cargo build --release --features qemu --no-default-features
+	@cd drivers/net && WARI_BUILD=$(NEXT_BUILD) \
+	  cargo build --release --features qemu --no-default-features
 	@cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
 		build/drivers/net-qemu.wasm
 	@echo "  [build] net driver: VF2 variant (JH7110 GMAC stub, Phase-1c)"
-	@cd drivers/net && cargo build --release --features vf2 --no-default-features
+	@cd drivers/net && WARI_BUILD=$(NEXT_BUILD) \
+	  cargo build --release --features vf2 --no-default-features
 	@cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
 		build/drivers/net-vf2.wasm
 
@@ -194,10 +196,10 @@ audit:
 
 kernel-vf2: sign-uart-driver sign-net-driver build-hello
 	@echo "  [build] kernel: VF2 (entry 0x40200000, hart 1)"
-	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
 	  cargo build --release --features vf2 --no-default-features
 	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), VF2"
 	@ls -lh $(KERNEL_BIN)
 	@echo ">>> $(KERNEL_BIN) ready — build $(NEXT_BUILD)"
@@ -232,10 +234,10 @@ verify:
 # silicon runs only — production deploys use plain `kernel-vf2`.
 kernel-vf2-debug: sign-uart-driver sign-net-driver build-hello
 	@echo "  [build] kernel: VF2 + debug-kernel feature"
-	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
 	  cargo build --release --features vf2,debug-kernel --no-default-features
 	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), VF2 (DEBUG)"
 	@ls -lh $(KERNEL_BIN)
 
@@ -243,10 +245,10 @@ kernel-vf2-debug: sign-uart-driver sign-net-driver build-hello
 # possible silicon trace; expect screens of output per second.
 kernel-vf2-trace: sign-uart-driver sign-net-driver build-hello
 	@echo "  [build] kernel: VF2 + debug-kernel + trace-kernel"
-	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
 	  cargo build --release --features vf2,trace-kernel --no-default-features
 	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), VF2 (TRACE)"
 	@ls -lh $(KERNEL_BIN)
 
