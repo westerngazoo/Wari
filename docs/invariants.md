@@ -405,4 +405,7 @@ this list and every block gets an INV-N citation the same PR it lands.
 
 ---
 
-*Last audited: Phase 0 scaffold, April 2026.*
+*Last updated: Phase 1c, May 2026. Last formal gate audit: Phase 0 —
+`docs/audits/phase-0.md`. The Phase-1b capability invariants (INV-10,
+11, 15–19, 23) are drafted and enforced in `kernel/src/cap/`; a Phase-1
+gate audit is still pending.*

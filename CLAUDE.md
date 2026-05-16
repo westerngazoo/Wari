@@ -1,4 +1,4 @@
-# CLAUDE.md — Wari
+# CLAUDE.md — 和力 · Wari
 
 > \*\*Mission:\*\* A world-class, formally-verifiable, WASM-native operating
 > system for RISC-V targeting sovereign cloud infrastructure in Latin
@@ -12,8 +12,8 @@
 
 |Field|Value|
 |-|-|
-|**Name**|Wari|
-|**Etymology**|Wari Empire (600–1000 CE, Andes). Administrative-first, quipu-information, infrastructure that outlasted its builders into the Inca era.|
+|**Name**|和力 · Wari — *Hé Lì*, "Harmonious Force"|
+|**Etymology**|*Wari* — the Wari Empire (600–1000 CE, Andes): administrative-first, quipu-information, infrastructure that outlasted its builders into the Inca era. *和力 (Hé Lì)* — "harmonious force": the convergence thesis that Andean *ayni*, Mexican *tequio*, and Chinese *hé* encode one principle — every node has I/O obligations to the network. See `docs/manifesto.md`.|
 |**Backronym**|**W**asm-native · **A**utonomous · **R**ust + **R**ISC-V · **I**solation-first|
 |**Architect**|Gustavo Delgadillo|
 |**Target HW (Phase 0)**|StarFive VisionFive 2 — JH7110, 4× U74 RV64GC|
@@ -22,7 +22,7 @@
 |**Process model**|WASM-only (two tiers). No ELF in the customer-facing ABI ever.|
 |**Runtime**|`wasmi` (no\_std pure interpreter). JIT deferred to Phase 2+.|
 |**Boot chain**|OpenSBI (M) → U-Boot → Wari (S)|
-|**License**|TBD before first external release|
+|**License**|AGPL-3.0-only|
 |**Predecessor**|`goose-os` — separate repo at `https://github.com/westerngazoo/goose-os`. Reference only. Wari is WASM-native from boot zero, not a goose-os fork.|
 
 \---
@@ -658,26 +658,25 @@ kernel-VA read. All fail safely; no kernel panic.
 
 ## Current Status
 
-**Phase 0 kickoff.** Fresh repository. Scaffold in place; implementation
-pending. First work by the execution agent is to propose the lean
-Phase 0 plan for Gustavo's approval.
+**Phase 1c — silicon bring-up.** Wari boots on QEMU `virt` RV64 and on
+the StarFive VisionFive 2 (JH7110, RV64GC). Phases 0, 1a, and 1b are
+shipped: boot + Sv39 paging + traps, the wasmi runtime, WASI host
+functions, the Tier-1 `hello.wasm` demo on real silicon, the capability
+system, the scheduler, IPC (capability Endpoint/Notification objects),
+and the Tier-2 UART driver.
 
-**Lean Phase 0 goal**: one WASM module at boot, no scheduler, no IPC.
-Kernel boots, enables Sv39 paging, starts wasmi, loads a signed
-`.wasm` (built from `apps/hello/`), runs it to `proc\_exit(0)`, halts.
-Multi-tenant scheduling + IPC arrive in Phase 1 with the capability
-system.
+Phase 1c is in progress: the Tier-2 network driver (VirtIO-net on QEMU,
+JH7110 GMAC0 on the VF2). GMAC0 + smoltcp are wired; the ARP/ICMP path
+is under final calibration (YT8531C RGMII delay). The TCP socket layer
+is queued for Net-6c. Live build state is tracked in
+`docs/STATE-OF-PLAY.md`.
 
-**Cherry-pick discipline**: "build from scratch, copy only what makes
-sense." The predecessor (goose-os) is reference material — study it,
-copy pure-logic modules where their design survives Wari's constraints
-(WASM-only, two-tier), rewrite everything shaped by the ELF/native-
-process assumptions.
-
-Likely pure-logic copies from goose-os: `page\_alloc.rs`, `page\_table.rs`,
-the validator functions from `security.rs`, and the `INV-N` framework
-from `docs/unsafe-audit.md`. Everything else is written for Wari
-directly, not ported.
+**Cherry-pick discipline** (carried forward from Phase 0): the
+predecessor `goose-os` is reference material — pure-logic modules
+(`page\_alloc.rs`, `page\_table.rs`, the validator functions, the `INV-N`
+framework) were copied where their design survived Wari's WASM-only,
+two-tier constraints; everything shaped by ELF/native-process
+assumptions was rewritten for Wari directly.
 
 \---
 
@@ -719,7 +718,7 @@ Every line. Every commit. Every PR. Every time.
 
 \---
 
-*Last updated: Phase 0 kickoff, April 2026
+*Last updated: Phase 1c silicon bring-up, May 2026
 Architect: Gustavo Delgadillo
 
 . Think Before Coding*
