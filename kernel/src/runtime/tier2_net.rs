@@ -72,6 +72,30 @@ pub struct Tier2NetHandle {
 /// kmain idle loop.
 static mut TIER2_NET: Option<Tier2NetHandle> = None;
 
+/// Returns a `&'static mut` to the singleton slot.
+///
+/// Infallible by construction: `addr_of_mut!(STATIC)` is non-null
+/// by definition (it points to a `static mut`), so the previous
+/// idiom — `addr_of_mut!(TIER2_NET).as_mut().expect("...")` —
+/// carried six structurally-unreachable `.expect(...)` panics
+/// across this file. R5 (no panics in syscall paths) flags `.expect`
+/// regardless of reachability; this helper removes the panic
+/// primitive by eliminating the `Option<&mut>` that nothing would
+/// ever produce.
+///
+/// # Safety
+///
+/// INV-1 (single-hart) + INV-8 (post-init) + INV-14 generalized.
+/// Caller must ensure no other live borrow of `TIER2_NET` exists
+/// for the duration of the returned reference. Every downstream
+/// call site is already in an `unsafe fn` whose contract chains
+/// these invariants.
+unsafe fn tier2_net_slot() -> &'static mut Option<Tier2NetHandle> {
+    // SAFETY: addr_of_mut!(STATIC) is non-null by definition;
+    // exclusivity is the caller's contract above.
+    unsafe { &mut *addr_of_mut!(TIER2_NET) }
+}
+
 /// Install the net driver handle. Called once from
 /// `runtime::run_tier2_net` after the driver's `_start` has
 /// completed (which means VirtIO init succeeded AND the smoltcp
@@ -111,8 +135,8 @@ pub unsafe fn install(handle: Tier2NetHandle) {
 pub unsafe fn poll(timestamp_ms: u64) -> Result<i32, KernelError> {
     // SAFETY: INV-1 + INV-8 + INV-14 generalized. Single-hart
     // single accessor; install ran during boot.
-    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
-        .expect("TIER2_NET ref always valid (static)");
+    // SAFETY: helper docstring + per-fn SAFETY block above.
+    let slot = unsafe { tier2_net_slot() };
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     h.poll_fn
         .call(&mut h.store, timestamp_ms)
@@ -131,8 +155,8 @@ pub unsafe fn poll(timestamp_ms: u64) -> Result<i32, KernelError> {
 /// `&mut TIER2_NET` accessor.
 pub unsafe fn socket_create(proto: u32) -> Result<i32, KernelError> {
     // SAFETY: INV-1 + INV-8.
-    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
-        .expect("TIER2_NET ref always valid (static)");
+    // SAFETY: helper docstring + per-fn SAFETY block above.
+    let slot = unsafe { tier2_net_slot() };
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     h.socket_create_fn
         .call(&mut h.store, proto)
@@ -147,8 +171,8 @@ pub unsafe fn socket_create(proto: u32) -> Result<i32, KernelError> {
 /// Same as [`socket_create`].
 pub unsafe fn socket_close(handle: u32) -> Result<i32, KernelError> {
     // SAFETY: INV-1 + INV-8.
-    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
-        .expect("TIER2_NET ref always valid (static)");
+    // SAFETY: helper docstring + per-fn SAFETY block above.
+    let slot = unsafe { tier2_net_slot() };
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     h.socket_close_fn
         .call(&mut h.store, handle)
@@ -161,8 +185,8 @@ pub unsafe fn socket_close(handle: u32) -> Result<i32, KernelError> {
 /// Same as [`socket_create`].
 pub unsafe fn socket_bind(handle: u32, ip_be: u32, port: u32) -> Result<i32, KernelError> {
     // SAFETY: INV-1 + INV-8.
-    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
-        .expect("TIER2_NET ref always valid (static)");
+    // SAFETY: helper docstring + per-fn SAFETY block above.
+    let slot = unsafe { tier2_net_slot() };
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     h.socket_bind_fn
         .call(&mut h.store, (handle, ip_be, port))
@@ -175,8 +199,8 @@ pub unsafe fn socket_bind(handle: u32, ip_be: u32, port: u32) -> Result<i32, Ker
 /// Same as [`socket_create`].
 pub unsafe fn socket_listen(handle: u32, backlog: u32) -> Result<i32, KernelError> {
     // SAFETY: INV-1 + INV-8.
-    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
-        .expect("TIER2_NET ref always valid (static)");
+    // SAFETY: helper docstring + per-fn SAFETY block above.
+    let slot = unsafe { tier2_net_slot() };
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     h.socket_listen_fn
         .call(&mut h.store, (handle, backlog))
@@ -186,8 +210,10 @@ pub unsafe fn socket_listen(handle: u32, backlog: u32) -> Result<i32, KernelErro
 /// `true` if `install` has been called. Used by the kmain idle
 /// loop to decide whether to enter the polling loop.
 pub fn is_installed() -> bool {
-    // SAFETY: INV-1; only reads.
-    let slot = unsafe { addr_of_mut!(TIER2_NET).as_ref() }
-        .expect("TIER2_NET ref always valid (static)");
+    // SAFETY: INV-1 single-hart read; `tier2_net_slot` is
+    // infallible (see its docstring). The `&mut` reborrow to a
+    // read is sound because nothing else holds a live borrow
+    // under INV-1.
+    let slot = unsafe { tier2_net_slot() };
     slot.is_some()
 }
