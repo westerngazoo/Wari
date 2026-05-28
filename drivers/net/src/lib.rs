@@ -938,6 +938,111 @@ mod nic_iface {
         }
     }
 
+    /// Phase-1c HTTP demo — report whether the listening socket has
+    /// accepted a connection. Pure state inspection — the kernel
+    /// drives `nic_iface::poll` on either side of this call so the
+    /// smoltcp state machine advances before/after.
+    ///
+    /// smoltcp's accept model is not POSIX-shaped: the SAME socket
+    /// transitions from `Listen` to `Established` when a remote SYN
+    /// arrives. There is no "accept-creates-new-socket" primitive
+    /// without an explicit re-listen. For the Phase-1c demo (one
+    /// connection per boot, served then closed) the simpler model
+    /// suffices.
+    ///
+    /// Returns:
+    /// - `1` if the socket is in `Established` and can accept a
+    ///   write (ready for `socket_send_canned` + `socket_close`),
+    /// - `0` if still listening / waiting,
+    /// - `-2` if the handle is unknown or the socket is in an
+    ///   unexpected state.
+    pub fn socket_poll_accept(raw_handle: u32) -> i32 {
+        use smoltcp::socket::tcp;
+        // SAFETY: single-thread driver (INV-1 generalized).
+        unsafe {
+            let sockets = match &mut *addr_of_mut!(SOCKETS) {
+                Some(s) => s,
+                None => return -2,
+            };
+            let slot = raw_handle as usize;
+            if slot >= SOCKET_BACKING_LEN {
+                return -2;
+            }
+            let handle = match SOCKET_HANDLE_FOR_BUF[slot] {
+                Some(h) => h,
+                None => return -2,
+            };
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            if socket.is_active() && socket.may_send() {
+                1
+            } else {
+                0
+            }
+        }
+    }
+
+    /// Phase-1c HTTP demo — send a hardcoded HTTP/1.0 200 OK reply on
+    /// a connected socket. Pure write — the kernel drives
+    /// `nic_iface::poll` after this call so the queued reply hits
+    /// the wire.
+    ///
+    /// Body is `b"Hello from Wari\n"`. Header declares
+    /// `Content-Length: 16` and `Connection: close`. Total 96 bytes
+    /// — fits comfortably in one TCP segment on any MTU.
+    ///
+    /// Returns:
+    /// - bytes queued for transmit on success (the full reply if the
+    ///   socket's tx buffer accepted it),
+    /// - `-2` if the handle is unknown or the socket is not in a
+    ///   sendable state,
+    /// - `-3` if smoltcp's `send_slice` returns Err.
+    ///
+    /// After this call the caller should `socket_close` to release
+    /// the smoltcp slot. smoltcp will already have queued FIN
+    /// (via `socket.close()`) so the remote sees a clean teardown.
+    ///
+    /// Phase-1c demo only: a real HTTP server uses generic
+    /// `socket_send` taking a Tier-1 lin-mem buffer. That ABI is
+    /// queued for after the demo confirms the path works end-to-end.
+    pub fn socket_send_canned(raw_handle: u32) -> i32 {
+        use smoltcp::socket::tcp;
+
+        const REPLY: &[u8] = b"HTTP/1.0 200 OK\r\n\
+            Content-Type: text/plain\r\n\
+            Content-Length: 16\r\n\
+            Connection: close\r\n\
+            \r\n\
+            Hello from Wari\n";
+
+        // SAFETY: single-thread driver (INV-1 generalized).
+        unsafe {
+            let sockets = match &mut *addr_of_mut!(SOCKETS) {
+                Some(s) => s,
+                None => return -2,
+            };
+            let slot = raw_handle as usize;
+            if slot >= SOCKET_BACKING_LEN {
+                return -2;
+            }
+            let handle = match SOCKET_HANDLE_FOR_BUF[slot] {
+                Some(h) => h,
+                None => return -2,
+            };
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            if !socket.may_send() {
+                return -2;
+            }
+            let queued = match socket.send_slice(REPLY) {
+                Ok(n) => n as i32,
+                Err(_) => return -3,
+            };
+            // Signal end-of-response so smoltcp emits FIN after the
+            // reply drains. The remote sees a clean close.
+            socket.close();
+            queued
+        }
+    }
+
     /// Tear down a TCP socket previously returned by
     /// `socket_create_tcp`. Returns 0 on success, `-2` (E_INVAL)
     /// if the handle is unknown.
@@ -2906,6 +3011,12 @@ impl wari_driver_iface::NetDriver for Driver {
     fn socket_listen(handle: u32, backlog: u32) -> i32 {
         driver_socket_listen(handle, backlog)
     }
+    fn socket_accept(handle: u32) -> i32 {
+        nic_iface::socket_poll_accept(handle)
+    }
+    fn socket_send_canned(handle: u32) -> i32 {
+        nic_iface::socket_send_canned(handle)
+    }
 }
 
 wari_driver_iface::wari_net_driver!(Driver);
@@ -2947,3 +3058,9 @@ pub fn driver_socket_listen(handle: u32, backlog: u32) -> i32 {
     let _ = backlog; // smoltcp single-pending only — backlog ignored
     nic_iface::socket_listen(handle)
 }
+
+// Phase-1c HTTP demo — accept + canned-send are exported by the
+// `wari_net_driver!` macro from the `NetDriver` trait impl below
+// (which delegates to `nic_iface::socket_poll_accept` /
+// `socket_send_canned`). The macro writes manifest entries the
+// sign tool requires.

@@ -58,8 +58,10 @@ mod wasi {
         pub fn proc_exit(code: u32) -> !;
     }
 
-    /// Wari socket API (PR Net-6b). Tier-1 calls these to allocate
-    /// and tear down sockets via the Tier-2 net driver.
+    /// Wari socket API (PR Net-6b / Net-6c / Phase-1c HTTP demo).
+    /// Tier-1 calls these to allocate and tear down sockets, bind /
+    /// listen, and serve a canned HTTP reply via the Tier-2 net
+    /// driver.
     #[link(wasm_import_module = "wari")]
     extern "C" {
         /// Allocate a smoltcp socket of `proto` (1=TCP, 2=UDP) and
@@ -74,6 +76,16 @@ mod wasi {
         pub fn net_socket_bind(slot: u32, ip_be: u32, port: u32) -> i32;
         /// Mark the Socket cap at `slot` as listening (PR Net-6c).
         pub fn net_socket_listen(slot: u32, backlog: u32) -> i32;
+        /// Phase-1c HTTP demo — returns 1 if the listening socket
+        /// has accepted a connection, 0 if still waiting, negative
+        /// errno on driver error. Each call drives one smoltcp
+        /// poll cycle inside the kernel.
+        pub fn net_socket_accept(slot: u32) -> i32;
+        /// Phase-1c HTTP demo — queue the hardcoded HTTP/1.0 200 OK
+        /// reply on a connected socket. Returns bytes queued or
+        /// negative errno. Kernel drives one smoltcp poll after the
+        /// queue so the segment leaves the device on the same hop.
+        pub fn net_socket_send_canned(slot: u32) -> i32;
     }
 
     /// WASI Preview 1 `iovec` — `(buf, buf_len)` pair.
@@ -112,29 +124,76 @@ pub extern "C" fn _start() -> ! {
     // success).
     let _ = unsafe { wasi::fd_write(1, &iov, 1, &mut nwritten) };
 
-    // PR Net-6b — exercise the Tier-1 socket API. Allocates a TCP
-    // socket (proto=1) into CSpace slot 8 (well above the boot-
-    // installed slots 0/1/2 for stdout/exit/Net), then closes it.
-    // On success prints "  socket ok"; on any errno prints
-    // "  socket err N". Either way we proc_exit(0) — Phase-0 demo
-    // contract keeps the test green even if net is unavailable.
+    // Phase-1c HTTP demo — full end-to-end:
+    //   create → bind 7000 → listen → busy-poll accept → send_canned → close
+    //
+    // CSpace slot 8 holds the Socket cap (well above slots 0/1/2
+    // used for stdout/exit/Net). If any step fails we print the
+    // step name + rc and exit cleanly; the demo never panics. The
+    // accept loop is bounded so a second tenant (Tier-1 instance
+    // B, which also runs hello) doesn't busy-spin forever when no
+    // client connects on its turn.
+    // accept is a busy-poll: each iteration host-calls into the
+    // kernel which drives one smoltcp poll cycle then inspects the
+    // socket state. The interpreter loops fast (~µs/iter on QEMU);
+    // a generous cap gives a human-paced `curl` a few seconds to
+    // hit the port. Real apps will get a blocking wait once the
+    // IPC story can suspend a Tier-1 cleanly (Phase-1c follow-up).
+    const ACCEPT_MAX_ITERS: u32 = 50_000_000;
+
+    fn print(s: &[u8]) {
+        let mut nw: u32 = 0;
+        let iov = wasi::Iovec { buf: s.as_ptr(), buf_len: s.len() as u32 };
+        // SAFETY: host fn does its own validation.
+        let _ = unsafe { wasi::fd_write(1, &iov, 1, &mut nw) };
+    }
+
     let create_rc = unsafe { wasi::net_socket_create(1, 8) };
-    if create_rc == 0 {
-        let close_rc = unsafe { wasi::net_socket_close(8) };
-        if close_rc == 0 {
-            let msg: &[u8] = b"  socket ok\r\n";
-            let iov2 = wasi::Iovec { buf: msg.as_ptr(), buf_len: msg.len() as u32 };
-            let _ = unsafe { wasi::fd_write(1, &iov2, 1, &mut nwritten) };
+    if create_rc != 0 {
+        print(b"  http: create err\r\n");
+        unsafe { wasi::proc_exit(0) }
+    }
+    let bind_rc = unsafe { wasi::net_socket_bind(8, 0, 7000) };
+    if bind_rc != 0 {
+        print(b"  http: bind err (port busy?)\r\n");
+        let _ = unsafe { wasi::net_socket_close(8) };
+        unsafe { wasi::proc_exit(0) }
+    }
+    let listen_rc = unsafe { wasi::net_socket_listen(8, 1) };
+    if listen_rc != 0 {
+        print(b"  http: listen err\r\n");
+        let _ = unsafe { wasi::net_socket_close(8) };
+        unsafe { wasi::proc_exit(0) }
+    }
+    print(b"  http: listening on :7000\r\n");
+
+    let mut i: u32 = 0;
+    let mut accepted = false;
+    while i < ACCEPT_MAX_ITERS {
+        let rc = unsafe { wasi::net_socket_accept(8) };
+        if rc == 1 {
+            accepted = true;
+            break;
+        }
+        if rc < 0 {
+            print(b"  http: accept err\r\n");
+            break;
+        }
+        i = i.wrapping_add(1);
+    }
+
+    if accepted {
+        let sent = unsafe { wasi::net_socket_send_canned(8) };
+        if sent > 0 {
+            print(b"  http: served 200 OK\r\n");
         } else {
-            let msg: &[u8] = b"  socket close err\r\n";
-            let iov2 = wasi::Iovec { buf: msg.as_ptr(), buf_len: msg.len() as u32 };
-            let _ = unsafe { wasi::fd_write(1, &iov2, 1, &mut nwritten) };
+            print(b"  http: send err\r\n");
         }
     } else {
-        let msg: &[u8] = b"  socket create err\r\n";
-        let iov2 = wasi::Iovec { buf: msg.as_ptr(), buf_len: msg.len() as u32 };
-        let _ = unsafe { wasi::fd_write(1, &iov2, 1, &mut nwritten) };
+        print(b"  http: accept timeout, no client\r\n");
     }
+
+    let _ = unsafe { wasi::net_socket_close(8) };
 
     // SAFETY: extern fn into a host import; `-> !` on the WASM side, the
     // host fn returns `wasmi::Error::i32_exit` which traps the instance

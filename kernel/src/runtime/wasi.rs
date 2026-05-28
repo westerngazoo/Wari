@@ -184,8 +184,8 @@ pub fn register_wasi_host_fns(
     // at SLOT_NET, calls into the Tier-2 net driver, and mints/
     // revokes Socket caps in the caller's CSpace.
     use crate::cap::{
-        net_socket_bind_impl, net_socket_close_impl, net_socket_create_impl,
-        net_socket_listen_impl,
+        net_socket_accept_impl, net_socket_bind_impl, net_socket_close_impl,
+        net_socket_create_impl, net_socket_listen_impl, net_socket_send_canned_impl,
     };
     linker
         .func_wrap(
@@ -231,6 +231,31 @@ pub fn register_wasi_host_fns(
             "net_socket_listen",
             move |_: Caller<'_, Tier1HostState>, slot: u32, backlog: u32| -> i32 {
                 net_socket_listen_impl(pid, slot, backlog)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
+    // Phase-1c HTTP demo — accept + canned-send. Same closure
+    // shape as net_socket_close (single u32 slot arg). The
+    // accept impl internally drives one smoltcp poll cycle
+    // before reading socket state; the send_canned impl drives
+    // one poll after queuing the reply so the segment leaves the
+    // device on the same kernel hop.
+    linker
+        .func_wrap(
+            "wari",
+            "net_socket_accept",
+            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
+                net_socket_accept_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "net_socket_send_canned",
+            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
+                net_socket_send_canned_impl(pid, slot)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;

@@ -65,12 +65,46 @@ pub struct Tier2NetHandle {
     pub socket_bind_fn: TypedFunc<(u32, u32, u32), i32>,
     /// `wari::socket_listen(handle, backlog) -> i32` (Net-6c)
     pub socket_listen_fn: TypedFunc<(u32, u32), i32>,
+    /// `wari::socket_accept(handle) -> i32` (Phase-1c HTTP demo).
+    /// Returns 1 if connected, 0 if still listening, negative on
+    /// error. Kernel drives `poll_fn` before this call so any
+    /// pending SYN is processed first.
+    pub socket_accept_fn: TypedFunc<u32, i32>,
+    /// `wari::socket_send_canned(handle) -> i32` (Phase-1c HTTP demo).
+    /// Queues a hardcoded HTTP/1.0 200 OK reply on the socket and
+    /// flags it for FIN. Kernel drives `poll_fn` afterwards to push
+    /// the segment to the wire. Returns bytes queued or negative.
+    pub socket_send_canned_fn: TypedFunc<u32, i32>,
 }
 
 /// Boot-initialized singleton. Set once by `install` from
 /// `runtime::run_tier2_net`; read by every `poll` call from the
 /// kmain idle loop.
 static mut TIER2_NET: Option<Tier2NetHandle> = None;
+
+/// Kernel-wide monotonic tick (ms). Advanced by [`next_tick`] on
+/// every smoltcp-driving call: kmain's idle-loop `poll`, plus the
+/// new accept / send_canned host fns. Phase-1c QEMU demo timestamp
+/// — not wall-clock, just monotonic-enough for smoltcp retransmit
+/// decisions on a short-lived connection.
+static mut TICK_MS: u64 = 0;
+
+/// Advance and return the kernel-wide monotonic tick (10 ms steps).
+/// Single-hart so no atomic needed (INV-1).
+///
+/// # Safety
+/// INV-1 (single-hart). Caller must not hold a live borrow of
+/// `TICK_MS` (none exists outside this function; it is a u64 read +
+/// write under INV-1, which is sound).
+pub fn next_tick() -> u64 {
+    // SAFETY: INV-1 — single-hart, no other writer; u64 store is
+    // single instruction on RV64.
+    unsafe {
+        let t = *addr_of_mut!(TICK_MS);
+        *addr_of_mut!(TICK_MS) = t.saturating_add(10);
+        t
+    }
+}
 
 /// Install the net driver handle. Called once from
 /// `runtime::run_tier2_net` after the driver's `_start` has
@@ -181,6 +215,60 @@ pub unsafe fn socket_listen(handle: u32, backlog: u32) -> Result<i32, KernelErro
     h.socket_listen_fn
         .call(&mut h.store, (handle, backlog))
         .map_err(|_| KernelError::DriverError)
+}
+
+/// Phase-1c HTTP demo — drive one smoltcp poll, then check whether
+/// `handle` has transitioned from listening to connected. Returns 1
+/// if a connection is ready for `socket_send_canned`, 0 if still
+/// waiting, negative on driver error.
+///
+/// # Safety
+/// Same as [`socket_create`].
+pub unsafe fn socket_accept(handle: u32, tick_ms: u64) -> Result<i32, KernelError> {
+    // SAFETY: INV-1 + INV-8.
+    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
+        .expect("TIER2_NET ref always valid (static)");
+    let h = slot.as_mut().ok_or(KernelError::DriverError)?;
+    // Drive one smoltcp poll first so any pending SYN is processed
+    // into the listening socket's state before we inspect it.
+    let _ = h
+        .poll_fn
+        .call(&mut h.store, tick_ms)
+        .map_err(|_| KernelError::DriverError)?;
+    h.socket_accept_fn
+        .call(&mut h.store, handle)
+        .map_err(|_| KernelError::DriverError)
+}
+
+/// Phase-1c HTTP demo — queue the canned HTTP/1.0 200 OK reply on a
+/// connected socket, then drive one smoltcp poll cycle so the reply
+/// (plus the FIN smoltcp now owes after the canned-send's
+/// `socket.close()`) leaves the device on this same kernel hop.
+/// Returns bytes queued or negative on driver error.
+///
+/// Why drive poll after, not before: without it, the queued reply
+/// waits for the next kmain idle-loop tick. The Tier-1 busy-poll
+/// would already have called `net_socket_close` to release the
+/// smoltcp slot before the segment ever went out, and we would RST
+/// the client. Inlining the post-send poll guarantees the reply
+/// arrives before the slot is freed.
+///
+/// # Safety
+/// Same as [`socket_create`].
+pub unsafe fn socket_send_canned(handle: u32, tick_ms: u64) -> Result<i32, KernelError> {
+    // SAFETY: INV-1 + INV-8.
+    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
+        .expect("TIER2_NET ref always valid (static)");
+    let h = slot.as_mut().ok_or(KernelError::DriverError)?;
+    let queued = h
+        .socket_send_canned_fn
+        .call(&mut h.store, handle)
+        .map_err(|_| KernelError::DriverError)?;
+    let _ = h
+        .poll_fn
+        .call(&mut h.store, tick_ms)
+        .map_err(|_| KernelError::DriverError)?;
+    Ok(queued)
 }
 
 /// `true` if `install` has been called. Used by the kmain idle

@@ -136,6 +136,15 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
         let socket_listen_fn = instance
             .get_typed_func::<(u32, u32), i32>(&store, "socket_listen")
             .map_err(|_| KernelError::DriverError)?;
+        // Phase-1c HTTP demo — resolve accept + canned-send exports.
+        // Pure state-check / write fns; kernel-side wrappers in
+        // `tier2_net` drive `poll_fn` on either side.
+        let socket_accept_fn = instance
+            .get_typed_func::<u32, i32>(&store, "socket_accept")
+            .map_err(|_| KernelError::DriverError)?;
+        let socket_send_canned_fn = instance
+            .get_typed_func::<u32, i32>(&store, "socket_send_canned")
+            .map_err(|_| KernelError::DriverError)?;
         let handle = tier2_net::Tier2NetHandle {
             instance,
             store,
@@ -144,6 +153,8 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
             socket_close_fn,
             socket_bind_fn,
             socket_listen_fn,
+            socket_accept_fn,
+            socket_send_canned_fn,
         };
         // SAFETY: INV-1 (single-hart) + INV-8 (boot-time post-init)
         // + one-time install pattern. `kmain` orders this call
