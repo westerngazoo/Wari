@@ -853,6 +853,12 @@ mod nic_iface {
     static mut SOCKET_BOUND_PORT: [u16; SOCKET_BACKING_LEN] =
         [0u16; SOCKET_BACKING_LEN];
 
+    /// Monotonic counter used as smoltcp timestamp. Incremented on
+    /// every poll() call so TCP retry timers advance even without a
+    /// real wall-clock source. Not wall-clock accurate — sufficient
+    /// for the Phase-1c demo where ARP/SYN latency << retry window.
+    static mut POLL_TICK: u64 = 0;
+
     /// Allocate a TCP smoltcp socket. Returns the raw
     /// `SocketHandle` value as i32 on success, negative errno on
     /// failure (`-3` = E_NOMEM if the buffer pool is exhausted).
@@ -960,6 +966,16 @@ mod nic_iface {
         use smoltcp::socket::tcp;
         // SAFETY: single-thread driver (INV-1 generalized).
         unsafe {
+            // Drive smoltcp before inspecting socket state. Without this
+            // poll, the stack never processes incoming ARP or TCP SYNs —
+            // the socket stays in Listen forever even when the peer has
+            // already sent a SYN. POLL_TICK is a monotonic counter that
+            // serves as the smoltcp timestamp; TCP retry timers advance
+            // proportionally to poll rate rather than wall clock, which is
+            // sufficient for the Phase-1c demo.
+            POLL_TICK = POLL_TICK.wrapping_add(1);
+            poll(POLL_TICK);
+
             let sockets = match &mut *addr_of_mut!(SOCKETS) {
                 Some(s) => s,
                 None => return -2,
@@ -1039,6 +1055,11 @@ mod nic_iface {
             // Signal end-of-response so smoltcp emits FIN after the
             // reply drains. The remote sees a clean close.
             socket.close();
+            // Poll immediately so the queued reply + FIN are handed to
+            // the NIC DMA in this same call, rather than waiting for the
+            // next accept-loop iteration.
+            POLL_TICK = POLL_TICK.wrapping_add(1);
+            poll(POLL_TICK);
             queued
         }
     }
