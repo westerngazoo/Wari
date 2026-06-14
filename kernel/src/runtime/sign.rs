@@ -59,12 +59,23 @@ pub const SIGNATURE_LEN: usize = 64;
 /// Total fixed header length.
 pub const HEADER_LEN: usize = PUBKEY_LEN + SIGNATURE_LEN;
 
-/// Compiled-in accepted public key.
+/// Compiled-in accepted public key — **Phase-0 DEV KEY**.
 ///
-/// **TODO(parent gate)**: replace this `[0u8; 32]` placeholder with the
-/// 32-byte pubkey from `scripts/dev-keys/wari-dev.ed25519.pub` after the
-/// keypair is generated. Until replaced, every signed envelope is
-/// rejected (which is the safe failure mode).
+/// These 32 bytes are the public half of the dev keypair committed at
+/// `scripts/dev-keys/wari-dev.ed25519.{pub,sec}`. The matching secret
+/// key is in-tree by design, so every contributor and CI can re-sign
+/// Tier-2 driver blobs bit-for-bit from a clean checkout (R8). See
+/// `scripts/dev-keys/README.md` for the full threat model and rationale.
+///
+/// **Before any production deploy** this constant MUST be replaced
+/// with the pubkey of a Phase-1+ signing key whose secret never enters
+/// the repo (offline signer / HSM / hardware token — pipeline TBD per
+/// `dev-keys/README.md`). Driver blobs must then be re-signed with the
+/// new key and re-flashed; mixing keys yields `KernelError::BadWasm`
+/// on every Tier-2 load (INV-13), which is the safe failure mode.
+///
+/// Replacing only this constant without re-signing the drivers is
+/// itself safe: every signed envelope will be rejected.
 pub const ACCEPTED_PUBKEY: [u8; PUBKEY_LEN] = [
     0xf6, 0x09, 0xfc, 0x9a, 0xe4, 0x6f, 0xd9, 0x09,
     0xbe, 0x0f, 0x6d, 0xf9, 0x78, 0x9d, 0xc4, 0x32,
