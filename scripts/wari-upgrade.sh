@@ -29,45 +29,54 @@ _wari_embedded_build() {
     fi
 }
 
-# Internal: pull origin/main with no merge surprises. Returns:
+# Internal: pull a branch and verify the resulting wari.bin. Returns:
 #   0  + sets BUILD_NUM + EXPECTED_MD5      — repo is at latest
 #   1                                        — abort with reason already printed
+#
+# $1 — target branch (default: "main"). When "main" is the target the
+#      function also enforces that the repo is currently ON main, so an
+#      accidental `wari go` from a feature branch is a hard error.
+#      Any other branch skips that check (operator used go-branch explicitly).
 _wari_pull_and_verify() {
+    local target="${1:-main}"
     cd "$WARI_DIR" || { echo "ERROR: $WARI_DIR not found"; return 1; }
 
-    local branch
-    branch=$(git rev-parse --abbrev-ref HEAD)
-    if [ "$branch" != "main" ]; then
-        echo "ERROR: VF2 repo is on branch '$branch', expected 'main'"
-        echo "       Fix:  cd $WARI_DIR && git checkout main"
-        return 1
+    # Strict guard: plain `wari go` must be run from main. The feature-branch
+    # path skips this check because the operator made an explicit choice.
+    if [ "$target" = "main" ]; then
+        local current_branch
+        current_branch=$(git rev-parse --abbrev-ref HEAD)
+        if [ "$current_branch" != "main" ]; then
+            echo "ERROR: VF2 repo is on branch '$current_branch', expected 'main'"
+            echo "       To flash main:          cd $WARI_DIR && git checkout main && wari go"
+            echo "       To flash a feature branch: wari go-branch $current_branch"
+            return 1
+        fi
     fi
 
-    echo "Fetching origin/main..."
-    git fetch origin main 2>&1 | sed 's/^/  /' || {
-        echo "ERROR: git fetch failed"
+    echo "Fetching origin/$target..."
+    git fetch origin "$target" 2>&1 | sed 's/^/  /' || {
+        echo "ERROR: git fetch origin $target failed"
         return 1
     }
 
     local local_head remote_head
     local_head=$(git rev-parse HEAD)
-    remote_head=$(git rev-parse origin/main)
+    remote_head=$(git rev-parse "origin/$target")
     echo "  local  HEAD:  ${local_head:0:10}"
     echo "  remote HEAD:  ${remote_head:0:10}"
 
     if [ "$local_head" = "$remote_head" ]; then
         echo "  (already at latest — no pull needed)"
     else
-        # Snapshot the wari-upgrade.sh hash before the reset; if the
-        # reset brings in a new version of THIS script, we need to
-        # re-source it in the caller's shell so the next 'wari ...'
-        # invocation uses the new function. Caller signal: we set
-        # WARI_SCRIPT_CHANGED=1 and the top-level wari() catches it.
+        # Snapshot wari-upgrade.sh before reset so we can detect if this pull
+        # ships a new version of THIS script. If it does, re-source it in the
+        # caller's shell (WARI_SCRIPT_CHANGED=1 signals the top-level wari()).
         local script_path="scripts/wari-upgrade.sh"
         local script_before script_after
         script_before=$(md5sum "$script_path" 2>/dev/null | awk '{print $1}')
-        echo "Hard-reset to origin/main..."
-        git reset --hard origin/main 2>&1 | sed 's/^/  /' || {
+        echo "Hard-reset to origin/$target..."
+        git reset --hard "origin/$target" 2>&1 | sed 's/^/  /' || {
             echo "ERROR: git reset failed"
             return 1
         }
@@ -157,12 +166,8 @@ _wari_countdown_and_reboot() {
 wari() {
     case "${1:-help}" in
         upgrade|up)
-            echo "=== Wari Upgrade ==="
-            _wari_pull_and_verify || return 1
-            # If the pull brought in a new version of this script,
-            # re-source it so the next call uses the fresh function.
-            # Then transparently re-invoke the same command so the
-            # operator never has to remember to source manually.
+            echo "=== Wari Upgrade (main) ==="
+            _wari_pull_and_verify main || return 1
             if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
                 echo "  re-sourcing scripts/wari-upgrade.sh and continuing..."
                 unset WARI_SCRIPT_CHANGED
@@ -178,15 +183,11 @@ wari() {
             echo ""
             ;;
         go)
-            # Upgrade + reboot in one shot, with confirm gate so a
-            # bad pull cannot silently reboot into the wrong kernel.
-            # Pass -y to skip the confirm.
+            # Pull origin/main, flash, confirm, reboot. -y skips confirm.
             local skip_confirm=""
             [ "${2:-}" = "-y" ] && skip_confirm=1
-            echo "=== Wari Go ==="
-            _wari_pull_and_verify || return 1
-            # If the pull brought in a new wari-upgrade.sh, re-source
-            # and re-invoke. The operator never has to source by hand.
+            echo "=== Wari Go (main) ==="
+            _wari_pull_and_verify main || return 1
             if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
                 echo "  re-sourcing scripts/wari-upgrade.sh and continuing..."
                 unset WARI_SCRIPT_CHANGED
@@ -210,8 +211,53 @@ wari() {
                 echo "         Push side may have a stale cargo cache."
             fi
             # Read from /dev/tty so a recursive re-source call cannot
-            # swallow stdin. -y flag (skip_confirm=1) bypasses the prompt
-            # for non-interactive / scripted runs.
+            # swallow stdin. -y skips for scripted runs.
+            if [ -z "$skip_confirm" ]; then
+                read -r -p "Reboot now? [y/N] " ans </dev/tty
+                case "$ans" in
+                    y|Y|yes|YES) ;;
+                    *) echo "Aborted. Run 'wari reboot' when ready."; return 0 ;;
+                esac
+            fi
+            _wari_countdown_and_reboot 5
+            ;;
+        go-branch)
+            # Pull a specific branch and flash it. For silicon testing of
+            # feature branches before merge. Usage: wari go-branch <branch> [-y]
+            local target_branch="${2:-}"
+            local skip_confirm=""
+            [ "${3:-}" = "-y" ] && skip_confirm=1
+            if [ -z "$target_branch" ]; then
+                echo "ERROR: usage: wari go-branch <branch-name> [-y]"
+                echo "       Example: wari go-branch phase-1c/net-6d-http-demo"
+                return 1
+            fi
+            echo "=== Wari Go-Branch: $target_branch ==="
+            echo "  WARNING: flashing a non-main branch for silicon testing."
+            echo "           Do not leave this as the permanent /boot/kernel.bin."
+            echo ""
+            _wari_pull_and_verify "$target_branch" || return 1
+            if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
+                echo "  re-sourcing scripts/wari-upgrade.sh and continuing..."
+                unset WARI_SCRIPT_CHANGED
+                # shellcheck source=/dev/null
+                source "$WARI_DIR/scripts/wari-upgrade.sh"
+                wari "$@"
+                return $?
+            fi
+            _wari_flash_and_verify || return 1
+            echo ""
+            local flashed_build_after
+            flashed_build_after=$(_wari_embedded_build "$WARI_KERNEL")
+            echo "========================================"
+            echo "  READY TO REBOOT  [branch: $target_branch]"
+            echo "    embedded build:  $flashed_build_after"
+            echo "    .build_number:   $BUILD_NUM"
+            echo "    md5:             $EXPECTED_MD5"
+            echo "========================================"
+            if [ "$flashed_build_after" != "$BUILD_NUM" ] && [ "$BUILD_NUM" != "?" ]; then
+                echo "WARNING: embedded ($flashed_build_after) != .build_number ($BUILD_NUM)"
+            fi
             if [ -z "$skip_confirm" ]; then
                 read -r -p "Reboot now? [y/N] " ans </dev/tty
                 case "$ans" in
@@ -300,12 +346,14 @@ wari() {
         help|*)
             echo "Usage: wari <command>"
             echo ""
-            echo "  upgrade  (up)  Pull origin/main, verify md5, flash /boot/kernel.bin"
-            echo "  go [-y]        Upgrade + confirm + reboot.  -y skips the confirm."
-            echo "  reboot   (rb)  Sanity-check flashed md5 vs repo, then reboot."
-            echo "  status   (st)  Show repo HEAD vs origin, flashed md5 vs repo md5."
-            echo "  demo           Status + reboot (no pull) — for presentations."
-            echo "  boot-log (log) Tail Debian dmesg + pointer to COM7 serial."
+            echo "  upgrade  (up)          Pull origin/main, verify md5, flash /boot/kernel.bin"
+            echo "  go [-y]                Upgrade (main) + confirm + reboot. -y skips confirm."
+            echo "  go-branch <br> [-y]   Pull a feature branch, flash, confirm, reboot."
+            echo "                          Example: wari go-branch phase-1c/net-6d-http-demo"
+            echo "  reboot   (rb)          Sanity-check flashed md5 vs repo, then reboot."
+            echo "  status   (st)          Show repo HEAD vs origin, flashed md5 vs repo md5."
+            echo "  demo                   Status + reboot (no pull) — for presentations."
+            echo "  boot-log (log)         Tail Debian dmesg + pointer to COM7 serial."
             echo ""
             ;;
     esac
