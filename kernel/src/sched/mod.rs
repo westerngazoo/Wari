@@ -161,9 +161,21 @@ pub fn run() -> Result<(), KernelError> {
 
         // Mark Running, run, mark terminated. Three short borrows
         // of `processes()` so we never alias.
+        //
+        // Each borrow `?`-propagates `KernelError::NoSuchProcess`
+        // rather than `.unwrap()`-panicking. `pick_next_tenant`
+        // only returns IDs of `Some(Process)` entries, so the
+        // `None` arm should be unreachable; using `?` makes R5
+        // (no panics in syscall paths) structural rather than
+        // implicit. If INV-1 ever breaks or `pick_next_tenant`
+        // ever has a bug, the scheduler returns an error and
+        // `kmain` halts cleanly instead of panicking.
         {
             let table = processes();
-            table[proc_id as usize].as_mut().unwrap().state = ProcessState::Running;
+            let proc = table[proc_id as usize]
+                .as_mut()
+                .ok_or(KernelError::NoSuchProcess)?;
+            proc.state = ProcessState::Running;
         }
 
         kprintln!(
@@ -175,7 +187,10 @@ pub fn run() -> Result<(), KernelError> {
         // ModuleId::Tier1Hello, but the dispatch is shaped to grow.
         let module_id = {
             let table = processes();
-            table[proc_id as usize].as_ref().unwrap().module_id
+            table[proc_id as usize]
+                .as_ref()
+                .ok_or(KernelError::NoSuchProcess)?
+                .module_id
         };
         let blob = blob_for(module_id);
         let result = runtime::run_tier1(proc_id, blob, module_id);
@@ -198,7 +213,10 @@ pub fn run() -> Result<(), KernelError> {
         };
         {
             let table = processes();
-            table[proc_id as usize].as_mut().unwrap().state = final_state;
+            let proc = table[proc_id as usize]
+                .as_mut()
+                .ok_or(KernelError::NoSuchProcess)?;
+            proc.state = final_state;
         }
     }
 }
