@@ -130,6 +130,20 @@ The Tier-2 choice keeps Wari consistent with the UART pattern:
 via cap-mediated IPC." Networking just adds a non-trivial
 protocol stack to that driver.
 
+**Threat-model caveat.** Putting smoltcp in Tier-2 cleanly contains
+*cross-tenant* attacks (tenant A cannot reach tenant B's sockets via
+a smoltcp bug, because the cap layer + per-socket-cap state prevents
+it). It does **not** contain a *remote-attacker* exploit of smoltcp's
+packet parser — there is one NIC, one driver, one smoltcp instance
+per board, so a parser-level CVE compromises every tenant's traffic
+state until a patched signed driver is re-flashed. See
+[`security-model.md`](security-model.md) §"Network attack surface" for
+the full split and mitigation notes (smoltcp fuzz, patch cadence,
+multi-NIC partitioning). This caveat is a Phase-1c reality, not a
+design flaw; it is the correct trade-off vs. Tier-0 (would bloat the
+kernel TCB by 30 KLOC) or per-tenant Tier-1 stacks (rejected as poor
+ergonomics above).
+
 ### Why smoltcp and not a custom stack
 
 `smoltcp` (https://github.com/smoltcp-rs/smoltcp) is a no_std,
