@@ -28,7 +28,13 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-wasmi = { version = "=1.0.9", default-features = false }
+# MUST stay in lockstep with the version pinned in /kernel/Cargo.toml.
+# Otherwise the fuzz harness exercises a different `wasmi` than the
+# kernel actually embeds, producing false assurance (the historical
+# bug that surfaced in the May-2026 adversarial review — fuzz was on
+# `=1.0.9` while kernel shipped `=0.32.3`). Bump both pins together
+# if/when the kernel wasmi is rev'd.
+wasmi = { version = "=0.32.3", default-features = false }
 wari-abi = { path = "../../abi-shared" }
 
 [[bin]]
