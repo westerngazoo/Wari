@@ -184,8 +184,8 @@ pub fn register_wasi_host_fns(
     // at SLOT_NET, calls into the Tier-2 net driver, and mints/
     // revokes Socket caps in the caller's CSpace.
     use crate::cap::{
-        net_socket_bind_impl, net_socket_close_impl, net_socket_create_impl,
-        net_socket_listen_impl,
+        net_socket_accept_impl, net_socket_bind_impl, net_socket_close_impl,
+        net_socket_create_impl, net_socket_listen_impl, net_socket_send_canned_impl,
     };
     linker
         .func_wrap(
@@ -205,15 +205,60 @@ pub fn register_wasi_host_fns(
             },
         )
         .map_err(|_| KernelError::BadWasm)?;
-    // BISECT NOTE: net_socket_bind / net_socket_listen registration
-    // is currently disabled here. With it on, Tier-1 instantiate
-    // hangs (build 58 trace) even when hello does not import them.
-    // The driver-side bind/listen exports + kernel-side typed-func
-    // resolution work fine (boot self-test passes). Investigating
-    // in Net-6c follow-up; the host fns + impls are still defined
-    // and exported from cap, so re-enabling these two
-    // registrations is one comment-removal away.
-    let _ = (net_socket_bind_impl, net_socket_listen_impl);
+    // PR Net-6c — bind / listen registrations. Previously disabled
+    // because of a Tier-1-instantiate hang observed in build 58
+    // (driver-side bind/listen exports + kernel-side typed-func
+    // resolution worked fine even then — the boot self-test passed,
+    // see kmain). Re-enabled at build 123: the hang does not
+    // reproduce, almost certainly closed out by the Net-5b/Net-6b
+    // stack that landed between then and now. If a future build
+    // re-introduces the symptom, the suspect is anything that
+    // touches `Linker::func_wrap` for Net cap-gated host fns; the
+    // first thing to check is whether the cap pool / Socket pool
+    // initialization order changed.
+    linker
+        .func_wrap(
+            "wari",
+            "net_socket_bind",
+            move |_: Caller<'_, Tier1HostState>, slot: u32, ip_be: u32, port: u32| -> i32 {
+                net_socket_bind_impl(pid, slot, ip_be, port)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "net_socket_listen",
+            move |_: Caller<'_, Tier1HostState>, slot: u32, backlog: u32| -> i32 {
+                net_socket_listen_impl(pid, slot, backlog)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
+    // Phase-1c HTTP demo — accept + canned-send. Same closure
+    // shape as net_socket_close (single u32 slot arg). The
+    // accept impl internally drives one smoltcp poll cycle
+    // before reading socket state; the send_canned impl drives
+    // one poll after queuing the reply so the segment leaves the
+    // device on the same kernel hop.
+    linker
+        .func_wrap(
+            "wari",
+            "net_socket_accept",
+            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
+                net_socket_accept_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "net_socket_send_canned",
+            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
+                net_socket_send_canned_impl(pid, slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
 
     Ok(())
 }
