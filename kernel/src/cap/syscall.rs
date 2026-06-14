@@ -1078,6 +1078,66 @@ pub fn net_socket_listen_impl(proc_id: u8, slot: u32, backlog: u32) -> i32 {
     }
 }
 
+/// `wari::net_socket_accept(slot) -> i32` (Phase-1c HTTP demo).
+///
+/// Caller must hold a Socket cap with WRITE rights at `slot`.
+/// Returns 1 if a connection is ready for `net_socket_send_canned`,
+/// 0 if still listening, negative errno otherwise.
+///
+/// The kernel-side wrapper drives one smoltcp poll cycle before
+/// inspecting the socket state so a pending SYN is processed first.
+/// Tier-1 typically busy-loops on this until it returns 1.
+pub fn net_socket_accept_impl(proc_id: u8, slot: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_INVAL;
+    }
+    if slot >= CSPACE_SLOTS as u32 {
+        return E_INVAL;
+    }
+    let smoltcp_handle = match resolve_socket_handle(proc_id, slot as u8) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let tick = crate::runtime::tier2_net::next_tick();
+    // SAFETY: install ran during boot.
+    match unsafe { crate::runtime::tier2_net::socket_accept(smoltcp_handle, tick) } {
+        Ok(rc) => rc,
+        Err(_) => E_NOMEM,
+    }
+}
+
+/// `wari::net_socket_send_canned(slot) -> i32` (Phase-1c HTTP demo).
+///
+/// Caller must hold a Socket cap with WRITE rights at `slot`.
+/// Queues a hardcoded HTTP/1.0 200 OK reply on the connected socket
+/// and flags it for FIN. Kernel-side wrapper drives one smoltcp
+/// poll cycle after the queue so the reply (plus FIN) leaves the
+/// device on the same kernel hop.
+///
+/// Returns bytes queued for transmit on success, negative errno
+/// otherwise.
+///
+/// Demo-only: generic `socket_send(slot, buf, len)` is queued for
+/// after this proves the path works end-to-end.
+pub fn net_socket_send_canned_impl(proc_id: u8, slot: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_INVAL;
+    }
+    if slot >= CSPACE_SLOTS as u32 {
+        return E_INVAL;
+    }
+    let smoltcp_handle = match resolve_socket_handle(proc_id, slot as u8) {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
+    let tick = crate::runtime::tier2_net::next_tick();
+    // SAFETY: install ran during boot.
+    match unsafe { crate::runtime::tier2_net::socket_send_canned(smoltcp_handle, tick) } {
+        Ok(rc) => rc,
+        Err(_) => E_NOMEM,
+    }
+}
+
 /// Helper shared by every Socket-cap-gated host fn: validate the
 /// cap at `slot` is a Socket cap with WRITE rights, then read the
 /// driver-side smoltcp handle from the Socket pool entry.

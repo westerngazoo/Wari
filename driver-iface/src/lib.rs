@@ -447,6 +447,33 @@ pub trait NetDriver {
     /// success, negative errno otherwise (`E_INVAL` if the
     /// socket has no bound port yet, smoltcp listen failure).
     fn socket_listen(handle: u32, backlog: u32) -> i32;
+
+    /// Phase-1c HTTP demo — report whether the listening socket
+    /// at `handle` has transitioned from `Listen` to `Established`.
+    /// Pure state check; the kernel drives `poll` on either side
+    /// of this call so smoltcp processes pending SYNs first.
+    ///
+    /// Returns:
+    /// - `1` if a connection is ready for `socket_send_canned`,
+    /// - `0` if still listening / waiting,
+    /// - negative errno on driver error (`E_INVAL` for an unknown
+    ///   handle or a socket in an unexpected state).
+    ///
+    /// Demo-only: when generic `socket_recv`/`socket_send` land,
+    /// `accept` will return a fresh handle and `send_canned` will
+    /// be retired in favour of `socket_send(handle, buf, len)`.
+    fn socket_accept(handle: u32) -> i32;
+
+    /// Phase-1c HTTP demo — queue a hardcoded HTTP/1.0 200 OK
+    /// reply on a connected socket and signal FIN. Pure write;
+    /// the kernel drives `poll` afterwards so the segment leaves
+    /// the device on the same kernel hop.
+    ///
+    /// Returns bytes queued for transmit on success, negative
+    /// errno on driver error.
+    ///
+    /// Demo-only: see `socket_accept` for the migration path.
+    fn socket_send_canned(handle: u32) -> i32;
 }
 
 /// Socket protocol selector — passed as the `proto` arg of
@@ -717,7 +744,7 @@ macro_rules! wari_uart_driver {
 /// adding them to the manifest would make the sign-tool refuse
 /// the binary as "manifest declares an import the wasm does not
 /// request". Re-add them when the driver actually calls them.
-pub const NET_MANIFEST_SIZE: usize = manifest_size(9, 7);
+pub const NET_MANIFEST_SIZE: usize = manifest_size(11, 7);
 
 /// Declare a Tier-2 network driver.
 ///
@@ -813,6 +840,18 @@ macro_rules! wari_net_driver {
             <$t as $crate::NetDriver>::socket_listen(handle, backlog)
         }
 
+        /// `wari::socket_accept(handle) -> i32` (Phase-1c HTTP demo)
+        #[no_mangle]
+        pub extern "C" fn socket_accept(handle: u32) -> i32 {
+            <$t as $crate::NetDriver>::socket_accept(handle)
+        }
+
+        /// `wari::socket_send_canned(handle) -> i32` (Phase-1c HTTP demo)
+        #[no_mangle]
+        pub extern "C" fn socket_send_canned(handle: u32) -> i32 {
+            <$t as $crate::NetDriver>::socket_send_canned(handle)
+        }
+
         // ─── manifest ──────────────────────────────────────────
         #[link_section = "wari_driver_manifest"]
         #[used]
@@ -821,15 +860,17 @@ macro_rules! wari_net_driver {
             $crate::build_manifest::<{ $crate::NET_MANIFEST_SIZE }>(
                 $crate::DriverKind::Net,
                 &[
-                    (b"_start",       $crate::FuncSig::UnitUnit),
-                    (b"poll",         $crate::FuncSig::U64I32),
-                    (b"tx_send",      $crate::FuncSig::U32xU32I32),
-                    (b"rx_pop",       $crate::FuncSig::UnitU64),
-                    (b"rx_recycle",   $crate::FuncSig::U32I32),
-                    (b"socket_create",$crate::FuncSig::U32I32),
-                    (b"socket_close", $crate::FuncSig::U32I32),
-                    (b"socket_bind",  $crate::FuncSig::U32x3I32),
-                    (b"socket_listen",$crate::FuncSig::U32xU32I32),
+                    (b"_start",            $crate::FuncSig::UnitUnit),
+                    (b"poll",              $crate::FuncSig::U64I32),
+                    (b"tx_send",           $crate::FuncSig::U32xU32I32),
+                    (b"rx_pop",            $crate::FuncSig::UnitU64),
+                    (b"rx_recycle",        $crate::FuncSig::U32I32),
+                    (b"socket_create",     $crate::FuncSig::U32I32),
+                    (b"socket_close",      $crate::FuncSig::U32I32),
+                    (b"socket_bind",       $crate::FuncSig::U32x3I32),
+                    (b"socket_listen",     $crate::FuncSig::U32xU32I32),
+                    (b"socket_accept",     $crate::FuncSig::U32I32),
+                    (b"socket_send_canned",$crate::FuncSig::U32I32),
                 ],
                 &[
                     // Names match the driver's #[link_name = "..."]
