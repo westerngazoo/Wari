@@ -128,9 +128,15 @@ pub extern "C" fn handle_trap(frame: &mut TrapFrame) {
     if is_interrupt {
         match code {
             SCAUSE_S_TIMER => {
-                // Phase 0 has no scheduler — just clear the pending bit
-                // so the timer doesn't re-fire immediately, then return.
+                // Clear the pending bit so the timer doesn't re-fire.
                 ack_timer();
+                // Check for Ctrl-R (0x12) on every timer tick so the
+                // reboot key works even while the scheduler is running
+                // a Tier-1 loop that never yields (e.g. HTTP accept).
+                if let Some(0x12) = crate::mmio::uart_ns16550::try_read_byte() {
+                    kprintln!("\r\n[reboot] Ctrl-R received, restarting via SBI...");
+                    crate::sbi::system_reset();
+                }
             }
             SCAUSE_S_EXT => {
                 // PLIC-routed external interrupt (Phase 1b PR Net-1).
