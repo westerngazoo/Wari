@@ -2635,31 +2635,30 @@ pub fn driver_start() {
         // we never programmed — reads as zeros, AE=0 on JH7110
         // post-reset → MAC accepts NOTHING).
         //
-        // Two writes to fix:
-        //   MAC_ADDRESS0_HIGH (0x300) = 0x80004084  (AE=1 + bytes 5-4 of MAC = 84:40)
-        //   MAC_ADDRESS0_LOW  (0x304) = 0x390000C7? (bytes 3-0 = 39:00:CF:6C reversed)
-        //   actually MAC = 6c:cf:39:00:40:84
-        //   LO = bytes [3:0] = 39 00 cf 6c LE → 0x390000? hmm
+        // Two writes: program GMAC1 MAC_ADDRESS0 registers.
+        // MAC = 6c:cf:39:00:40:85 (GMAC1 / eth1).
+        //   MAC_ADDRESS0_HIGH (0x300) = 0x80008540 (AE=1 + b5=0x85, b4=0x40)
+        //   MAC_ADDRESS0_LOW  (0x304) = 0x0039CF6C (b3..b0 = 00:39:cf:6c LE)
+        //
         //   The DWMAC stores MAC bytes [0..3] in MAC_ADDRESS0_LO
         //   little-endian, bytes [4..5] in MAC_ADDRESS0_HIGH low 16
         //   bits. So:
         //     LO = (b[3]<<24)|(b[2]<<16)|(b[1]<<8)|b[0]
-        //        = 0x003900CF | wait
-        //   For MAC = 6c:cf:39:00:40:84:
-        //     b0=0x6c, b1=0xcf, b2=0x39, b3=0x00, b4=0x40, b5=0x84
+        //   For MAC = 6c:cf:39:00:40:85 (GMAC1 / eth1):
+        //     b0=0x6c, b1=0xcf, b2=0x39, b3=0x00, b4=0x40, b5=0x85
         //     LO = (b3<<24)|(b2<<16)|(b1<<8)|b0
         //        = 0x00000000 | 0x00390000 | 0x0000CF00 | 0x0000006C
         //        = 0x0039CF6C
         //     HI = (AE<<31) | (b5<<8) | b4
-        //        = 0x80000000 | 0x00008400 | 0x00000040
-        //        = 0x80008440
+        //        = 0x80000000 | 0x00008500 | 0x00000040
+        //        = 0x80008540
         //
         //   Belt-and-braces: also enable promiscuous mode in
         //   MAC_PACKET_FILTER (0x008) bit 0. That makes the MAC
         //   accept every frame regardless of dst MAC, so even if
         //   the addr programming is wrong we still see traffic.
         let mac_lo: u32 = 0x0039_CF6C;
-        let mac_hi: u32 = 0x8000_8440;
+        let mac_hi: u32 = 0x8000_8540;
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x300, mac_hi) };
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x304, mac_lo) };
 
@@ -2842,11 +2841,10 @@ pub fn driver_start() {
             vf2_state::LIN_BASE = lin_base;
         }
 
-        // MAC bytes from EEPROM (programmed earlier into MAC_ADDR0):
-        // 6c:cf:39:00:40:84 → low = 0x0039CF6C, high = 0x80008440
-        // (high has AE bit; pull the bytes from the constant we
-        // already have).
-        let mac: [u8; 6] = [0x6c, 0xCF, 0x39, 0x00, 0x40, 0x84];
+        // GMAC1 MAC from EEPROM (eth1, the OpenWrt-connected port):
+        // 6c:cf:39:00:40:85 → low = 0x0039CF6C, high = 0x80008540
+        // (high has AE bit; b5=0x85, b4=0x40)
+        let mac: [u8; 6] = [0x6c, 0xCF, 0x39, 0x00, 0x40, 0x85];
 
         // Kick smoltcp Interface up. nic_iface owns the static
         // INTERFACE / SOCKETS slots; init populates them.
