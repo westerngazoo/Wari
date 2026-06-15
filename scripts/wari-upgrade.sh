@@ -33,26 +33,16 @@ _wari_embedded_build() {
 #   0  + sets BUILD_NUM + EXPECTED_MD5      — repo is at latest
 #   1                                        — abort with reason already printed
 #
-# $1 — target branch (default: "main"). When "main" is the target the
-#      function also enforces that the repo is currently ON main, so an
-#      accidental `wari go` from a feature branch is a hard error.
-#      Any other branch skips that check (operator used go-branch explicitly).
+# $1 — target branch. Default: whatever branch the VF2 repo is CURRENTLY
+#      checked out on. `wari go` therefore always pulls the latest of the
+#      branch you're tracking — main or a feature branch — with no guard
+#      and no branch typing. Use `wari go-branch <b>` to switch branches.
+#      Always git fetch + git reset --hard (never git pull), so a repo
+#      that has diverged from origin (every deploy commits wari.bin) can
+#      never deadlock on "divergent branches".
 _wari_pull_and_verify() {
-    local target="${1:-main}"
     cd "$WARI_DIR" || { echo "ERROR: $WARI_DIR not found"; return 1; }
-
-    # Strict guard: plain `wari go` must be run from main. The feature-branch
-    # path skips this check because the operator made an explicit choice.
-    if [ "$target" = "main" ]; then
-        local current_branch
-        current_branch=$(git rev-parse --abbrev-ref HEAD)
-        if [ "$current_branch" != "main" ]; then
-            echo "ERROR: VF2 repo is on branch '$current_branch', expected 'main'"
-            echo "       To flash main:          cd $WARI_DIR && git checkout main && wari go"
-            echo "       To flash a feature branch: wari go-branch $current_branch"
-            return 1
-        fi
-    fi
+    local target="${1:-$(git rev-parse --abbrev-ref HEAD)}"
 
     echo "Fetching origin/$target..."
     git fetch origin "$target" 2>&1 | sed 's/^/  /' || {
@@ -166,8 +156,8 @@ _wari_countdown_and_reboot() {
 wari() {
     case "${1:-help}" in
         upgrade|up)
-            echo "=== Wari Upgrade (main) ==="
-            _wari_pull_and_verify main || return 1
+            echo "=== Wari Upgrade ($(git -C "$WARI_DIR" rev-parse --abbrev-ref HEAD)) ==="
+            _wari_pull_and_verify || return 1
             if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
                 echo "  re-sourcing scripts/wari-upgrade.sh and continuing..."
                 unset WARI_SCRIPT_CHANGED
@@ -183,11 +173,13 @@ wari() {
             echo ""
             ;;
         go)
-            # Pull origin/main, flash, confirm, reboot. -y skips confirm.
+            # Pull the latest of the CURRENT branch, flash, confirm,
+            # reboot. -y skips confirm. Follows whatever branch the VF2
+            # is on — no main hard-coding, no branch typing.
             local skip_confirm=""
             [ "${2:-}" = "-y" ] && skip_confirm=1
-            echo "=== Wari Go (main) ==="
-            _wari_pull_and_verify main || return 1
+            echo "=== Wari Go ($(git -C "$WARI_DIR" rev-parse --abbrev-ref HEAD)) ==="
+            _wari_pull_and_verify || return 1
             if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
                 echo "  re-sourcing scripts/wari-upgrade.sh and continuing..."
                 unset WARI_SCRIPT_CHANGED
