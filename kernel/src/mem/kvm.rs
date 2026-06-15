@@ -47,54 +47,24 @@ const VIRTIO_MMIO_BASE: usize = 0x1000_1000;
 #[cfg(feature = "qemu")]
 const VIRTIO_MMIO_LEN:  usize = 0x8000;
 
-/// JH7110 GMAC0 register window — 64 KiB at 0x16030000 covers
-/// every register group the Phase-1c driver touches (MAC config,
-/// MMC counters, MTL queues, DMA channel-N descriptors). vf2-only.
-/// Added in PR Phase-1c-1.6 once the page-allocator pool was sized
-/// to 256 pages (build 69).
+/// JH7110 GMAC1 register window — 64 KiB at 0x16040000. Phase-1c-10:
+/// switched from GMAC0 (eth0, 0x16030000) to GMAC1 (eth1, 0x16040000)
+/// because eth1 is the port connected to the OpenWrt LAN (192.168.50.x).
+/// GMAC1 uses only SYSCRG for its clock gates; STGCRG, AONCRG, and
+/// AON_SYSCON are not needed and are no longer mapped.
 #[cfg(feature = "vf2")]
-const GMAC0_MMIO_BASE: usize = 0x1603_0000;
+const GMAC1_MMIO_BASE: usize = 0x1604_0000;
 #[cfg(feature = "vf2")]
-const GMAC0_MMIO_LEN:  usize = 0x1_0000;
-
-/// JH7110 STG clock + reset generator (STGCRG). 64 KiB at
-/// 0x10230000. Owns GMAC0_AHB / _AXI / _PTP / _TX / _RX clocks
-/// and the GMAC0 reset bit. Phase-1c-3 deasserts the reset and
-/// enables these clocks before reading the GMAC version register.
-#[cfg(feature = "vf2")]
-const STGCRG_MMIO_BASE: usize = 0x1023_0000;
-#[cfg(feature = "vf2")]
-const STGCRG_MMIO_LEN:  usize = 0x1_0000;
+const GMAC1_MMIO_LEN:  usize = 0x1_0000;
 
 /// JH7110 SYS clock + reset generator (SYSCRG). 64 KiB at
-/// 0x13020000. Owns the NOC_BUS_STG_AXI clock that the GMAC0
-/// AXI port depends on; without it the GMAC's MMIO is alive but
-/// register reads return zeros (the bus to the IP block is gated).
+/// 0x13020000. Owns the GMAC1 clock gates (+0x184..+0x19C:
+/// gtxclk, gtxc, ahb, axi, rgmii_rx, ptp). GMAC1 lives entirely
+/// in the SYSCRG clock domain — no STGCRG or AONCRG involvement.
 #[cfg(feature = "vf2")]
 const SYSCRG_MMIO_BASE: usize = 0x1302_0000;
 #[cfg(feature = "vf2")]
 const SYSCRG_MMIO_LEN:  usize = 0x1_0000;
-
-/// JH7110 always-on clock + reset generator (AONCRG). 64 KiB at
-/// 0x17000000. Phase-1c maps this for completeness; the actual
-/// AON-domain clocks the GMAC needs are minimal (most are STG/SYS),
-/// but the driver may eventually want to read the AON syscon for
-/// chip-state diagnostics.
-#[cfg(feature = "vf2")]
-const AONCRG_MMIO_BASE: usize = 0x1700_0000;
-#[cfg(feature = "vf2")]
-const AONCRG_MMIO_LEN:  usize = 0x1_0000;
-
-/// JH7110 always-on syscon. 4 KiB at 0x17010000 — separate from
-/// AON CRG. Holds the GMAC0 phy-interface-mode select field
-/// (offset 0x0C, bits 20:18), which routes the RGMII RX clock
-/// from the PHY pad into the AON CRG. Without this set, the
-/// gmac0_rx gate at AONCRG+0x1C silently rejects the enable
-/// bit because its parent (gmac0_rgmii_rxin) is not toggling.
-#[cfg(feature = "vf2")]
-const AON_SYSCON_MMIO_BASE: usize = 0x1701_0000;
-#[cfg(feature = "vf2")]
-const AON_SYSCON_MMIO_LEN:  usize = 0x1000;
 
 // ── Linker symbol accessors ─────────────────────────────────────
 
@@ -218,11 +188,8 @@ pub fn init() -> Result<(), KernelError> {
     map_range(root, VIRTIO_MMIO_BASE, VIRTIO_MMIO_BASE + VIRTIO_MMIO_LEN, KERNEL_RW)?;
     #[cfg(feature = "vf2")]
     {
-        map_range(root, GMAC0_MMIO_BASE, GMAC0_MMIO_BASE + GMAC0_MMIO_LEN, KERNEL_RW)?;
-        map_range(root, STGCRG_MMIO_BASE, STGCRG_MMIO_BASE + STGCRG_MMIO_LEN, KERNEL_RW)?;
+        map_range(root, GMAC1_MMIO_BASE, GMAC1_MMIO_BASE + GMAC1_MMIO_LEN, KERNEL_RW)?;
         map_range(root, SYSCRG_MMIO_BASE, SYSCRG_MMIO_BASE + SYSCRG_MMIO_LEN, KERNEL_RW)?;
-        map_range(root, AONCRG_MMIO_BASE, AONCRG_MMIO_BASE + AONCRG_MMIO_LEN, KERNEL_RW)?;
-        map_range(root, AON_SYSCON_MMIO_BASE, AON_SYSCON_MMIO_BASE + AON_SYSCON_MMIO_LEN, KERNEL_RW)?;
     }
 
     kprintln!("  [kvm] root pt at {:#x}", root);
