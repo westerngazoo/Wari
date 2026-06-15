@@ -2823,6 +2823,34 @@ pub fn driver_start() {
         let f0_2 = unsafe { (VF2_RX_BUFS.bufs[0].as_ptr() as *const u32).read_unaligned() };
         let _ = unsafe { wari_drv_log_u32(0x4275_4632, f0_2) }; // 'BuF2'
 
+        // Phase-1c-10 — consolidated end-of-init snapshot. The early
+        // PHY/RGMII/DMA tags scroll off the serial buffer before the
+        // operator can read them, so re-read the seven most diagnostic
+        // registers here in one burst (these survive in the boot tail).
+        //   PYi1/PYi2 — PHY ID regs 2/3 (YT8531C ≈ 0x4F51 / 0x...E91B).
+        //               0xffff/0x0000 ⇒ no PHY at addr 0 on GMAC1 MDIO.
+        //   PYlk      — BMSR (MDIO reg 1) bit 2 = link up. Read twice
+        //               (latching-low) so we report current state.
+        //   MACv      — MAC_VERSION (0x110), nonzero ⇒ MAC block alive.
+        //   MACc      — MAC_CONFIGURATION (0x000): bit0 RE, bit1 TE.
+        //   dRXc      — DMA_CH0_RX_CONTROL (0x1108): start bit + RBSZ.
+        //   dSTS      — DMA_CH0_STATUS (0x1160).
+        let _ = mdio_read_phy(plat::NIC_BASE, 0, 1); // clear latch
+        let bmsr   = mdio_read_phy(plat::NIC_BASE, 0, 1);
+        let phyid1 = mdio_read_phy(plat::NIC_BASE, 0, 2);
+        let phyid2 = mdio_read_phy(plat::NIC_BASE, 0, 3);
+        let macv   = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x110) };
+        let macc   = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x000) };
+        let drxc   = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1108) };
+        let dsts   = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1160) };
+        let _ = unsafe { wari_drv_log_u32(0x5059_6931, phyid1) }; // 'PYi1'
+        let _ = unsafe { wari_drv_log_u32(0x5059_6932, phyid2) }; // 'PYi2'
+        let _ = unsafe { wari_drv_log_u32(0x5059_6C6B, bmsr) };   // 'PYlk'
+        let _ = unsafe { wari_drv_log_u32(0x4D41_4376, macv) };   // 'MACv'
+        let _ = unsafe { wari_drv_log_u32(0x4D41_4363, macc) };   // 'MACc'
+        let _ = unsafe { wari_drv_log_u32(0x6452_5863, drxc) };   // 'dRXc'
+        let _ = unsafe { wari_drv_log_u32(0x6453_5453, dsts) };   // 'dSTS'
+
         // PR Phase-1c-7 — wire smoltcp on top of the GMAC bring-up.
         //
         // Steps:
