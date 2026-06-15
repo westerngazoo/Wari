@@ -2007,6 +2007,56 @@ pub fn driver_start() {
     #[cfg(feature = "vf2")]
     {
         const ENABLE_BIT: u32 = 0x8000_0000;
+        const SYSCRG_BASE: u32 = 0x1302_0000;
+
+        // ── GMAC1 power-on: clocks + reset BEFORE first register touch ──
+        //
+        // The version read and PHY probe below touch GMAC1 registers,
+        // so the block must be clocked AND out of reset first. We used
+        // to assume U-Boot deasserted GMAC1's reset during its PXE
+        // probe, but an SD boot never network-probes GMAC1 — the block
+        // stayed in reset and every register read returned 0 (MAC
+        // version, MDIO, DMA). GMAC1 lives entirely in the SYSCRG
+        // domain (GMAC0's clocks/reset are in the AON CRG).
+        //
+        // 1. Enable the bus parent gates (AHB0 +0x024, NOC_BUS_STG_AXI
+        //    +0x180) and the GMAC1 gates (+0x184..+0x19C). Read-modify-
+        //    write preserves U-Boot's divider bits. Idempotent — the
+        //    later SYSCRG block re-asserts these while driving the DMA
+        //    SWR clear.
+        for off in [0x024u32, 0x180, 0x184, 0x188, 0x190, 0x194, 0x198, 0x19C] {
+            let cur = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
+            let _ = unsafe {
+                wari_net_mmio_write32(SYSCRG_BASE + off, cur | ENABLE_BIT)
+            };
+        }
+
+        // 2. Deassert GMAC1's hardware reset in SYSCRG. Authoritative
+        //    indices from the mainline JH7110 reset bindings:
+        //      JH7110_SYSRST_GMAC1_AXI = 66
+        //      JH7110_SYSRST_GMAC1_AHB = 67
+        //    SYSCRG reset-assert base = 0x2F8 (status base 0x308), 32
+        //    resets/register → both land in assert register 2 (0x300),
+        //    bits 2 and 3; status register 2 is 0x310. Clearing an
+        //    assert bit releases the reset; the matching status bit
+        //    then reads 0 (jh71x0 reset semantics).
+        const SYSRST_ASSERT2: u32 = 0x300;
+        const SYSRST_STATUS2: u32 = 0x310;
+        const GMAC1_RST_MASK: u32 = (1 << 2) | (1 << 3);
+        let rst_pre = unsafe { wari_net_mmio_read32(SYSCRG_BASE + SYSRST_ASSERT2) };
+        let _ = unsafe { wari_drv_log_u32(0x5273_7470, rst_pre) }; // 'Rstp' assert pre
+        let _ = unsafe {
+            wari_net_mmio_write32(SYSCRG_BASE + SYSRST_ASSERT2,
+                                  rst_pre & !GMAC1_RST_MASK)
+        };
+        let mut rst_wait = 0u32;
+        let mut rst_st = unsafe { wari_net_mmio_read32(SYSCRG_BASE + SYSRST_STATUS2) };
+        while (rst_st & GMAC1_RST_MASK) != 0 && rst_wait < 100_000 {
+            rst_st = unsafe { wari_net_mmio_read32(SYSCRG_BASE + SYSRST_STATUS2) };
+            rst_wait += 1;
+        }
+        let _ = unsafe { wari_drv_log_u32(0x5273_7477, rst_wait) }; // 'Rstw' wait iters
+        let _ = unsafe { wari_drv_log_u32(0x5273_7473, rst_st) };   // 'Rsts' status after
 
         // Re-read GMAC1 version — first contact diagnostic.
         const GMAC_VERSION_OFFSET: u32 = 0x110;
@@ -2291,9 +2341,8 @@ pub fn driver_start() {
         //
         // Read both, log, and OR-in 0x80000000 if not already
         // set. Then retry the DMA SWR clear.
-        // (ENABLE_BIT already declared earlier in this scope — reuse it.)
-        const SYSCRG_BASE: u32 = 0x1302_0000;
-
+        // (ENABLE_BIT + SYSCRG_BASE already declared earlier in this
+        // scope by the power-on sequence — reuse them.)
         for (off, tag_low) in [
             (0x024u32, 0x24u32), // AHB0
             (0x180,    0x80),    // NOC_BUS_STG_AXI
