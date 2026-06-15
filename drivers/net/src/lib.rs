@@ -3,7 +3,7 @@
 //!
 //! Built as a separately-signed `.wasm` per platform: one for QEMU
 //! `virt` (VirtIO-net at `0x10008000`) and one for StarFive
-//! VisionFive 2 (JH7110 GMAC eth0 at `0x16030000`). Activated via
+//! VisionFive 2 (JH7110 GMAC eth1 at `0x16040000`). Activated via
 //! cargo feature: `--features qemu` or `--features vf2`.
 //!
 //! ## Phase-1b PR Net-4b scope (this PR)
@@ -97,10 +97,11 @@ mod plat {
 
 #[cfg(feature = "vf2")]
 mod plat {
-    /// JH7110 GMAC eth0 base on VisionFive 2 — Phase 1c will land
-    /// the GMAC implementation. Phase 1b's vf2 build is a stub.
+    /// JH7110 GMAC eth1 base on VisionFive 2. Phase-1c-10: switched
+    /// from GMAC0 (0x16030000) because eth1 is the port on the
+    /// OpenWrt LAN (192.168.50.x); GMAC0 is the internet-router port.
     #[allow(dead_code)]
-    pub const NIC_BASE: u32 = 0x1603_0000;
+    pub const NIC_BASE: u32 = 0x1604_0000;
 }
 
 // ── VirtIO MMIO register offsets (VirtIO 1.2 §4.2.2) ─────────────
@@ -457,14 +458,14 @@ pub static mut VF2_RX_BUFS: VF2RxBuffers = VF2RxBuffers {
 ///
 /// Wire format (broadcast ARP "who-has 192.168.122.1?"):
 ///   00..05  dst MAC = ff:ff:ff:ff:ff:ff (broadcast)
-///   06..0B  src MAC = 6c:cf:39:00:40:84 (VF2 MAC0 from EEPROM)
+///   06..0B  src MAC = 6c:cf:39:00:40:85 (VF2 MAC1 from EEPROM)
 ///   0C..0D  ethertype = 0x0806 (ARP)
 ///   0E..0F  HTYPE = 0x0001 (Ethernet)
 ///   10..11  PTYPE = 0x0800 (IPv4)
 ///   12      HLEN  = 6
 ///   13      PLEN  = 4
 ///   14..15  OPER  = 0x0001 (request)
-///   16..1B  SHA = 6c:cf:39:00:40:84
+///   16..1B  SHA = 6c:cf:39:00:40:85
 ///   1C..1F  SPA = 192.168.122.10
 ///   20..25  THA = 00 00 00 00 00 00
 ///   26..29  TPA = 192.168.122.1
@@ -473,13 +474,13 @@ pub static mut VF2_RX_BUFS: VF2RxBuffers = VF2RxBuffers {
 #[no_mangle]
 pub static VF2_FIRST_PKT: [u8; 64] = [
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,             // dst broadcast
-    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84,             // src VF2 MAC0
+    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x85,             // src VF2 MAC1
     0x08, 0x06,                                     // ethertype ARP
     0x00, 0x01,                                     // HTYPE Ethernet
     0x08, 0x00,                                     // PTYPE IPv4
     0x06, 0x04,                                     // HLEN/PLEN
     0x00, 0x01,                                     // OPER request
-    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84,             // SHA
+    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x85,             // SHA
     0xC0, 0xA8, 0x7A, 0x0A,                         // SPA 192.168.122.10
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,             // THA
     0xC0, 0xA8, 0x7A, 0x01,                         // TPA 192.168.122.1
@@ -1394,10 +1395,10 @@ pub mod vf2_phy {
     /// + Ethernet header); smoltcp passes us payload up to MTU.
     const SMOLTCP_MTU: usize = 1500;
 
-    /// JH7110 GMAC0 base address (mirror of `super::plat::NIC_BASE`
+    /// JH7110 GMAC1 base address (mirror of `super::plat::NIC_BASE`
     /// for vf2 builds — re-declared locally to keep this module
     /// self-contained).
-    const GMAC_BASE: u32 = 0x1603_0000;
+    const GMAC_BASE: u32 = 0x1604_0000;
     const DMA_CH0_TX_TAIL: u32 = 0x1120;
 
     /// DWMAC4 RDES3 status bits.
@@ -1979,63 +1980,35 @@ pub fn driver_start() {
         let _ = unsafe { wari_drv_log_u32(0x474D4143, v) };
     }
 
-    // PR Phase-1c-3d — correct GMAC0 bring-up via AON CRG.
+    // Phase-1c-10 — GMAC1 bring-up via SYSCRG.
     //
-    // Build 75/76 result + Linux-mainline cross-check (clk-starfive-
-    // jh7110-aon.c) revealed the misdiagnosis: GMAC0's AHB/AXI/TX/RX
-    // clock gates live in AON CRG (0x17000000), NOT SYSCRG. The
-    // SYSCRG offsets 0x190/0x194/0x198 we poked earlier are GMAC1's
-    // gates (id 100/101/102) — that's why bit 31 was being silently
-    // dropped: their parent path was off, and GMAC1 is irrelevant
-    // anyway. Reverting those misdirected writes — they had no effect
-    // on GMAC0.
+    // GMAC1 (eth1, 0x16040000) lives entirely in the SYSCRG clock
+    // domain. Unlike GMAC0 which used AON CRG, GMAC1 uses SYSCRG for
+    // AHB/AXI/TX/RX gates. U-Boot leaves GMAC1 clocked (it probes
+    // eth1 for PXE), so we read-modify-write each gate to OR in the
+    // enable bit rather than overwriting U-Boot's mux/divider state.
     //
-    // Correct sequence (Linux mainline, AON CRG offsets):
-    //   AONCRG +0x08 = gmac0_ahb gate (id 2)  -> set bit 31
-    //   AONCRG +0x0C = gmac0_axi gate (id 3)  -> set bit 31
-    //   AONCRG +0x38 = AON reset assert word  -> clear bits 0+1
-    //                  (bit 0 = GMAC0_AXI rst, bit 1 = GMAC0_AHB rst).
-    //                  AONCRG +0x3C is the reset status; deassert
-    //                  is bootloader-default but write 0s anyway
-    //                  to be definite.
+    // GMAC1 SYSCRG gate offsets (id × 4, confirmed from JH7110 Linux
+    // clock driver + clockfs `registers` read-back on VF2 Debian):
+    //   SYSCRG +0x184  gmac1_gtxclk  (GDIV, Debian CTRL=0x0000000c = div=12)
+    //   SYSCRG +0x188  gmac1_gtxc    (gate, Debian CTRL=0x80000020)
+    //   SYSCRG +0x190  gmac1_ahb     (gate)
+    //   SYSCRG +0x194  gmac1_axi     (gate)
+    //   SYSCRG +0x198  gmac1_rgmii_rx (gate, RGMII RX path)
+    //   SYSCRG +0x19C  gmac1_ptp     (GDIV, div=10 → gmac_src 750MHz/10 = 75MHz)
     //
-    // After: read GMAC0+0x110. If non-zero, we have first contact
-    // with the DWMAC IP block on real silicon. JH7110 ships DWMAC
-    // v5.20 → expected version byte 0x52 (or v5.10 → 0x51).
+    // gmac1_ptp is a direct child of gmac_src (no separate SYSCRG
+    // intermediate gate for GMAC1 PTP, unlike GMAC0). The gtxclk
+    // parent is gmacusb_root (1500MHz); div=12 → 125MHz RGMII GTX.
+    //
+    // Hardware reset for GMAC1 is in SYSCRG reset registers; U-Boot
+    // deasserts it during PXE probe so we rely on that and let the
+    // DWMAC DMA SWR handle internal logic reset below.
     #[cfg(feature = "vf2")]
     {
-        const AONCRG_BASE: u32 = 0x1700_0000;
-        const ENABLE_BIT:  u32 = 0x8000_0000;
-        const AONRST_OFF:  u32 = 0x38;
-        const GMAC0_AXI_AHB_RST_MASK: u32 = 0x3; // bits 0 and 1
+        const ENABLE_BIT: u32 = 0x8000_0000;
 
-        // Step 1: enable AHB clock gate.
-        let _ = unsafe {
-            wari_net_mmio_write32(AONCRG_BASE + 0x08, ENABLE_BIT)
-        };
-        // Step 2: enable AXI clock gate.
-        let _ = unsafe {
-            wari_net_mmio_write32(AONCRG_BASE + 0x0C, ENABLE_BIT)
-        };
-        // Step 3: deassert GMAC0 reset (clear bits 0+1).
-        let rst_cur = unsafe { wari_net_mmio_read32(AONCRG_BASE + AONRST_OFF) };
-        let _ = unsafe {
-            wari_net_mmio_write32(AONCRG_BASE + AONRST_OFF,
-                rst_cur & !GMAC0_AXI_AHB_RST_MASK)
-        };
-
-        // Verify each write landed. Tags spell 'Aon0' / 'Aon1' /
-        // 'Aon8' / 'AonR' so the trace shows what's at each offset.
-        let v08 = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x08) };
-        let _ = unsafe { wari_drv_log_u32(0x416F_6E08, v08) };
-        let v0c = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x0C) };
-        let _ = unsafe { wari_drv_log_u32(0x416F_6E0C, v0c) };
-        let v38 = unsafe { wari_net_mmio_read32(AONCRG_BASE + AONRST_OFF) };
-        let _ = unsafe { wari_drv_log_u32(0x416F_6E38, v38) };
-        let v3c = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x3C) };
-        let _ = unsafe { wari_drv_log_u32(0x416F_6E3C, v3c) };
-
-        // Re-read GMAC version — this is the line that matters.
+        // Re-read GMAC1 version — first contact diagnostic.
         const GMAC_VERSION_OFFSET: u32 = 0x110;
         let v_after = unsafe {
             wari_net_mmio_read32(plat::NIC_BASE + GMAC_VERSION_OFFSET)
@@ -2339,81 +2312,27 @@ pub fn driver_start() {
             }
         }
 
-        // PR Phase-1c-6L — JH7110 AON SYSCON GMAC0 phy-mode select.
+        // Phase-1c-10 — enable GMAC1 SYSCRG clock gates.
         //
-        // BEFORE enabling gmac0_rx (AONCRG +0x1C), we have to
-        // route the PHY's RXC clock pin into the AON CRG. That
-        // routing is gated by the AON SYSCON at 0x17010000 +
-        // offset 0x0C, bits 20:18 = phy_intf_sel:
-        //   0x1 = RGMII   (VF2 default)
-        //   0x4 = RMII
-        //
-        // Without this, the gmac0_rx gate silently rejects the
-        // enable bit because its parent isn't toggling. Read-
-        // modify-write to set bit 18 and clear bits 20:19.
-        const AON_SYSCON_BASE: u32 = 0x1701_0000;
-        const PHY_INTF_OFFSET: u32 = 0x0C;
-        let pi_pre = unsafe { wari_net_mmio_read32(AON_SYSCON_BASE + PHY_INTF_OFFSET) };
-        let _ = unsafe { wari_drv_log_u32(0x5049_5F50, pi_pre) }; // 'PI_P' pre
-        let pi_new = (pi_pre & !(0x7 << 18)) | (0x1 << 18);
-        let _ = unsafe {
-            wari_net_mmio_write32(AON_SYSCON_BASE + PHY_INTF_OFFSET, pi_new)
-        };
-        let pi_post = unsafe { wari_net_mmio_read32(AON_SYSCON_BASE + PHY_INTF_OFFSET) };
-        let _ = unsafe { wari_drv_log_u32(0x5049_5F4E, pi_post) }; // 'PI_N' new
-
-        // PR Phase-1c-6d — enable the rest of GMAC0's datapath
-        // clocks. Build 86 trace showed AHB/AXI + upstream are
-        // on but DMA SWR still won't clear; the engine can't
-        // flush its state machines without TX/RX clocks running.
-        //
-        // Per Linux mainline clk-starfive-jh7110-aon.c +
-        // clk-starfive-jh7110-sys.c, GMAC0's complete clock
-        // tree:
-        //   AON (already done): +0x08 ahb, +0x0C axi
-        //   AON (NEW):           +0x14 tx (GMUX, mux=0=gtxclk)
-        //                         +0x20 rx_inv (bit 30 = invert for RGMII)
-        //   SYS (NEW):           +0x1B0 gtxclk (GDIV, en + div=5 for 1Gbps)
-        //                         +0x1B4 ptp    (GDIV, en + div=10)
-        //                         +0x1B8 phy    (GDIV, en + div=30 for MDC)
-        //                         +0x1BC gtxc   (gate, en)
-        //
-        // Note: +0x10 rmii_rtx + +0x18 tx_inv + +0x1C rx are
-        // intentionally untouched — defaults are correct for
-        // RGMII (VF2 phy mode).
-        const AONCRG_BASE_2: u32 = 0x1700_0000;
-
-        // AON datapath: tx GMUX with mux=0 (parent gmac0_gtxclk)
-        let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x14, ENABLE_BIT) };
-        // AON: gmac0_rx MUX (id 7) — bit 31 enable + mux=0 (rgmii_rxin)
-        // CRITICAL: missed in earlier builds. Without this the RX
-        // datapath has no clock; frames deserialize but never reach
-        // MTL.
-        let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x1C, ENABLE_BIT) };
-        // AON: rx_inv bit 30 set for RGMII
-        let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x20, 0x4000_0000) };
-
-        // SYS: gtxclk = enable + divider 5 (PLL0 1000MHz / 5 = 200MHz GTX clock)
-        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B0, ENABLE_BIT | 0x5) };
-        // SYS: ptp = enable + divider 10
-        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B4, ENABLE_BIT | 0xA) };
-        // SYS: phy MDC = enable + divider 30 (~16MHz from 500MHz)
-        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B8, ENABLE_BIT | 0x1E) };
-        // SYS: gtxc gate (parent gmac0_gtxclk)
-        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1BC, ENABLE_BIT) };
-
-        // Verify-read each. Tags 'AOn' / 'SyS' + low byte.
-        // Dump full GMAC0 cluster: 0x08 ahb, 0x0C axi, 0x10 rmii_rtx,
-        // 0x14 tx, 0x18 tx_inv, 0x1C rx, 0x20 rx_inv.
-        for off in [0x08u32, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20] {
-            let v = unsafe { wari_net_mmio_read32(AONCRG_BASE_2 + off) };
-            let tag = 0x414F_6E00 | (off & 0xFF); // 'AOn\0' + low
-            let _ = unsafe { wari_drv_log_u32(tag, v) };
-        }
-        for off in [0x1B0u32, 0x1B4, 0x1B8, 0x1BC] {
-            let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
-            let tag = 0x5379_5300 | (off & 0xFF); // 'SyS\0' + low
-            let _ = unsafe { wari_drv_log_u32(tag, v) };
+        // Read-modify-write each gate: preserves U-Boot's mux/divider
+        // bits while asserting the enable. SYSCRG parent gates
+        // (+0x024 AHB0, +0x180 NOC_BUS_STG_AXI) were already enabled
+        // above and serve GMAC1 as well as GMAC0.
+        for (off, tag_low) in [
+            (0x184u32, 0x84u32), // gmac1_gtxclk
+            (0x188,    0x88),    // gmac1_gtxc
+            (0x190,    0x90),    // gmac1_ahb
+            (0x194,    0x94),    // gmac1_axi
+            (0x198,    0x98),    // gmac1_rgmii_rx
+            (0x19C,    0x9C),    // gmac1_ptp (GDIV, div from U-Boot)
+        ] {
+            let cur = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
+            let _ = unsafe {
+                wari_net_mmio_write32(SYSCRG_BASE + off, cur | ENABLE_BIT)
+            };
+            let post = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
+            let tag = 0x4731_0000 | tag_low; // 'G1\0' + low
+            let _ = unsafe { wari_drv_log_u32(tag, post) };
         }
 
         // Retry the DMA soft-reset clear now that upstream is on.

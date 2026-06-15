@@ -45,11 +45,12 @@ pub const NET_MMIO_BASE: usize = 0x1000_8000;
 #[cfg(feature = "qemu")]
 pub const NET_MMIO_LEN:  usize = 0x200;
 
-/// JH7110 GMAC eth0 register window. Phase-1c will land the real
-/// GMAC driver; Phase-1b ships the validator with the right range
-/// so the cfg-feature switch compiles for both targets.
+/// JH7110 GMAC eth1 register window. Phase-1c-10: switched from
+/// GMAC0 (eth0, 0x16030000) to GMAC1 (eth1, 0x16040000) because
+/// eth1 is the port connected to the OpenWrt LAN (192.168.50.x).
+/// GMAC0 is on the internet-router side and is not Wari's interface.
 #[cfg(feature = "vf2")]
-pub const NET_MMIO_BASE: usize = 0x1603_0000;
+pub const NET_MMIO_BASE: usize = 0x1604_0000;
 #[cfg(feature = "vf2")]
 pub const NET_MMIO_LEN:  usize = 0x1_0000;
 
@@ -119,21 +120,10 @@ pub const fn is_net_mmio_addr(addr: usize) -> bool {
     }
     #[cfg(feature = "vf2")]
     {
-        // STGCRG — owns the STG-domain GMAC0 reset bit + bus clocks.
-        if addr >= 0x1023_0000 && addr < 0x1024_0000 {
-            return true;
-        }
-        // SYSCRG — owns NOC_BUS_STG_AXI which the GMAC0 AXI port
-        // depends on, plus several GMAC0_* clock gates.
+        // SYSCRG — AHB0/NOC_BUS_STG_AXI parent gates (+0x024/+0x180)
+        // and GMAC1 clock gates (+0x184..+0x19C). GMAC1 lives entirely
+        // in the SYSCRG clock domain (no AON CRG involvement).
         if addr >= 0x1302_0000 && addr < 0x1303_0000 {
-            return true;
-        }
-        // AONCRG — read-only diagnostic for AON-domain state.
-        if addr >= 0x1700_0000 && addr < 0x1701_0000 {
-            return true;
-        }
-        // AON SYSCON — phy-interface-select for GMAC0 (Phase-1c-6L).
-        if addr >= 0x1701_0000 && addr < 0x1701_1000 {
             return true;
         }
     }
