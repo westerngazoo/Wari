@@ -425,6 +425,15 @@ pub mod vf2_state {
     /// baseline. After that we only log when the value flips, which
     /// turns a stuck-at-MAX bug from 100k log lines/sec into one.
     pub static mut LAST_PREV_YIELDED_LOGGED: u32 = 0xDEAD_BEEF;
+
+    /// Change-detection memory for the periodic counter dump. The dump
+    /// now fires only when frames-found or tx-sent moves (sentinel
+    /// forces one baseline print), instead of every 65 536 receive()
+    /// calls — otherwise the all-zero burst floods the console and
+    /// buries the end-of-init register snapshot. First real frame or
+    /// first TX makes it speak again.
+    pub static mut LAST_FRAMES_DUMPED: u32 = 0xFFFF_FFFF;
+    pub static mut LAST_TX_DUMPED:     u32 = 0xFFFF_FFFF;
 }
 
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
@@ -1440,13 +1449,23 @@ pub mod vf2_phy {
                     vf2_state::LAST_PREV_YIELDED_LOGGED = py;
                     let _ = super::wari_drv_log_u32(0x6450_7262, py);
                 }
-                if vf2_state::RX_CALL_COUNT & 0xFFFF == 0 {
+                // Fire only when frames-found or tx-sent changes —
+                // not every 65 536 calls. An all-zero RX path now goes
+                // silent after one baseline burst, leaving the
+                // end-of-init register snapshot readable on screen.
+                let ff = vf2_state::C_FRAMES_FOUND;
+                let tx = vf2_state::C_TX_SENT;
+                if ff != vf2_state::LAST_FRAMES_DUMPED
+                    || tx != vf2_state::LAST_TX_DUMPED
+                {
+                    vf2_state::LAST_FRAMES_DUMPED = ff;
+                    vf2_state::LAST_TX_DUMPED = tx;
                     let _ = super::wari_drv_log_u32(0x5374_5263, vf2_state::C_RECEIVE_CALLS);
-                    let _ = super::wari_drv_log_u32(0x5374_5266, vf2_state::C_FRAMES_FOUND);
+                    let _ = super::wari_drv_log_u32(0x5374_5266, ff);
                     let _ = super::wari_drv_log_u32(0x5374_4363, vf2_state::C_CONSUME_CALLS);
                     let _ = super::wari_drv_log_u32(0x5374_4463, vf2_state::C_DROP_CALLS);
                     let _ = super::wari_drv_log_u32(0x5374_5261, vf2_state::C_REARM_CALLS);
-                    let _ = super::wari_drv_log_u32(0x5374_5478, vf2_state::C_TX_SENT);
+                    let _ = super::wari_drv_log_u32(0x5374_5478, tx);
                 }
             }
             // Build-110 wasmi-tolerant fix, retained: re-arm the
