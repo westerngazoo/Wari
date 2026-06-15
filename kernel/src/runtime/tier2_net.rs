@@ -97,6 +97,14 @@ static mut TICK_MS: u64 = 0;
 /// `TICK_MS` (none exists outside this function; it is a u64 read +
 /// write under INV-1, which is sound).
 pub fn next_tick() -> u64 {
+    // Ctrl-R (0x12) reboot, checked on every smoltcp-driving tick.
+    // The kernel arms no timer, so the idle-loop / trap paths never
+    // see UART RX while a Tier-1 host-fn accept loop is spinning.
+    // This function IS that loop's heartbeat, so poll RX here.
+    if let Some(0x12) = crate::mmio::uart_ns16550::try_read_byte() {
+        crate::kprintln!("\r\n[reboot] Ctrl-R received, restarting via SBI...");
+        crate::sbi::system_reset();
+    }
     // SAFETY: INV-1 — single-hart, no other writer; u64 store is
     // single instruction on RV64.
     unsafe {
