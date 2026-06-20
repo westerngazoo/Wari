@@ -91,6 +91,8 @@ sequence and register map.
 | `0x4d41_4363` | `MACc` | `MAC_CONFIGURATION` — `0x2003` = RE+TE set |
 | `0x6452_5863` | `dRXc` | `DMA_CH0_RX_CONTROL` — `0x80010c01` = SR (rx) started |
 | `0x6453_5453` | `dSTS` | `DMA_CH0_STATUS` |
+| `0x4774_786b` | `Gtxk` | `gmac1_gtxclk` (`0x13020184`) before explicit divider write |
+| `0x4774_786c` | `Gtxl` | `gmac1_gtxclk` after write — expect `0x8000000c` (enable + ÷12) |
 
 ## Build / lifecycle tags
 

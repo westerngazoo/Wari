@@ -2039,16 +2039,34 @@ pub fn driver_start() {
         // domain (GMAC0's clocks/reset are in the AON CRG).
         //
         // 1. Enable the bus parent gates (AHB0 +0x024, NOC_BUS_STG_AXI
-        //    +0x180) and the GMAC1 gates (+0x184..+0x19C). Read-modify-
-        //    write preserves U-Boot's divider bits. Idempotent — the
-        //    later SYSCRG block re-asserts these while driving the DMA
-        //    SWR clear.
-        for off in [0x024u32, 0x180, 0x184, 0x188, 0x190, 0x194, 0x198, 0x19C] {
+        //    +0x180) and the GMAC1 gates (+0x184..+0x19C). For pure
+        //    gates / divider-already-set clocks a read-modify-write of
+        //    the enable bit preserves U-Boot's divider bits.
+        for off in [0x024u32, 0x180, 0x190, 0x194, 0x198, 0x19C] {
             let cur = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
             let _ = unsafe {
                 wari_net_mmio_write32(SYSCRG_BASE + off, cur | ENABLE_BIT)
             };
         }
+
+        // gmac1_gtxclk (+0x184) and gmac1_gtxc (+0x188) need an explicit
+        // DIVIDER, not just the enable bit. A cold SD boot can leave the
+        // divider at 0 (live devmem read showed 0x13020184 = 0); OR-ing
+        // only the enable bit then yields divider 0 → no 125 MHz RGMII
+        // GTX clock → TX dead. Write the known-good config (from Debian
+        // clockfs, where eth1 works):
+        //   gtxclk = 0x8000000C  (enable + ÷12: gmacusb_root 1500 → 125 MHz)
+        //   gtxc   = 0x80000020  (enable + Debian-observed value)
+        // jh71x0 register layout: bit31 enable, 29:24 mux, 23:0 divider.
+        // STAGED / UNVERIFIED on hardware — see docs/vf2-gmac1-bringup.md §6.
+        const GTXCLK_VAL: u32 = 0x8000_000C;
+        const GTXC_VAL:   u32 = 0x8000_0020;
+        let gtxclk_pre = unsafe { wari_net_mmio_read32(SYSCRG_BASE + 0x184) };
+        let _ = unsafe { wari_drv_log_u32(0x4774_786B, gtxclk_pre) }; // 'Gtxk' pre
+        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x184, GTXCLK_VAL) };
+        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x188, GTXC_VAL) };
+        let gtxclk_post = unsafe { wari_net_mmio_read32(SYSCRG_BASE + 0x184) };
+        let _ = unsafe { wari_drv_log_u32(0x4774_786C, gtxclk_post) }; // 'Gtxl' post
 
         // 2. Deassert GMAC1's hardware reset in SYSCRG. Authoritative
         //    indices from the mainline JH7110 reset bindings:
