@@ -66,6 +66,32 @@ NOT calling consume — without per-event log spam.
 | `0x5374_5261` | `StRa` | vf2_rx_rearm() call count |
 | `0x5374_5478` | `StTx` | TX frames sent count |
 
+> The `St**` periodic dump now fires **only when `StRf` or `StTx`
+> changes** (one baseline burst, then silent until a real frame/TX),
+> not every 65 536 `receive()` calls — an all-zero RX path no longer
+> floods the console and buries the boot snapshot. See
+> [`vf2-gmac1-bringup.md`](vf2-gmac1-bringup.md) §7.
+
+## GMAC1 power-on tags (Phase-1c, eth1 bring-up)
+
+Emitted once during the vf2 init path. See
+[`vf2-gmac1-bringup.md`](vf2-gmac1-bringup.md) for the full bring-up
+sequence and register map.
+
+| Tag hex | ASCII | Meaning |
+|---|---|---|
+| `0x5273_7470` | `Rstp` | SYSCRG reset-assert `0x13020300` before deassert |
+| `0x5273_7473` | `Rsts` | reset status `0x13020310` after (bits 2,3 → 0 = released) |
+| `0x5273_7477` | `Rstw` | poll iterations until reset released |
+| `0x476d_6143` | `GmaC` | `MAC_VERSION` after power-on — `0x4152` = block alive |
+| `0x5059_6931` | `PYi1` | PHYID1 (`~0x4F51` for the YT8531C at MDIO addr 0) |
+| `0x5059_6932` | `PYi2` | PHYID2 |
+| `0x5059_6c6b` | `PYlk` | `BMSR` (bit 2 set = link up) |
+| `0x4d41_4376` | `MACv` | MAC version (end-of-init snapshot copy) |
+| `0x4d41_4363` | `MACc` | `MAC_CONFIGURATION` — `0x2003` = RE+TE set |
+| `0x6452_5863` | `dRXc` | `DMA_CH0_RX_CONTROL` — `0x80010c01` = SR (rx) started |
+| `0x6453_5453` | `dSTS` | `DMA_CH0_STATUS` |
+
 ## Build / lifecycle tags
 
 | Tag hex | ASCII | Meaning |

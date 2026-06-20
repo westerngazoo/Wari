@@ -16,14 +16,22 @@ machine + `wari go` on the VF2.
 ```bash
 cd /root
 git clone https://github.com/westerngazoo/Wari.git wari
-cp wari/scripts/wari-upgrade.sh /root/
-echo 'source /root/wari-upgrade.sh' >> /root/.bashrc
+# Source the helper DIRECTLY from the repo (not a copy). This is what
+# makes script fixes survive a `git reset --hard` + new login — see the
+# persistence note below.
+echo 'source /root/wari/scripts/wari-upgrade.sh' >> /root/.bashrc
 source /root/.bashrc
 wari status                  # smoke-check
 ```
 
 Expected `wari status` output: build number, last 5 commits, and
 `/boot/kernel.bin` size.
+
+> **Do not `cp` the script to `/root/wari-upgrade.sh` and source the
+> copy.** A copy goes stale: a repo `git reset --hard` updates the repo
+> file but not the copy, so script fixes never reach you on the next
+> login. Source the repo file directly. (Existing boards that did the
+> copy: re-point `.bashrc` at `/root/wari/scripts/wari-upgrade.sh`.)
 
 ## Per-deploy flow
 
@@ -36,8 +44,14 @@ make deploy                  # builds wari.bin, commits, pushes to GitHub
 On the VF2:
 
 ```bash
-wari go                      # git pull + cp to /boot/kernel.bin + reboot
+wari go                      # fetch + reset --hard CURRENT branch, flash, reboot
 ```
+
+`wari go` follows whatever branch the VF2 repo is on (no `main`
+hard-coding) and always uses `git fetch` + `git reset --hard` — never
+`git pull`, which deadlocks because every deploy commits `build/wari.bin`
+and forks local history from origin. To switch branches for silicon
+testing: `wari go-branch <branch>`.
 
 The board reboots into Wari. Watch the COM7 serial console for the
 Phase-0 demo banner:
