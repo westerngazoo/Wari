@@ -216,6 +216,153 @@ pub mod net {
     pub const NET_OP_MAX: usize = NET_CLOSE;
 }
 
+/// Registered-capability fast-path validation — the pure soundness check.
+///
+/// The fast syscall path (see `docs/cap-registered-fastpath-design.md`)
+/// lets a module register a capability once and then reference it by a
+/// small integer handle (`reg_idx`) on the hot path. This module holds
+/// the **pure** soundness predicate the kernel runs on every submission —
+/// the platform- and policy-independent part of proposed INV-α:
+///
+///   1. the handle index is in range,
+///   2. its slot is live,
+///   3. the cached generation still matches the live cap-slot generation
+///      (so a revoked/reused cap auto-invalidates — this rides the
+///      generation-counter mechanism, INV-17), and
+///   4. the operation is permitted for the cached capability.
+///
+/// Clause 4 (op vs kind+rights) is a kernel-side **policy** decision, so
+/// it is injected here as a boolean (`op_permitted`). That keeps this
+/// crate free of the op/rights table — which is designed in the kernel
+/// cap module — while still letting the soundness check be expressed and
+/// tested as one pure function. No `unsafe`, no MMIO: host-testable.
+pub mod reg {
+    /// Registered-resource slots per process. The kernel's `RegTable`
+    /// mirrors this; the validator bounds-checks `reg_idx` against it.
+    /// Single source of truth so kernel and tooling agree on the range.
+    pub const REG_SLOTS: u32 = 64;
+
+    /// Outcome of validating one registered-handle submission. Distinct
+    /// rejection reasons (not a bare `bool`) so callers and tests can
+    /// assert *why* a submission was refused.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RegCheck {
+        /// All clauses hold; the operation may proceed.
+        Ok,
+        /// `reg_idx >= REG_SLOTS` — outside the registered-table range.
+        OutOfRange,
+        /// The slot is not live (never registered, or unregistered).
+        Empty,
+        /// Cached generation != live cap-slot generation: the underlying
+        /// capability was revoked / deleted / reused (INV-17). The handle
+        /// is stale and confers nothing.
+        Stale,
+        /// The operation is not permitted for the cached kind + rights.
+        NotPermitted,
+    }
+
+    /// Validate a registered-handle submission (proposed INV-α).
+    ///
+    /// Pure: given the handle index, the slot's liveness, the cached vs
+    /// live generation, and the kernel's op-permission decision, returns
+    /// the precise [`RegCheck`]. Checks are ordered cheapest-first and
+    /// short-circuit, so a hostile `reg_idx` is rejected on the bounds
+    /// test before any slot is examined.
+    ///
+    /// # Parameters
+    /// - `reg_idx`: the submitted handle index.
+    /// - `live`: whether the slot at `reg_idx` is occupied (kind != Empty).
+    /// - `reg_generation`: generation cached in the slot at registration.
+    /// - `cur_generation`: the underlying cap slot's *current* generation.
+    /// - `op_permitted`: the kernel's decision that the op is legal for
+    ///   the cached kind + rights (clause 4, injected).
+    ///
+    /// # Returns
+    /// [`RegCheck::Ok`] iff all clauses hold; otherwise the first failing
+    /// clause in the order range → live → generation → permission.
+    ///
+    /// ```
+    /// use wari_abi::reg::{validate_handle, RegCheck, REG_SLOTS};
+    /// // Happy path: in range, live, generations match, op allowed.
+    /// assert_eq!(validate_handle(3, true, 7, 7, true), RegCheck::Ok);
+    /// // Out of range short-circuits before any slot is touched.
+    /// assert_eq!(validate_handle(REG_SLOTS, true, 7, 7, true), RegCheck::OutOfRange);
+    /// // Stale generation (the cap was revoked/reused) is rejected.
+    /// assert_eq!(validate_handle(3, true, 7, 8, true), RegCheck::Stale);
+    /// ```
+    #[inline]
+    pub const fn validate_handle(
+        reg_idx: u32,
+        live: bool,
+        reg_generation: u16,
+        cur_generation: u16,
+        op_permitted: bool,
+    ) -> RegCheck {
+        if reg_idx >= REG_SLOTS {
+            return RegCheck::OutOfRange;
+        }
+        if !live {
+            return RegCheck::Empty;
+        }
+        if reg_generation != cur_generation {
+            return RegCheck::Stale;
+        }
+        if !op_permitted {
+            return RegCheck::NotPermitted;
+        }
+        RegCheck::Ok
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ok_when_all_clauses_hold() {
+            assert_eq!(validate_handle(0, true, 0, 0, true), RegCheck::Ok);
+            assert_eq!(validate_handle(REG_SLOTS - 1, true, 42, 42, true), RegCheck::Ok);
+        }
+
+        #[test]
+        fn out_of_range_is_first_and_short_circuits() {
+            // At and beyond the bound → OutOfRange.
+            assert_eq!(validate_handle(REG_SLOTS, true, 1, 1, true), RegCheck::OutOfRange);
+            assert_eq!(validate_handle(u32::MAX, true, 1, 1, true), RegCheck::OutOfRange);
+            // OutOfRange wins even when every later clause would also fail
+            // (proves ordering: a hostile index never reaches slot reads).
+            assert_eq!(validate_handle(REG_SLOTS, false, 1, 2, false), RegCheck::OutOfRange);
+        }
+
+        #[test]
+        fn empty_slot_rejected_before_generation() {
+            assert_eq!(validate_handle(5, false, 1, 1, true), RegCheck::Empty);
+            // Empty wins over a generation mismatch and a denied op.
+            assert_eq!(validate_handle(5, false, 1, 2, false), RegCheck::Empty);
+        }
+
+        #[test]
+        fn stale_generation_rejected_before_permission() {
+            assert_eq!(validate_handle(5, true, 1, 2, true), RegCheck::Stale);
+            // Stale wins over a denied op (revocation is checked first).
+            assert_eq!(validate_handle(5, true, 9, 10, false), RegCheck::Stale);
+            // Generation wrap edge: max vs zero is still a mismatch.
+            assert_eq!(validate_handle(5, true, u16::MAX, 0, true), RegCheck::Stale);
+        }
+
+        #[test]
+        fn not_permitted_is_last_clause() {
+            assert_eq!(validate_handle(5, true, 3, 3, false), RegCheck::NotPermitted);
+        }
+
+        #[test]
+        fn const_evaluable() {
+            // Usable in const context (kernel may fold known cases).
+            const R: RegCheck = validate_handle(1, true, 0, 0, true);
+            assert_eq!(R, RegCheck::Ok);
+        }
+    }
+}
+
 // ── Tests — pure, runnable on host ─────────────────────────────
 
 #[cfg(test)]
