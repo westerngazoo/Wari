@@ -42,8 +42,10 @@
 use wasmi::Caller;
 
 use super::cspace::{CSPACE_SLOTS, MAX_PROCS};
+use super::reg::RegEntry;
 use super::revoke::{dec_refcount, inc_refcount, revoke};
-use super::storage::{cspaces, object_pools};
+use super::storage::{cspaces, object_pools, reg_tables};
+use wari_abi::reg::REG_SLOTS;
 use super::types::{
     Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_READ,
     CAP_RIGHT_WRITE,
@@ -115,6 +117,86 @@ pub fn check_cap(
         return Err(E_PERM);
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────
+// cap_register / cap_unregister — fast-path handle registration
+// (PR cap-fastpath-1; see docs/cap-registered-fastpath-design.md §4)
+// ─────────────────────────────────────────────────────────────────
+
+/// `wari::cap_register(cspace_slot) -> i32`.
+///
+/// Resolve and validate the capability at `cspace_slot` **once**, cache
+/// its resolution in the caller's per-process registered-resource table,
+/// and return the registered handle index (`>= 0`). Negative errno on
+/// failure. The returned index is **not** a capability and confers no
+/// new authority — it names a cap the kernel just proved (INV-α). Later
+/// fast-path ops (the submission ring, PR-2) re-check the cached
+/// generation against the live CSpace slot, so a revoked cap's handle
+/// fails on next use (INV-17).
+///
+/// # Invariants
+/// - **INV-18** (slot bounds): bounds-checks `proc_id` and `cspace_slot`.
+/// - **INV-15** (forgery): only reads the cap; never constructs one. The
+///   handle index addresses the RegTable, not a CSpace slot.
+pub fn cap_register_impl(proc_id: u8, cspace_slot: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_INVAL;
+    }
+    if cspace_slot >= CSPACE_SLOTS as u32 {
+        return E_INVAL;
+    }
+    let cspace_slot = cspace_slot as u8;
+
+    // Resolve + validate the cap and snapshot its resolution. This is the
+    // full-path cost, paid once at registration. Held in a tight block so
+    // the `cspaces()` borrow does not overlap the `reg_tables()` borrow.
+    let (kind, rights, pool_index, generation) = {
+        let cs = cspaces();
+        let cap = cs[proc_id as usize].slots[cspace_slot as usize];
+        if cap.is_empty() {
+            return E_INVAL;
+        }
+        let generation = cs[proc_id as usize].generations[cspace_slot as usize];
+        (cap.kind, cap.rights, cap.pool_index, generation)
+    };
+
+    // Install into the first free registered slot.
+    let rt = reg_tables();
+    let idx = match rt[proc_id as usize].find_empty() {
+        Some(i) => i,
+        None => return E_NOMEM,
+    };
+    rt[proc_id as usize].slots[idx] = RegEntry {
+        kind,
+        rights,
+        cspace_slot,
+        reg_generation: generation,
+        pool_index,
+    };
+    idx as i32
+}
+
+/// `wari::cap_unregister(reg_idx) -> i32`.
+///
+/// Drop a registered handle, freeing its slot. Idempotent on an
+/// already-free slot. Does **not** touch the underlying capability (that
+/// is `cap_delete`/`cap_revoke`); it only invalidates the fast handle.
+/// Returns `0` on success, `E_INVAL` on an out-of-range index.
+///
+/// # Invariants
+/// - **INV-18** generalized (handle bounds): bounds-checks `proc_id` and
+///   `reg_idx < REG_SLOTS` before indexing.
+pub fn cap_unregister_impl(proc_id: u8, reg_idx: u32) -> i32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return E_INVAL;
+    }
+    if reg_idx >= REG_SLOTS {
+        return E_INVAL;
+    }
+    let rt = reg_tables();
+    rt[proc_id as usize].slots[reg_idx as usize] = RegEntry::empty();
+    0
 }
 
 // ─────────────────────────────────────────────────────────────────

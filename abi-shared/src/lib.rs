@@ -97,14 +97,19 @@ pub const SYS_CAP_REVOKE:   usize = 19;
 pub const SYS_CAP_DELETE:   usize = 20;
 /// Read metadata for a capability (kind, rights, badge).
 pub const SYS_CAP_LOOKUP:   usize = 21;
+/// Register a capability into the per-process fast-path table; returns a
+/// registered-handle index. See `docs/cap-registered-fastpath-design.md`.
+pub const SYS_CAP_REGISTER:   usize = 22;
+/// Drop a registered fast-path handle (does not affect the capability).
+pub const SYS_CAP_UNREGISTER: usize = 23;
 
 /// Highest syscall number currently defined. Used for bounds checks
 /// in the dispatch path and for the size of any dispatch table.
 ///
 /// Note: slot 10 is **retired** (formerly `SYS_SPAWN_ELF`, see Wari
-/// R7). The live syscalls are 0..=9, 11..=16, and 17..=21 (Phase 1b
-/// cap-management).
-pub const SYS_MAX: usize = SYS_CAP_LOOKUP;
+/// R7). The live syscalls are 0..=9, 11..=16, and 17..=23 (Phase 1b
+/// cap-management + the cap-fastpath register/unregister pair).
+pub const SYS_MAX: usize = SYS_CAP_UNREGISTER;
 
 // ── Error codes ────────────────────────────────────────────────
 //
@@ -395,12 +400,11 @@ mod tests {
 
     #[test]
     fn sys_max_matches_highest_syscall() {
-        // Phase 1b extended the syscall range to include the
-        // capability-management ops; SYS_MAX therefore moved from
-        // SYS_REBOOT (16) to SYS_CAP_LOOKUP (21). The test pins
-        // both the symbolic and numeric value.
-        assert_eq!(SYS_MAX, SYS_CAP_LOOKUP);
-        assert_eq!(SYS_MAX, 21);
+        // Phase 1b added the capability-management ops (→ SYS_CAP_LOOKUP
+        // = 21); the cap-fastpath register/unregister pair extends the
+        // range to 23. SYS_MAX pins both the symbolic and numeric value.
+        assert_eq!(SYS_MAX, SYS_CAP_UNREGISTER);
+        assert_eq!(SYS_MAX, 23);
     }
 
     #[test]
@@ -409,11 +413,15 @@ mod tests {
         // the previous SYS_REBOOT (16). Nothing in this range should
         // collide; the contiguous block makes the dispatch table
         // simpler downstream.
-        assert_eq!(SYS_CAP_MINT,    17);
-        assert_eq!(SYS_CAP_COPY,    18);
-        assert_eq!(SYS_CAP_REVOKE,  19);
-        assert_eq!(SYS_CAP_DELETE,  20);
-        assert_eq!(SYS_CAP_LOOKUP,  21);
+        assert_eq!(SYS_CAP_MINT,       17);
+        assert_eq!(SYS_CAP_COPY,       18);
+        assert_eq!(SYS_CAP_REVOKE,     19);
+        assert_eq!(SYS_CAP_DELETE,     20);
+        assert_eq!(SYS_CAP_LOOKUP,     21);
+        // cap-fastpath register/unregister extend the contiguous block.
+        assert_eq!(SYS_CAP_REGISTER,   22);
+        assert_eq!(SYS_CAP_UNREGISTER, 23);
+        assert_eq!(SYS_MAX,            SYS_CAP_UNREGISTER);
         // And not stepping on SYS_REBOOT.
         assert_ne!(SYS_CAP_MINT, SYS_REBOOT);
     }
