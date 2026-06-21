@@ -119,6 +119,9 @@ pub enum WnmCheck {
     /// A section's `[offset, offset+len)` overflows, overlaps the header/
     /// table region, or escapes `total_len`.
     SectionOutOfBounds,
+    /// The same section kind appears more than once. Each kind may occur
+    /// at most once so the loader's resolution is unambiguous.
+    DuplicateSection,
     /// One of the required sections (`Text`, `SafetyCert`, `Wasm`) is
     /// absent.
     MissingRequired,
@@ -193,18 +196,17 @@ pub fn validate_header(bytes: &[u8]) -> WnmCheck {
         return WnmCheck::SectionTableOverflow;
     }
 
-    let mut have_text = false;
-    let mut have_cert = false;
-    let mut have_wasm = false;
+    // One bit per section kind seen (discriminants 1..=4) — drives both
+    // duplicate detection and the required-present check.
+    let mut seen: u8 = 0;
 
     let mut i = 0;
     while i < section_count {
         let base = WNM_HEADER_LEN + i * WNM_SECTION_ENTRY_LEN;
         let kind_byte = bytes[base];
-        let kind = match WnmSection::from_u8(kind_byte) {
-            Some(k) => k,
-            None => return WnmCheck::UnknownSection,
-        };
+        if WnmSection::from_u8(kind_byte).is_none() {
+            return WnmCheck::UnknownSection;
+        }
         let offset = rd_u32(bytes, base + 4) as usize;
         let len = rd_u32(bytes, base + 8) as usize;
 
@@ -218,19 +220,94 @@ pub fn validate_header(bytes: &[u8]) -> WnmCheck {
             return WnmCheck::SectionOutOfBounds;
         }
 
-        match kind {
-            WnmSection::Text => have_text = true,
-            WnmSection::SafetyCert => have_cert = true,
-            WnmSection::Wasm => have_wasm = true,
-            WnmSection::Relocs => {}
+        // Discriminants are 1..=4, so `kind_byte - 1` is a valid 0..=3
+        // shift. Reject a kind that has already been seen.
+        let bit = 1u8 << (kind_byte - 1);
+        if seen & bit != 0 {
+            return WnmCheck::DuplicateSection;
+        }
+        seen |= bit;
+        i += 1;
+    }
+
+    // Required kinds: Text(1) → bit0, SafetyCert(3) → bit2, Wasm(4) → bit3.
+    const REQUIRED: u8 = (1 << 0) | (1 << 2) | (1 << 3);
+    if seen & REQUIRED != REQUIRED {
+        return WnmCheck::MissingRequired;
+    }
+    WnmCheck::Ok
+}
+
+/// Resolved byte ranges of the sections the loader needs, every range
+/// proven within the validated container. Each is `(offset, len)` from
+/// the container base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadPlan {
+    /// Native `.text` — the loader maps this RX-only.
+    pub text: (u32, u32),
+    /// Relocations, or `None` if the module carries none.
+    pub relocs: Option<(u32, u32)>,
+    /// Sandbox-safety certificate.
+    pub safety_cert: (u32, u32),
+    /// Embedded original `.wasm`, for independent re-validation.
+    pub wasm: (u32, u32),
+}
+
+/// Validate `bytes` and resolve the loader's section ranges.
+///
+/// Runs [`validate_header`] first; on [`WnmCheck::Ok`] it walks the
+/// section table and returns a [`LoadPlan`] of the `(offset, len)` ranges
+/// the kernel loader needs. Every range is within the container (already
+/// proven by `validate_header`), and each kind occurs at most once
+/// (duplicates are rejected), so resolution is unambiguous.
+///
+/// This is the loader's **front half** — pure structural resolution. It
+/// does **not** verify the signature, check the safety certificate, or
+/// map/execute anything; those are later gates with their own specs.
+///
+/// ```
+/// use wari_wnm::{load_plan, WnmCheck};
+/// // A bad buffer surfaces the same WnmCheck validate_header would give.
+/// assert_eq!(load_plan(&[]), Err(WnmCheck::Truncated));
+/// ```
+pub fn load_plan(bytes: &[u8]) -> Result<LoadPlan, WnmCheck> {
+    match validate_header(bytes) {
+        WnmCheck::Ok => {}
+        other => return Err(other),
+    }
+
+    // validate_header proved: bounds, no duplicates, required present.
+    // Re-walk to collect ranges.
+    let section_count = rd_u16(bytes, 6) as usize;
+    let mut text = None;
+    let mut relocs = None;
+    let mut cert = None;
+    let mut wasm = None;
+
+    let mut i = 0;
+    while i < section_count {
+        let base = WNM_HEADER_LEN + i * WNM_SECTION_ENTRY_LEN;
+        let range = (rd_u32(bytes, base + 4), rd_u32(bytes, base + 8));
+        match WnmSection::from_u8(bytes[base]) {
+            Some(WnmSection::Text) => text = Some(range),
+            Some(WnmSection::Relocs) => relocs = Some(range),
+            Some(WnmSection::SafetyCert) => cert = Some(range),
+            Some(WnmSection::Wasm) => wasm = Some(range),
+            None => {} // unreachable: validate_header rejected unknowns
         }
         i += 1;
     }
 
-    if !(have_text && have_cert && have_wasm) {
-        return WnmCheck::MissingRequired;
+    match (text, cert, wasm) {
+        (Some(text), Some(safety_cert), Some(wasm)) => Ok(LoadPlan {
+            text,
+            relocs,
+            safety_cert,
+            wasm,
+        }),
+        // Unreachable: validate_header returns MissingRequired otherwise.
+        _ => Err(WnmCheck::MissingRequired),
     }
-    WnmCheck::Ok
 }
 
 #[cfg(test)]
@@ -374,5 +451,52 @@ mod tests {
         assert_eq!(WnmSection::from_u8(4), Some(WnmSection::Wasm));
         assert_eq!(WnmSection::from_u8(0), None);
         assert_eq!(WnmSection::from_u8(5), None);
+    }
+
+    #[test]
+    fn duplicate_section_rejected() {
+        // Two Text sections — required set is satisfied but ambiguous.
+        let b = build(&[(TEXT, 16), (TEXT, 16), (CERT, 8), (WASM, 32)]);
+        assert_eq!(validate_header(&b), WnmCheck::DuplicateSection);
+    }
+
+    #[test]
+    fn load_plan_resolves_ranges() {
+        // Lengths chosen distinct so range checks are meaningful.
+        let b = build(&[(TEXT, 16), (RELOCS, 24), (CERT, 8), (WASM, 32)]);
+        // Payloads are laid out back-to-back after the 4-entry table.
+        let t = (WNM_HEADER_LEN + 4 * WNM_SECTION_ENTRY_LEN) as u32;
+        assert_eq!(
+            load_plan(&b),
+            Ok(LoadPlan {
+                text: (t, 16),
+                relocs: Some((t + 16, 24)),
+                safety_cert: (t + 16 + 24, 8),
+                wasm: (t + 16 + 24 + 8, 32),
+            })
+        );
+    }
+
+    #[test]
+    fn load_plan_without_relocs_is_none() {
+        let b = build(&[(TEXT, 16), (CERT, 8), (WASM, 32)]);
+        let t = (WNM_HEADER_LEN + 3 * WNM_SECTION_ENTRY_LEN) as u32;
+        assert_eq!(
+            load_plan(&b),
+            Ok(LoadPlan {
+                text: (t, 16),
+                relocs: None,
+                safety_cert: (t + 16, 8),
+                wasm: (t + 16 + 8, 32),
+            })
+        );
+    }
+
+    #[test]
+    fn load_plan_propagates_validation_error() {
+        assert_eq!(load_plan(&[]), Err(WnmCheck::Truncated));
+        let mut b = build(&[(TEXT, 16), (CERT, 8), (WASM, 32)]);
+        b[1] = b'!';
+        assert_eq!(load_plan(&b), Err(WnmCheck::BadMagic));
     }
 }
