@@ -125,6 +125,98 @@ The anti-pattern: "make it fast by giving it raw/unchecked syscalls."
 That is the hackable path. Keep every effect capability-checked; make the
 checking cheap (AOT-inlined fast paths + batching), not absent.
 
+### 4.1 The execution-latency hierarchy
+
+Ordered fastest→slowest, with the security cost of each rung. The design
+target is the *fastest rung that preserves isolation*.
+
+| Rung | Mechanism | Rough cost | Isolation |
+|------|-----------|-----------|-----------|
+| 0 | Raw native in Tier 0 | ~function call | **none — bugs are kernel bugs.** ❌ the line not to cross |
+| 1 | Tier-2 AOT + **registered-cap** ring (validate-once) | ~array-index on hot path; 1 trap / batch | full ✓ |
+| 2 | Tier-2 AOT + **seL4 fastpath** IPC (single call) | ~hundreds of cycles, register-only | full ✓ |
+| 3 | Tier-2 AOT + per-call host-fn trampoline | ~tens–hundreds ns / call | full ✓ |
+| 4 | Tier-1 interpreted + WASI per-call | interpreter + trampoline | full ✓ (slow) |
+
+The assistant lives at **rungs 1–2**: registered-cap ring for throughput,
+seL4 fastpath for latency-critical single actions. Rung 0 is the hackable
+cliff; rungs 3–4 are the unoptimized fallback.
+
+### 4.2 Registered capabilities — validate once, reference many
+
+The crux of "direct" speed. Per-call capability validation is the cost;
+eliminate it from the hot path without removing the check:
+
+1. The module **registers** a resource it will use repeatedly (a socket,
+   an accelerator queue, a memory region). The kernel does the **full
+   capability check once** and returns a small integer **handle index**
+   into a per-module *registered-resource table*.
+2. Hot-path syscalls reference the **index**, not the capability. The
+   kernel's check collapses to a bounds-checked table lookup +
+   "is-this-slot-live" — O(1), branch-predictable, AOT-inlinable.
+3. A forged or stale index hits an empty/revoked slot → rejected. No
+   authority is ever conferred by the index itself; it only *names* an
+   already-proven capability.
+
+This is io_uring's registered-files/buffers idea, recast through the
+capability system. It is what makes the fast path *direct* (no
+revalidation) and *safe* (the authority was proven at registration and is
+revoked atomically on unregister).
+
+### 4.3 Batched submission / completion ring
+
+A shared-memory pair of queues in the module's **own linear memory**:
+
+```
+ SQ (submission queue): module writes { op, handle_idx, args… } entries
+ CQ (completion queue):  kernel writes { result, user_data } entries
+ doorbell:               one trap (or one notification) wakes the kernel
+```
+
+- The module batches N submissions, rings the doorbell **once** → one
+  mode crossing per batch instead of per syscall (throughput rung 1).
+- The kernel drains the SQ, and for **each** entry: bounds-check
+  `handle_idx` against the registered table (§4.2), check the op is
+  permitted for that handle, execute, post a CQ entry. **Every entry is
+  validated** — the ring amortizes the *crossing*, never the *check*.
+- The ring lives in the module's sandbox, so a malicious entry can only
+  ask; the kernel copies+validates as it drains. A corrupt SQ harms only
+  the module that owns it.
+
+### 4.4 seL4-style synchronous IPC fastpath
+
+For a single latency-critical action ("do this one thing now"), a
+hand-optimized register-only IPC path — no copy, no allocation, no ring —
+in the ~hundreds-of-cycles range. Wari already builds on seL4's
+synchronous IPC, so this is an extension of the existing Endpoint
+mechanism, not a new primitive. The cap check stays in the hot path but
+is the hand-tuned fastpath check (seL4's proven pattern).
+
+**Choose per call:** fastpath (§4.4) for latency, ring (§4.3) for
+throughput; both ride registered caps (§4.2).
+
+### 4.5 How this composes with the planner/executor split
+
+- The **executor** registers the *dangerous* capabilities (§4.2) — it,
+  not the planner, owns the fast handles to delete/egress/spend/spawn.
+- The **planner** gets registered handles only for its safe, read-mostly
+  resources (inference queue, scoped reads) → its hot path is fast *and*
+  its fast path can't touch dangerous authority.
+- So the fast path and the safety boundary are orthogonal: speed comes
+  from §4.2–4.4, safety from *which module holds which registered
+  handle*. A prompt-injected planner running at full rung-1 speed still
+  only has fast access to harmless resources.
+
+### 4.6 New invariants to draft
+
+- *A registered-resource index confers no authority by itself* — it names
+  a capability the kernel proved at registration; an out-of-range, empty,
+  or revoked index is rejected.
+- *Every SQ entry is validated against the registered table before
+  execution* — batching amortizes the trap, never the check.
+- *Unregister revokes atomically* — no in-flight SQ entry can reference a
+  handle after its slot is freed.
+
 ---
 
 ## 5 · The executor's mediation policy (the trusted core)
@@ -227,7 +319,8 @@ your trust to sit.
 | **Dual-LLM (quarantined vs privileged)** | Simon Willison (2023) | The split-the-brain pattern this generalizes |
 | **Confused deputy** | Hardy (1988) | Why authority must not ride on the actor's say-so |
 | **Object-capability / POLA** | Miller, *Robust Composition* (2006) | Attenuation, least authority, no ambient authority |
-| **Capabilities + synchronous IPC** | seL4 (Heiser et al.) | Wari already builds on this; mint/derive is the attenuation primitive |
+| **Capabilities + synchronous IPC** | seL4 (Heiser et al.) | Wari already builds on this; mint/derive is the attenuation primitive; the §4.4 fastpath extends its IPC fastpath |
+| **Registered files/buffers, SQ/CQ rings** | **io_uring** (Linux) | §4.2–4.3 validate-once-reference-many + batched submission, recast through capabilities |
 | **WASM as the isolation boundary** | Fastly Compute@Edge | The Tier-2 sandbox the modules run in |
 
 Wari already cites seL4 and Fastly in [`prior-art.md`](prior-art.md);
@@ -250,6 +343,14 @@ CaMeL and the dual-LLM/confused-deputy line are the AI-specific additions.
   semantic (capability least-privilege + executor mediation).
 - **D6 — Reuse Wari's cap system** (Endpoint/Notification, mint/derive,
   attestation); the only likely new primitive is *bounded attenuation*.
+- **D7 — Fast path = registered caps + batched ring + seL4 fastpath**
+  (§4.1–4.4): validate-once-reference-many on the hot path, one trap per
+  batch, hand-tuned IPC for single low-latency calls. Speed comes from
+  amortizing + pre-proving the capability check, never from skipping it.
+  Rung 0 (raw Tier-0 native) is the explicit line not to cross.
+- **D8 — Fast path ⟂ safety boundary** (§4.5): the executor holds the
+  registered handles to dangerous caps; the planner's fast handles are
+  harmless-only. A planner at full speed still can't reach danger.
 
 ---
 
