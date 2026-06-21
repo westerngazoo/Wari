@@ -363,6 +363,188 @@ pub mod reg {
     }
 }
 
+/// Cap-fastpath submission/completion ring wire format (PR-2a).
+///
+/// The fast path (see `docs/cap-registered-fastpath-design.md` §5) lets a
+/// module batch operations in a shared submission queue (SQ) in its own
+/// linear memory and ring a doorbell once; the kernel drains the SQ,
+/// validates each entry against the registered-handle table, dispatches,
+/// and posts a completion-queue (CQ) entry. This module is the **pure
+/// wire format** both sides agree on: entry sizes/offsets, the v1 op
+/// codes, and a copy-before-use decoder. No kernel state, no `unsafe`,
+/// host-testable.
+///
+/// v1 ops **reuse existing capability-checked operations** reached by a
+/// registered handle — the kernel resolves the handle, re-checks it, and
+/// delegates to the matching host-fn impl. No new authority is minted by
+/// the ring itself.
+pub mod ring {
+    /// Submission-queue entry size on the wire (bytes). Layout (LE,
+    /// 8-byte aligned): `op`@0, `reg_idx`@4, `flags`@8, pad@12,
+    /// `user_data`@16, `arg0`@24, `arg1`@32.
+    pub const SQE_SIZE: usize = 40;
+    /// Completion-queue entry size on the wire (bytes). Layout (LE):
+    /// `user_data`@0, `result`@8 (i64).
+    pub const CQE_SIZE: usize = 16;
+
+    /// Wait on a registered Notification handle (delegates to the
+    /// existing `notification_wait` op).
+    pub const RING_OP_NOTIFY_WAIT: u32 = 1;
+    /// Acknowledge a registered Notification handle (delegates to the
+    /// existing `notification_ack` op).
+    pub const RING_OP_NOTIFY_ACK: u32 = 2;
+    /// Highest defined ring op. New ops are appended; never renumber.
+    pub const RING_OP_MAX: u32 = RING_OP_NOTIFY_ACK;
+
+    /// Is `op` a defined ring operation? The kernel rejects unknown ops
+    /// before touching a handle.
+    #[inline]
+    pub const fn is_known_op(op: u32) -> bool {
+        op >= RING_OP_NOTIFY_WAIT && op <= RING_OP_MAX
+    }
+
+    /// A decoded submission-queue entry. The kernel decodes one of these
+    /// out of the module's linear memory **before** any validation
+    /// (copy-before-use, INV-β), so a later mutation by the module cannot
+    /// change the decision the kernel acts on.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Sqe {
+        /// Operation code (see `RING_OP_*`).
+        pub op: u32,
+        /// Registered-handle index into the caller's RegTable.
+        pub reg_idx: u32,
+        /// Per-op flags (reserved; 0 in v1).
+        pub flags: u32,
+        /// Opaque correlation token, echoed verbatim in the matching CQE.
+        pub user_data: u64,
+        /// First op-specific argument (e.g. a linear-memory offset).
+        pub arg0: u64,
+        /// Second op-specific argument (e.g. a length).
+        pub arg1: u64,
+    }
+
+    #[inline]
+    fn rd_u32(b: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+    }
+
+    #[inline]
+    fn rd_u64(b: &[u8], at: usize) -> u64 {
+        u64::from_le_bytes([
+            b[at], b[at + 1], b[at + 2], b[at + 3],
+            b[at + 4], b[at + 5], b[at + 6], b[at + 7],
+        ])
+    }
+
+    /// Decode the `idx`-th [`Sqe`] from a submission-queue byte buffer.
+    ///
+    /// Pure, allocation-free, panic-free on any input: returns `None` if
+    /// entry `idx` would read past `bytes`. This is the copy-before-use
+    /// step (INV-β) — the caller acts on the returned owned `Sqe`, never
+    /// on the live buffer.
+    ///
+    /// ```
+    /// use wari_abi::ring::{decode_sqe, SQE_SIZE};
+    /// // Out-of-range index returns None instead of panicking.
+    /// assert_eq!(decode_sqe(&[0u8; SQE_SIZE], 1), None);
+    /// ```
+    pub fn decode_sqe(bytes: &[u8], idx: usize) -> Option<Sqe> {
+        let base = idx.checked_mul(SQE_SIZE)?;
+        let end = base.checked_add(SQE_SIZE)?;
+        if end > bytes.len() {
+            return None;
+        }
+        Some(Sqe {
+            op: rd_u32(bytes, base),
+            reg_idx: rd_u32(bytes, base + 4),
+            flags: rd_u32(bytes, base + 8),
+            user_data: rd_u64(bytes, base + 16),
+            arg0: rd_u64(bytes, base + 24),
+            arg1: rd_u64(bytes, base + 32),
+        })
+    }
+
+    /// Encode a completion-queue entry: the originating `user_data` and
+    /// the op `result` (`>= 0` success / negative errno).
+    #[inline]
+    pub fn encode_cqe(user_data: u64, result: i64) -> [u8; CQE_SIZE] {
+        let mut out = [0u8; CQE_SIZE];
+        out[0..8].copy_from_slice(&user_data.to_le_bytes());
+        out[8..16].copy_from_slice(&result.to_le_bytes());
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn op_codes_known_range() {
+            assert!(is_known_op(RING_OP_NOTIFY_WAIT));
+            assert!(is_known_op(RING_OP_NOTIFY_ACK));
+            assert!(!is_known_op(0));
+            assert!(!is_known_op(RING_OP_MAX + 1));
+            assert!(!is_known_op(u32::MAX));
+        }
+
+        #[test]
+        fn decode_sqe_reads_fields_le() {
+            let mut b = [0u8; SQE_SIZE];
+            b[0..4].copy_from_slice(&RING_OP_NOTIFY_WAIT.to_le_bytes());
+            b[4..8].copy_from_slice(&7u32.to_le_bytes()); // reg_idx
+            b[8..12].copy_from_slice(&0u32.to_le_bytes()); // flags
+            b[16..24].copy_from_slice(&0xDEAD_BEEFu64.to_le_bytes()); // user_data
+            b[24..32].copy_from_slice(&0x1000u64.to_le_bytes()); // arg0
+            b[32..40].copy_from_slice(&512u64.to_le_bytes()); // arg1
+            assert_eq!(
+                decode_sqe(&b, 0),
+                Some(Sqe {
+                    op: RING_OP_NOTIFY_WAIT,
+                    reg_idx: 7,
+                    flags: 0,
+                    user_data: 0xDEAD_BEEF,
+                    arg0: 0x1000,
+                    arg1: 512,
+                })
+            );
+        }
+
+        #[test]
+        fn decode_sqe_out_of_range_is_none_not_panic() {
+            assert_eq!(decode_sqe(&[], 0), None);
+            assert_eq!(decode_sqe(&[0u8; SQE_SIZE], 1), None);
+            // A partial trailing entry is rejected wholesale.
+            assert_eq!(decode_sqe(&[0u8; SQE_SIZE + 4], 1), None);
+            // usize overflow on idx*SQE_SIZE is handled (no panic).
+            assert_eq!(decode_sqe(&[0u8; SQE_SIZE], usize::MAX), None);
+        }
+
+        #[test]
+        fn decode_sqe_second_entry() {
+            let mut b = [0u8; SQE_SIZE * 2];
+            b[SQE_SIZE..SQE_SIZE + 4].copy_from_slice(&RING_OP_NOTIFY_ACK.to_le_bytes());
+            let sqe = decode_sqe(&b, 1);
+            assert!(sqe.is_some());
+            assert_eq!(sqe.map(|s| s.op), Some(RING_OP_NOTIFY_ACK));
+        }
+
+        #[test]
+        fn encode_cqe_roundtrips() {
+            let c = encode_cqe(0x1122_3344_5566_7788, -2);
+            assert_eq!(&c[0..8], &0x1122_3344_5566_7788u64.to_le_bytes());
+            // Compare the result bytes directly (no unwrap/try_into).
+            assert_eq!(&c[8..16], &(-2i64).to_le_bytes());
+        }
+
+        #[test]
+        fn entry_sizes_are_stable() {
+            // Wire-format ABI: these sizes are part of the contract.
+            assert_eq!(SQE_SIZE, 40);
+            assert_eq!(CQE_SIZE, 16);
+        }
+    }
+}
+
 // ── Tests — pure, runnable on host ─────────────────────────────
 
 #[cfg(test)]
