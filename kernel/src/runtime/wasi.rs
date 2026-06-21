@@ -131,7 +131,7 @@ pub fn register_wasi_host_fns(
     // closure so each Tier-1 instance touches its own CSpace.
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-        cap_revoke_impl,
+        cap_register_impl, cap_revoke_impl, cap_unregister_impl,
     };
     linker
         .func_wrap(
@@ -175,6 +175,25 @@ pub fn register_wasi_host_fns(
             "cap_lookup",
             move |mut caller: Caller<'_, Tier1HostState>, slot: u32, out_buf: u32| -> i32 {
                 cap_lookup_impl(&mut caller, pid, slot, out_buf)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    // Cap-fastpath register/unregister (PR cap-fastpath-1).
+    linker
+        .func_wrap(
+            "wari",
+            "cap_register",
+            move |_: Caller<'_, Tier1HostState>, cspace_slot: u32| -> i32 {
+                cap_register_impl(pid, cspace_slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_unregister",
+            move |_: Caller<'_, Tier1HostState>, reg_idx: u32| -> i32 {
+                cap_unregister_impl(pid, reg_idx)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;
