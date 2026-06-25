@@ -47,15 +47,16 @@ const VIRTIO_MMIO_BASE: usize = 0x1000_1000;
 #[cfg(feature = "qemu")]
 const VIRTIO_MMIO_LEN:  usize = 0x8000;
 
-/// JH7110 GMAC0 register window — 64 KiB at 0x16030000 covers
-/// every register group the Phase-1c driver touches (MAC config,
-/// MMC counters, MTL queues, DMA channel-N descriptors). vf2-only.
-/// Added in PR Phase-1c-1.6 once the page-allocator pool was sized
-/// to 256 pages (build 69).
+/// JH7110 GMAC register window — 128 KiB at 0x16030000 covers
+/// both GMAC0 (0x16030000) and GMAC1 (0x16040000). Phase-1c-11
+/// widened from 64 KiB so the `gmac1` cargo feature path can read
+/// `GMAC1_BASE + 0x110` (version) without a Load Page Fault.
+/// Each MAC's 64 KiB register window covers MAC config, MMC
+/// counters, MTL queues, and DMA channel-N descriptors. vf2-only.
 #[cfg(feature = "vf2")]
 const GMAC0_MMIO_BASE: usize = 0x1603_0000;
 #[cfg(feature = "vf2")]
-const GMAC0_MMIO_LEN:  usize = 0x1_0000;
+const GMAC0_MMIO_LEN:  usize = 0x2_0000;
 
 /// JH7110 STG clock + reset generator (STGCRG). 64 KiB at
 /// 0x10230000. Owns GMAC0_AHB / _AXI / _PTP / _TX / _RX clocks
@@ -70,10 +71,21 @@ const STGCRG_MMIO_LEN:  usize = 0x1_0000;
 /// 0x13020000. Owns the NOC_BUS_STG_AXI clock that the GMAC0
 /// AXI port depends on; without it the GMAC's MMIO is alive but
 /// register reads return zeros (the bus to the IP block is gated).
+/// Phase-1c-11: also owns the GMAC1_* clock+gate cluster
+/// (+0x184..+0x1AC) and the GMAC1 reset register (+0x300).
 #[cfg(feature = "vf2")]
 const SYSCRG_MMIO_BASE: usize = 0x1302_0000;
 #[cfg(feature = "vf2")]
 const SYSCRG_MMIO_LEN:  usize = 0x1_0000;
+
+/// JH7110 SYS syscon. 4 KiB at 0x13030000 — separate from SYSCRG.
+/// Holds the GMAC1 phy-interface-mode select field (offset 0x90,
+/// bits 4:2), the SYS-side equivalent of AON_SYSCON +0x0C for
+/// GMAC0. Required by Phase-1c-11 (gmac1 cargo feature).
+#[cfg(feature = "vf2")]
+const SYS_SYSCON_MMIO_BASE: usize = 0x1303_0000;
+#[cfg(feature = "vf2")]
+const SYS_SYSCON_MMIO_LEN:  usize = 0x1000;
 
 /// JH7110 always-on clock + reset generator (AONCRG). 64 KiB at
 /// 0x17000000. Phase-1c maps this for completeness; the actual
@@ -221,6 +233,7 @@ pub fn init() -> Result<(), KernelError> {
         map_range(root, GMAC0_MMIO_BASE, GMAC0_MMIO_BASE + GMAC0_MMIO_LEN, KERNEL_RW)?;
         map_range(root, STGCRG_MMIO_BASE, STGCRG_MMIO_BASE + STGCRG_MMIO_LEN, KERNEL_RW)?;
         map_range(root, SYSCRG_MMIO_BASE, SYSCRG_MMIO_BASE + SYSCRG_MMIO_LEN, KERNEL_RW)?;
+        map_range(root, SYS_SYSCON_MMIO_BASE, SYS_SYSCON_MMIO_BASE + SYS_SYSCON_MMIO_LEN, KERNEL_RW)?;
         map_range(root, AONCRG_MMIO_BASE, AONCRG_MMIO_BASE + AONCRG_MMIO_LEN, KERNEL_RW)?;
         map_range(root, AON_SYSCON_MMIO_BASE, AON_SYSCON_MMIO_BASE + AON_SYSCON_MMIO_LEN, KERNEL_RW)?;
     }
