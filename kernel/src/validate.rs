@@ -45,13 +45,16 @@ pub const NET_MMIO_BASE: usize = 0x1000_8000;
 #[cfg(feature = "qemu")]
 pub const NET_MMIO_LEN:  usize = 0x200;
 
-/// JH7110 GMAC eth0 register window. Phase-1c will land the real
-/// GMAC driver; Phase-1b ships the validator with the right range
-/// so the cfg-feature switch compiles for both targets.
+/// JH7110 GMAC register window. The Wari net driver picks GMAC0
+/// (0x16030000) or GMAC1 (0x16040000) via the `gmac1` cfg-feature.
+/// Both ranges are 64 KiB and sit adjacent — covering them with a
+/// single 128 KiB window is the simplest valid cap-gate while
+/// keeping the dual-NIC option open (Phase-1c-11). Inside the
+/// driver, `plat::NIC_BASE` picks which half is touched.
 #[cfg(feature = "vf2")]
 pub const NET_MMIO_BASE: usize = 0x1603_0000;
 #[cfg(feature = "vf2")]
-pub const NET_MMIO_LEN:  usize = 0x1_0000;
+pub const NET_MMIO_LEN:  usize = 0x2_0000;
 
 /// User-mappable VA range. Below `USER_VA_START` is MMIO; at or above
 /// `USER_VA_END` is kernel space. Phase-0 scaffold — revisit when the
