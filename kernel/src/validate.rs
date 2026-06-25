@@ -127,8 +127,14 @@ pub const fn is_net_mmio_addr(addr: usize) -> bool {
             return true;
         }
         // SYSCRG — owns NOC_BUS_STG_AXI which the GMAC0 AXI port
-        // depends on, plus several GMAC0_* clock gates.
+        // depends on, plus several GMAC0_* and GMAC1_* clock gates.
         if addr >= 0x1302_0000 && addr < 0x1303_0000 {
+            return true;
+        }
+        // SYS SYSCON — phy-interface-select for GMAC1 (Phase-1c-11).
+        // Single register at +0x90; widen to a 4 KiB page anyway so
+        // the kernel side doesn't need to know exact offsets.
+        if addr >= 0x1303_0000 && addr < 0x1303_1000 {
             return true;
         }
         // AONCRG — read-only diagnostic for AON-domain state.

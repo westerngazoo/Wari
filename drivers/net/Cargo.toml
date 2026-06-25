@@ -42,6 +42,13 @@ smoltcp = { version = "0.11", default-features = false, features = [
 default = ["qemu"]
 qemu = []
 vf2  = []
+# Phase-1c-11: target the JH7110's GMAC1 (MAC base 0x16040000) instead
+# of GMAC0 (0x16030000). Only meaningful in combination with `vf2`.
+# Lets the operator wire VF2 eth0 to a Debian-side internet router and
+# VF2 eth1 to an isolated test net (e.g. OpenWrt) without cable
+# juggling. Default vf2 build keeps targeting GMAC0; enable explicitly
+# for the eth1-test rig.
+gmac1 = ["vf2"]
 
 [profile.release]
 panic = "abort"
