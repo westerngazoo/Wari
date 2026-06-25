@@ -2144,36 +2144,100 @@ pub fn driver_start() {
         //   tx-internal-delay-ps = 0    → 0x00
         //   NO tx-clk-1000-inverted (bit 14 clear)
         //   Final value: (0x02<<10) | (0x00<<0) = 0x0800.
-        const YTPHY_PAGE_SELECT:        u32 = 0x1E;
-        const YTPHY_PAGE_DATA:          u32 = 0x1F;
-        const YT8521_RGMII_CONFIG1_REG: u16 = 0xA003;
-        #[cfg(not(feature = "gmac1"))]
-        const YT8531_RC1R_VF2_VALUE:    u16 = 0x680A;
+        const YTPHY_PAGE_SELECT:           u32 = 0x1E;
+        const YTPHY_PAGE_DATA:             u32 = 0x1F;
+        const YT8521_CHIP_CONFIG_REG:      u16 = 0xA001;
+        const YT8521_CCR_RXC_DLY_EN:       u32 = 1 << 8;
+        const YT8521_RGMII_CONFIG1_REG:    u16 = 0xA003;
         #[cfg(feature = "gmac1")]
-        const YT8531_RC1R_VF2_VALUE:    u16 = 0x0800;
+        const YT8531_PAD_DRIVE_STRENGTH_REG: u16 = 0xA010;
+        #[cfg(not(feature = "gmac1"))]
+        const YT8531_RC1R_VF2_VALUE:       u16 = 0x680A;
+        #[cfg(feature = "gmac1")]
+        const YT8531_RC1R_VF2_VALUE:       u16 = 0x0800;
 
-        // Pre-read so we know U-Boot's starting value.
+        // Step 1 — RGMII config 1 register (0xA003): RX/TX delays
+        // + TX_CLK_SEL_INVERTED bit. Pre-read so we can detect
+        // whether the value changed and force a re-AN if so.
         let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
                                YT8521_RGMII_CONFIG1_REG);
         let rc1r_pre = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3152, rc1r_pre) }; // 'RC1R'
 
-        // Write delays + TX clock inversion.
         let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
                                YT8521_RGMII_CONFIG1_REG);
         let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA,
                                YT8531_RC1R_VF2_VALUE);
 
-        // Verify-read.
         let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
                                YT8521_RGMII_CONFIG1_REG);
         let rc1r_post = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3170, rc1r_post) }; // 'RC1p'
 
-        // Force re-AN if 0xA003 changed: YT8531C latches RXC delay
-        // at link-up. Without a re-AN the new delays don't take
-        // effect on the live link inherited from U-Boot.
-        let needs_relink = rc1r_pre != (YT8531_RC1R_VF2_VALUE as u32);
+        // Step 2 — Chip Config Register (0xA001) bit 8 = RXC_DLY_EN.
+        // Required by ytphy_rgmii_clk_delay_config() in upstream
+        // motorcomm.c. For 300 ps RX delay (low-half of the LUT),
+        // bit 8 must be CLEAR. For 1500 ps (high-half), bit 8 set.
+        // Both GMAC0 (1500ps) and GMAC1 (300ps) need explicit RMW;
+        // U-Boot's leftover bit-8 state is unreliable.
+        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+                               YT8521_CHIP_CONFIG_REG);
+        let ccr_pre = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
+        let _ = unsafe { wari_drv_log_u32(0x4343_3072, ccr_pre) }; // 'CC0r'
+
+        #[cfg(feature = "gmac1")]
+        let ccr_new = ccr_pre & !YT8521_CCR_RXC_DLY_EN;          // clear bit 8 (300ps low-half)
+        #[cfg(not(feature = "gmac1"))]
+        let ccr_new = ccr_pre | YT8521_CCR_RXC_DLY_EN;           // set bit 8 (1500ps high-half)
+        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+                               YT8521_CHIP_CONFIG_REG);
+        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA,
+                               ccr_new as u16);
+
+        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+                               YT8521_CHIP_CONFIG_REG);
+        let ccr_post = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
+        let _ = unsafe { wari_drv_log_u32(0x4343_3070, ccr_post) }; // 'CC0p'
+
+        // Step 3 — Pad Drive Strength (0xA010). VF2 v1.3b dts for
+        // &phy1 sets rx-clk-drv-microamp = 3970 (ds = 6 in the 1V8
+        // LDO column of yt8531_ldo_vol[]) and rx-data-drv-microamp
+        // = 2910 (ds = 3). Encoded fields:
+        //   RXC_DS       = bits 15:13 (mask 0xE000) ← 6 (= 0xC000)
+        //   RXD_DS_HI    = bit  12    (mask 0x1000) ← 0 (high bit of ds=3)
+        //   RXD_DS_LOW   = bits 5:4   (mask 0x0030) ← 3 (low 2 bits of ds=3)
+        // Combined mask: 0xF030. Combined value: (6<<13) | (3<<4) = 0xC030.
+        //
+        // Without this the RGMII signal integrity at 300 ps RX
+        // delay is marginal — that's the second-most-likely cause
+        // of the 96% silent-drop seen on build 126 (after the bug
+        // A above of the RXC_DLY_EN bit). Skipped on GMAC0 path
+        // (its phy0 dts does not specify these drive props).
+        #[cfg(feature = "gmac1")]
+        {
+            let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+                                   YT8531_PAD_DRIVE_STRENGTH_REG);
+            let pds_pre = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
+            let _ = unsafe { wari_drv_log_u32(0x5044_5372, pds_pre) }; // 'PDSr'
+
+            let pds_new = (pds_pre & !0xF030u32) | 0xC030u32;
+            let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+                                   YT8531_PAD_DRIVE_STRENGTH_REG);
+            let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA,
+                                   pds_new as u16);
+
+            let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+                                   YT8531_PAD_DRIVE_STRENGTH_REG);
+            let pds_post = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
+            let _ = unsafe { wari_drv_log_u32(0x5044_5370, pds_post) }; // 'PDSp'
+        }
+
+        // Force re-AN if any of the three PHY registers (0xA003,
+        // 0xA001 bit 8, 0xA010) changed value. YT8531C latches
+        // RGMII timing at link-up; without a fresh AN the new
+        // values don't take effect on the live link.
+        let needs_relink = rc1r_pre != (YT8531_RC1R_VF2_VALUE as u32)
+                        || ccr_pre != ccr_new;
 
         // PR Phase-1c-5 — IEEE 802.3 auto-negotiation.
         //
