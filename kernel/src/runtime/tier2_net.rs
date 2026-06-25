@@ -106,6 +106,25 @@ pub fn next_tick() -> u64 {
     }
 }
 
+/// Single accessor for the `TIER2_NET` singleton. Returns
+/// `&mut Option<Tier2NetHandle>` so callers can either take a
+/// `.as_mut()` borrow (steady-state poll / socket calls) or
+/// pattern-match for the `None` (uninstalled) case.
+///
+/// Centralizes the `static mut` aliasing so the rest of the
+/// module never names `TIER2_NET` directly.
+///
+/// # Safety
+/// INV-1 single-hart + install-then-read ordering (INV-14
+/// generalized). Caller must not hold another live borrow.
+unsafe fn tier2_net_slot() -> &'static mut Option<Tier2NetHandle> {
+    // SAFETY: contract above. addr_of_mut!()/.as_mut() is the
+    // 2024-edition-safe way to materialize a `&'static mut` to a
+    // `static mut`; the lifetime is sound because the static is
+    // valid for the kernel's whole lifetime.
+    unsafe { &mut *addr_of_mut!(TIER2_NET) }
+}
+
 /// Install the net driver handle. Called once from
 /// `runtime::run_tier2_net` after the driver's `_start` has
 /// completed (which means VirtIO init succeeded AND the smoltcp
