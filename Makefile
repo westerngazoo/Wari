@@ -131,9 +131,9 @@ build-net-driver:
 	  cargo build --release --features qemu --no-default-features
 	@cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
 		build/drivers/net-qemu.wasm
-	@echo "  [build] net driver: VF2 variant (JH7110 GMAC1, Phase-1c-11)"
+	@echo "  [build] net driver: VF2 variant (JH7110 GMAC1, Phase-1c-12 + net-diag)"
 	@cd drivers/net && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo build --release --features "vf2 gmac1" --no-default-features
+	  cargo build --release --features "vf2 gmac1 net-diag" --no-default-features
 	@cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
 		build/drivers/net-vf2.wasm
 

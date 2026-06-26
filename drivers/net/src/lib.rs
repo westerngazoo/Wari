@@ -61,6 +61,9 @@ compile_error!("wari-driver-net requires --features qemu or --features vf2.");
 #[cfg(all(feature = "qemu", feature = "vf2"))]
 compile_error!("wari-driver-net accepts only one of --features qemu / vf2.");
 
+#[cfg(feature = "net-diag")]
+mod diag;
+
 /// Embedded build-number tag — the kernel's `build.rs` greps the
 /// signed wasm for this string and refuses to compile if it doesn't
 /// match the kernel's own `WARI_BUILD`. Catches the stale-driver
@@ -1470,6 +1473,11 @@ pub mod vf2_phy {
                     vf2_rx_rearm(prev);
                 }
             }
+            // Build-129 net-diag: 17-register RX-path snapshot every
+            // ~32K calls. Branch-predictable: the early-return inside
+            // covers 99.997% of calls. See drivers/net/src/diag.rs.
+            #[cfg(feature = "net-diag")]
+            super::diag::maybe_snapshot(GMAC_BASE);
             // Round-robin walk over the 16 RX descriptors looking
             // for one whose OWN bit was cleared by the DMA engine.
             // SAFETY: single-threaded driver; static muts are the
@@ -1495,6 +1503,11 @@ pub mod vf2_phy {
                         let _ = super::wari_drv_log_u32(0x7258_4672, val);
                         vf2_state::C_FRAMES_FOUND =
                             vf2_state::C_FRAMES_FOUND.wrapping_add(1);
+                        // Build-129 net-diag: one-shot deep dump at the
+                        // critical 0→1 frame-found transition. Internal
+                        // guard makes subsequent calls no-ops.
+                        #[cfg(feature = "net-diag")]
+                        super::diag::note_first_frame(GMAC_BASE, i as u32);
                         // Stash the slot so the NEXT receive()
                         // call re-arms it (see top of fn).
                         vf2_state::PREV_YIELDED = i;
@@ -3031,11 +3044,16 @@ pub fn driver_start() {
             vf2_state::LIN_BASE = lin_base;
         }
 
-        // MAC bytes from EEPROM (programmed earlier into MAC_ADDR0):
-        // 6c:cf:39:00:40:84 → low = 0x0039CF6C, high = 0x80008440
-        // (high has AE bit; pull the bytes from the constant we
-        // already have).
+        // MAC bytes from EEPROM, mirroring the MAC_ADDR0 write
+        // at lines 2849-2851. eth0 = :84 (GMAC0), eth1 = :85
+        // (GMAC1). Without the cfg gate here, builds 125-128 fed
+        // :84 to wari_nic_set_mac even when the rest of the driver
+        // was correctly targeting GMAC1 — making the kernel's
+        // boot trace lie about which MAC was running.
+        #[cfg(not(feature = "gmac1"))]
         let mac: [u8; 6] = [0x6c, 0xCF, 0x39, 0x00, 0x40, 0x84];
+        #[cfg(feature = "gmac1")]
+        let mac: [u8; 6] = [0x6c, 0xCF, 0x39, 0x00, 0x40, 0x85];
 
         // Kick smoltcp Interface up. nic_iface owns the static
         // INTERFACE / SOCKETS slots; init populates them.
@@ -3054,6 +3072,13 @@ pub fn driver_start() {
         let mac_high = (mac[4] as u32) | ((mac[5] as u32) << 8);
         // SAFETY: extern host fn. Kernel cap-checks Net+WRITE.
         let _ = unsafe { wari_nic_set_mac(mac_low, mac_high) };
+
+        // Build-129 net-diag: boot-time register snapshot. Fires once
+        // at end of init so the operator sees the full RX-path state
+        // BEFORE any traffic arrives — a "this is what the MAC looks
+        // like with my init complete" baseline.
+        #[cfg(feature = "net-diag")]
+        diag::boot_dump(plat::NIC_BASE);
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave

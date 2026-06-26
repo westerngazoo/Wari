@@ -49,6 +49,14 @@ vf2  = []
 # juggling. Default vf2 build keeps targeting GMAC0; enable explicitly
 # for the eth1-test rig.
 gmac1 = ["vf2"]
+# Phase-1c-12: periodic 17-register snapshot of the DWMAC RX path
+# (MMC counters, MTL debug, DMA status, current descriptor) emitted
+# every ~32K receive() calls. Plus a one-shot deep-dump on the very
+# first OWN=0 transition. Lets the operator tell which layer drops
+# frames (PHY / MAC filter / MTL FIFO / DMA) in a single screen-
+# height of trace. Opt-in for diagnostic builds; default-off keeps
+# production trace volume unchanged.
+net-diag = []
 
 [profile.release]
 panic = "abort"

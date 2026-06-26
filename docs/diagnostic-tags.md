@@ -51,6 +51,69 @@ that we added during the stale-driver hunt. The counters in `St**` subsume
 them — if you need step-level breakpoints back, add a new tag for the
 specific failure you're chasing rather than reviving the kitchen-sink set.
 
+## Build 129 — net-diag snapshot tags (`N*` family)
+
+Gated behind the `net-diag` cargo feature. Default-off for production
+builds. The `'N'` prefix is reserved exclusively for this family — no
+other tag in the registry leads with `'N'` (`0x4E`).
+
+### Lifecycle markers
+
+| Tag hex | ASCII | Source | Fires when |
+|---|---|---|---|
+| `0x4E64_6742` | `NdgB` | `diag::boot_dump` | Boot-time deep dump start. val = `0xB007_0000`. Trailer with same tag + val `0xB007_FFFF` marks dump end. |
+| `0x4E64_6753` | `NdgS` | `diag::maybe_snapshot` | Periodic snapshot header. val = snapshot counter (`0`, `1`, `2`, ...). |
+| `0x4E64_6746` | `NdgF` | `diag::note_first_frame` | First OWN=0 transition. val = slot idx where frame landed. Fires exactly once per boot. |
+
+### MAC layer (`NM_*`)
+
+| Tag hex | ASCII | Register | Reads from |
+|---|---|---|---|
+| `0x4E4D_5F43` | `NM_C` | MAC_CONFIGURATION | `GMAC_BASE + 0x0000` |
+| `0x4E4D_5F46` | `NM_F` | MAC_PACKET_FILTER | `GMAC_BASE + 0x0008` |
+| `0x4E4D_5F44` | `NM_D` | MAC_DEBUG | `GMAC_BASE + 0x0114` |
+| `0x4E4D_5F50` | `NM_P` | MAC_PHYIF_CTRL_STATUS | `GMAC_BASE + 0x00F8` |
+| `0x4E4D_5F56` | `NM_V` | MAC_VERSION | `GMAC_BASE + 0x0110` (boot dump only) |
+
+### MMC RX counters (`Nm**`)
+
+| Tag hex | ASCII | Register | Diagnostic value |
+|---|---|---|---|
+| `0x4E6D_4742` | `NmGB` | MMC_RX_FRAMECOUNT_GB | Total RX frames hitting MAC. **Stuck at 0 = PHY blocking** |
+| `0x4E6D_475F` | `NmG_` | MMC_RX_FRAMECOUNT_G | Good frames only |
+| `0x4E6D_4372` | `NmCr` | MMC_RX_CRC_ERROR | **Climbs in lockstep with GB = RGMII timing wrong** |
+| `0x4E6D_416C` | `NmAl` | MMC_RX_ALIGN_ERROR | PHY/MAC framing skew |
+| `0x4E6D_4C65` | `NmLe` | MMC_RX_LENGTH_ERROR | Length field bad |
+| `0x4E6D_466F` | `NmFo` | MMC_RX_FIFO_OVERFLOW | RXQ too small or MTL backed up |
+
+### MTL layer (`NT_*`)
+
+| Tag hex | ASCII | Register | Diagnostic value |
+|---|---|---|---|
+| `0x4E54_5F4F` | `NT_O` | MTL_RXQ0_OP_MODE | Should match init (RSF, RQS=7) |
+| `0x4E54_5F4D` | `NT_M` | MTL_RXQ0_MISSED | **Non-zero = MAC accepted frames, MTL dropped them** |
+| `0x4E54_5F44` | `NT_D` | MTL_RXQ0_DEBUG | Bits 5:4 PRXQ = FIFO fill. Stuck non-zero = DMA stalled |
+
+### DMA layer (`ND_*`)
+
+| Tag hex | ASCII | Register | Diagnostic value |
+|---|---|---|---|
+| `0x4E44_5F52` | `ND_R` | DMA_CH0_RX_CONTROL | Bit 0 SR must = 1 |
+| `0x4E44_5F43` | `ND_C` | DMA_CH0_CUR_RXDESC | **Δ across snapshots = engine running.** Stuck = no frames OR RBU |
+| `0x4E44_5F42` | `ND_B` | DMA_CH0_CUR_RXBUF | Buffer PA being filled |
+| `0x4E44_5F53` | `ND_S` | DMA_CH0_STATUS | Bit 7 RBU = ring full; bits 8:5 RPS = engine state |
+
+### Reading a snapshot — diagnosis table
+
+| Pattern in trace | Layer blocking frames |
+|---|---|
+| `NM_P` link-up bit stays 0 across snapshots | **PHY** — no link / AN didn't complete |
+| Link up, but `NmGB` stays at 0 for many snapshots | **MAC** — RE bit cleared, or DA filter rejecting (check `NM_F` PR=1) |
+| `NmGB` climbs, `NmCr` tracks 1:1 with it | **RGMII timing** — re-tune YT8531C ext-reg `0xA003` |
+| `NmGB` > 0, `NmCr` = 0, `NT_M` climbs | **MTL** — RXQ dropping |
+| `NT_M` = 0, `ND_S` bit 7 (RBU) = 1 | **driver** — descriptor re-arm too slow |
+| `ND_C` advancing but `StRf` still 0 | **descriptor handoff bug** — RX_NEXT wrong |
+
 ## Counter stats (build 118+)
 
 Emitted as a six-line burst every ~65536 receive() calls. If `St**` lines
