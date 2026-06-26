@@ -2747,6 +2747,18 @@ pub fn driver_start() {
                  | 64;                        // total length 64
         }
 
+        // Build 134 — MAC_RXQ_CTRL0 (0x00A0) bits[1:0] = RXQ0EN.
+        // Linux dwmac4_rx_queue_enable() writes 0b10 (DCB mode = 2)
+        // here BEFORE the MAC's RE bit is set. Build 133 wrote it
+        // AFTER and the read-back was 0 — the MAC silently rejected
+        // the change because RX queue assignment is locked once RE=1.
+        // Moving the write to right before MAC_CONFIG fixes the
+        // ordering. Verify-read tag 'RXQ0' (0x52585130) immediately
+        // confirms whether the value sticks this time.
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x0A0, 0x0000_0002) };
+        let rxq_early = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x0A0) };
+        let _ = unsafe { wari_drv_log_u32(0x5258_5130, rxq_early) }; // 'RXQ0' early
+
         // MAC_CONFIG = 0x0000_2003 (DM | TE | RE) — full-duplex +
         // enable transmit + enable receive. Build 121: added DM
         // bit (13) per Linux mainline stmmac_mac_link_up for
