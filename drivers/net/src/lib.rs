@@ -2207,11 +2207,23 @@ pub fn driver_start() {
         let rc1r_pre = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3152, rc1r_pre) }; // 'RC1R'
 
-        // Write delays + TX clock inversion.
-        let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
-                               YT8521_RGMII_CONFIG1_REG);
-        let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA,
-                               YT8531_RC1R_VF2_VALUE);
+        // Build 131 — inheritance test. Linux on the same hardware
+        // receives frames perfectly with whatever value U-Boot left
+        // in 0xA003. Builds 124-130 ALL wrote a different value and
+        // ALL produced 0% RX. The single-variable test: don't write
+        // 0xA003 at all on the gmac1 path. If RX starts working, the
+        // write was the problem; if not, the value isn't the issue.
+        // GMAC0 path keeps its existing 0x680A write (proven working
+        // earlier in the project for the home-router test rig).
+        #[cfg(not(feature = "gmac1"))]
+        {
+            let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
+                                   YT8521_RGMII_CONFIG1_REG);
+            let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA,
+                                   YT8531_RC1R_VF2_VALUE);
+        }
+        #[cfg(feature = "gmac1")]
+        let _ = YT8531_RC1R_VF2_VALUE; // silence unused-const warning under gmac1
 
         // Verify-read.
         let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
@@ -2222,6 +2234,13 @@ pub fn driver_start() {
         // Force re-AN if 0xA003 changed: YT8531C latches RXC delay
         // at link-up. Without a re-AN the new delays don't take
         // effect on the live link inherited from U-Boot.
+        // Build 131: on the gmac1 path we don't write 0xA003, so
+        // we never need a fresh AN cycle — accept whatever link
+        // U-Boot brought up. Avoids a 500 ms link drop on every
+        // boot for the no-write hypothesis test.
+        #[cfg(feature = "gmac1")]
+        let needs_relink = false;
+        #[cfg(not(feature = "gmac1"))]
         let needs_relink = rc1r_pre != (YT8531_RC1R_VF2_VALUE as u32);
 
         // PR Phase-1c-5 — IEEE 802.3 auto-negotiation.
