@@ -2117,6 +2117,31 @@ pub fn driver_start() {
             let _ = unsafe { wari_drv_log_u32(0x4731_5274, v310) }; // 'G1Rt'
         }
 
+        // Build 132 — phy_intf_sel write moved EARLIER (was fired
+        // after PHY init at line ~2492). Hypothesis: if SYS SYSCON
+        // +0x90 isn't programmed to RGMII before the MAC version
+        // read, the GMAC IP block latches into the wrong RX clock
+        // sourcing mode and doesn't recover when we set it later.
+        // Builds 125-131 all wrote it AFTER PHY init; if that was
+        // the bug, NmGB should climb starting with this build.
+        // Original (later) block kept as a redundant idempotent
+        // write — harmless if the value is already correct.
+        #[cfg(feature = "gmac1")]
+        {
+            const SYS_SYSCON_BASE: u32 = 0x1303_0000;
+            const PHY_INTF_OFFSET: u32 = 0x90;
+            let pi_pre = unsafe { wari_net_mmio_read32(SYS_SYSCON_BASE + PHY_INTF_OFFSET) };
+            // tag 'pIeP' (PI early Pre)
+            let _ = unsafe { wari_drv_log_u32(0x7049_4570, pi_pre) };
+            let pi_new = (pi_pre & !0x1C) | 0x04;
+            let _ = unsafe {
+                wari_net_mmio_write32(SYS_SYSCON_BASE + PHY_INTF_OFFSET, pi_new)
+            };
+            let pi_post = unsafe { wari_net_mmio_read32(SYS_SYSCON_BASE + PHY_INTF_OFFSET) };
+            // tag 'pIeN' (PI early New)
+            let _ = unsafe { wari_drv_log_u32(0x7049_454E, pi_post) };
+        }
+
         // Re-read GMAC version — this is the line that matters.
         const GMAC_VERSION_OFFSET: u32 = 0x110;
         let v_after = unsafe {
