@@ -2948,13 +2948,32 @@ pub fn driver_start() {
         // MAC_PACKET_FILTER: PR bit 0 = promiscuous (accept all).
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x008, 0x0000_0001) };
 
+        // Build 133 — MAC_RXQ_CTRL0 (0x00A0) bits[1:0] = RXQ0EN.
+        // After reset this register is 0x00000000, meaning RXQ0 is
+        // DISABLED. With RXQ0 disabled the MAC's RX FSM silently
+        // drops every frame BEFORE it counts in MMC, BEFORE it
+        // reaches MTL, BEFORE it reaches DMA — which exactly
+        // matches the NmGB=0 + NT_M=0 + ND_C-not-advancing + link-up
+        // signature we observed across builds 124-132.
+        //
+        // Linux's dwmac4_rx_queue_enable() writes 0b10 = DCB mode
+        // for normal Ethernet (vs 0b01 AVB). Wari never wrote this
+        // register; that's why no frames ever made it to the
+        // descriptor ring despite everything else looking correct.
+        //
+        // Value 0x00000002 = RXQ0EN[1:0] = 10 (DCB), all other
+        // queues left disabled (we only use RXQ0).
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x0A0, 0x0000_0002) };
+
         // Verify-read.
         let mac_hi_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x300) };
         let mac_lo_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x304) };
         let pf_rb     = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x008) };
+        let rxq_rb    = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x0A0) };
         let _ = unsafe { wari_drv_log_u32(0x4D41_4348, mac_hi_rb) }; // 'MACH'
         let _ = unsafe { wari_drv_log_u32(0x4D41_434C, mac_lo_rb) }; // 'MACL'
         let _ = unsafe { wari_drv_log_u32(0x4D41_4346, pf_rb) };     // 'MACF'
+        let _ = unsafe { wari_drv_log_u32(0x5258_5130, rxq_rb) };    // 'RXQ0'
 
         // Clear status sticky bits again, longer wait.
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1160, 0x0000_FFFF) };
