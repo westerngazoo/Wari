@@ -57,6 +57,12 @@ Gated behind the `net-diag` cargo feature. Default-off for production
 builds. The `'N'` prefix is reserved exclusively for this family — no
 other tag in the registry leads with `'N'` (`0x4E`).
 
+## Build 130 — PHY address indicator
+
+| Tag hex | ASCII | Source | Fires when | val |
+|---|---|---|---|---|
+| `0x5061_4472` | `PaDr` | `driver_start` PHY init | Once at boot, before first PHY register read | `plat::PHY_ADDR` (`0` for GMAC0, `1` for GMAC1). If subsequent PHYID reads come back `0xFFFF`, the MDIO transaction is going to a dead address. |
+
 ### Lifecycle markers
 
 | Tag hex | ASCII | Source | Fires when |

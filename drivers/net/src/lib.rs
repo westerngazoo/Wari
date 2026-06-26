@@ -109,6 +109,26 @@ mod plat {
     #[allow(dead_code)]
     #[cfg(feature = "gmac1")]
     pub const NIC_BASE: u32 = 0x1604_0000;
+
+    /// MDIO address of the on-board YT8531C PHY. From the StarFive
+    /// BSP DT (`jh7110-starfive-visionfive-2.dtsi`):
+    ///   &gmac0 { phy0: ethernet-phy@0; }
+    ///   &gmac1 { phy1: ethernet-phy@1; }
+    /// The `@N` unit-address IS the MDIO reg per DT convention.
+    /// Build 130 discovery: builds 125..129 hard-coded literal `0`
+    /// at all 13 mdio_*_phy call sites, so GMAC1 builds were writing
+    /// 0xA003/etc to a PHY address that doesn't exist on GMAC1's bus
+    /// (or — worse — that some BSP wires to an aliased response). The
+    /// 4F51E91B reads we saw at addr 0 on GMAC1 builds were almost
+    /// certainly GMAC0's PHY answering through a NIC_BASE mismatch in
+    /// the trace window; with NIC_BASE confirmed at 0x16040000, addr 1
+    /// is the only PHY on GMAC1's bus.
+    #[allow(dead_code)]
+    #[cfg(not(feature = "gmac1"))]
+    pub const PHY_ADDR: u32 = 0;
+    #[allow(dead_code)]
+    #[cfg(feature = "gmac1")]
+    pub const PHY_ADDR: u32 = 1;
 }
 
 // ── VirtIO MMIO register offsets (VirtIO 1.2 §4.2.2) ─────────────
@@ -2119,8 +2139,12 @@ pub fn driver_start() {
         //   bits 20:16 RDA    register address (5b)
         //   bits 25:21 PA     PHY address (5b)
         // Data lands in the low 16 bits of MAC_MDIO_DATA (0x204).
-        let phyid1 = mdio_read_phy(plat::NIC_BASE, 0, 2);
-        let phyid2 = mdio_read_phy(plat::NIC_BASE, 0, 3);
+        // Build 130: log which PHY MDIO address we're using before
+        // doing anything else, so any subsequent PHYID = 0xFFFF /
+        // 0x0000 result is unambiguously diagnosable.
+        let _ = unsafe { wari_drv_log_u32(0x5061_4472, plat::PHY_ADDR) }; // 'PaDr'
+        let phyid1 = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 2);
+        let phyid2 = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 3);
         let _ = unsafe { wari_drv_log_u32(0x5048_5901, phyid1) }; // 'PHY\1'
         let _ = unsafe { wari_drv_log_u32(0x5048_5902, phyid2) }; // 'PHY\2'
 
@@ -2152,35 +2176,47 @@ pub fn driver_start() {
         //   tx-clk-1000-inverted (bit 14 set)
         //   Final value: (1<<14) | (0x0A<<10) | (0x0A<<0) = 0x680A.
         //
-        // GMAC1 (phy1 on VF2 v1.3b dts):
-        //   rx-internal-delay-ps = 300  → 0x02
-        //   tx-internal-delay-ps = 0    → 0x00
-        //   NO tx-clk-1000-inverted (bit 14 clear)
-        //   Final value: (0x02<<10) | (0x00<<0) = 0x0800.
+        // GMAC1 (phy1 on this board — `starfive,visionfive-v2`, the
+        // base v1.0/1.2 path, NOT mainline's -v1.3b override). The
+        // operator's /proc/device-tree dump confirmed:
+        //   - `ls /proc/device-tree/soc/ethernet@16040000/` shows
+        //     ethernet-phy@1 (NOT @0) → MDIO addr 1
+        //   - No `rx-internal-delay-ps` / `tx-internal-delay-ps`
+        //     anywhere in DT → BSP defaults apply
+        // BSP defaults per ytphy_of_config() in StarFive's motorcomm.c:
+        //   rx_delay_sel        = 0x2  → bits 13:10
+        //   tx_delay_sel_fe     = 0x5  → bits  7:4   (100M only, but
+        //                                              BSP always writes)
+        //   tx_delay_sel        = 0x0  → bits  3:0
+        //   tx_clk_1000_inverted = 0   → bit 14 clear
+        //   Final: (0x2<<10) | (0x5<<4) | (0x0<<0) = 0x0850.
+        // Build 130 swaps from 0x0800 (the mainline v1.3b value our
+        // builds 124-129 were guessing with) to 0x0850 (BSP-confirmed,
+        // for THIS board revision).
         const YTPHY_PAGE_SELECT:        u32 = 0x1E;
         const YTPHY_PAGE_DATA:          u32 = 0x1F;
         const YT8521_RGMII_CONFIG1_REG: u16 = 0xA003;
         #[cfg(not(feature = "gmac1"))]
         const YT8531_RC1R_VF2_VALUE:    u16 = 0x680A;
         #[cfg(feature = "gmac1")]
-        const YT8531_RC1R_VF2_VALUE:    u16 = 0x0800;
+        const YT8531_RC1R_VF2_VALUE:    u16 = 0x0850;
 
         // Pre-read so we know U-Boot's starting value.
-        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+        let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
                                YT8521_RGMII_CONFIG1_REG);
-        let rc1r_pre = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
+        let rc1r_pre = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3152, rc1r_pre) }; // 'RC1R'
 
         // Write delays + TX clock inversion.
-        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+        let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
                                YT8521_RGMII_CONFIG1_REG);
-        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA,
+        let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA,
                                YT8531_RC1R_VF2_VALUE);
 
         // Verify-read.
-        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+        let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
                                YT8521_RGMII_CONFIG1_REG);
-        let rc1r_post = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
+        let rc1r_post = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3170, rc1r_post) }; // 'RC1p'
 
         // Force re-AN if 0xA003 changed: YT8531C latches RXC delay
@@ -2212,8 +2248,8 @@ pub fn driver_start() {
         //   4. log final Basic Status + 1000BASE-T status
 
         // Step 1 — pre-AN snapshot.
-        let bc_pre = mdio_read_phy(plat::NIC_BASE, 0, 0);
-        let bs_pre = mdio_read_phy(plat::NIC_BASE, 0, 1);
+        let bc_pre = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 0);
+        let bs_pre = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 1);
         let _ = unsafe { wari_drv_log_u32(0x5048_5910, bc_pre) }; // 'PHY\x10'
         let _ = unsafe { wari_drv_log_u32(0x5048_5911, bs_pre) }; // 'PHY\x11'
 
@@ -2236,7 +2272,7 @@ pub fn driver_start() {
             // 'already' marker.
             let _ = unsafe { wari_drv_log_u32(0x5048_5912, 0xA17E_AD11) };
         } else {
-            let _ = mdio_write_phy(plat::NIC_BASE, 0, 0, 0x1200);
+            let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, 0, 0x1200);
             let _ = unsafe { wari_drv_log_u32(0x5048_5912, 0x0000_0000) };
         }
 
@@ -2251,7 +2287,7 @@ pub fn driver_start() {
         } else {
             let mut tries = 0u32;
             let s_final = loop {
-                let s = mdio_read_phy(plat::NIC_BASE, 0, 1);
+                let s = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 1);
                 if s & BS_AN_COMPLETE != 0 && s & BS_LINK_UP != 0 {
                     break s;
                 }
@@ -2268,7 +2304,7 @@ pub fn driver_start() {
 
         // Step 4 — 1000BASE-T status (reg 0x0A): bit 11 = "1000Mb
         // full duplex resolved", bit 10 = "1000Mb half".
-        let gig_status = mdio_read_phy(plat::NIC_BASE, 0, 0x0A);
+        let gig_status = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 0x0A);
         let _ = unsafe { wari_drv_log_u32(0x5048_5915, gig_status) };
 
         // PR Phase-1c-5b — GMAC HW capability + DMA bus-mode dump.
