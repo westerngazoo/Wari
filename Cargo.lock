@@ -425,6 +425,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wari-wnm"
+version = "0.0.1"
+
+[[package]]
 name = "wasmi"
 version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

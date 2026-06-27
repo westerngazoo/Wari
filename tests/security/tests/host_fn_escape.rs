@@ -21,7 +21,7 @@
 //! For PR 6 the test asserts the **structural** property: the WASI
 //! host fn is **bound** (otherwise `apps/hello` would fail to
 //! instantiate with a link error, not an exit) and the standard run
-//! reaches `[hello] exit(0)`. Combined with code review of
+//! reaches `[t1:N] exit(0)`. Combined with code review of
 //! `runtime::wasi::host_fd_write`'s explicit errno branches, this
 //! covers the no-panic property.
 //!
@@ -47,7 +47,7 @@ fn host_fn_escape_returns_typed_errno() {
     // reaching `_start`. Reaching `exit(0)` is the proof that the fn
     // is registered with a compatible signature.
     assert!(
-        text.contains(markers::HELLO_EXIT_0),
+        text.contains(markers::TENANT_EXIT_0),
         "host fn registration may be broken — hello did not reach \
          exit-0:\n{text}",
     );

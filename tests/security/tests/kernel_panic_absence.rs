@@ -27,10 +27,10 @@ fn no_kernel_panic_across_adversarial_boot() {
     );
 
     // Tier-1 must reach a typed terminal state.
-    let terminal = text.contains(markers::HELLO_EXIT_0)
-        || text.contains("tier-1 hello failed")
-        || text.contains("[hello] runtime trap")
-        || text.contains("[hello] returned cleanly");
+    let terminal = text.contains(markers::TENANT_EXIT_0)
+        || text.contains(markers::TENANT_FAULTED)
+        || text.contains(markers::TENANT_RUNTIME_TRAP)
+        || text.contains(markers::TENANT_RETURNED_CLEAN);
     assert!(
         terminal,
         "kernel did not reach a terminal Tier-1 state:\n{text}",

@@ -106,9 +106,28 @@ pub mod markers {
     /// failed — the kernel halted in `kmain`'s wfi loop.
     pub const TIER2_LOADED: &str = "tier-2 uart driver loaded";
 
-    /// Printed by Tier-1 hello after `proc_exit(0)`: see
-    /// `kernel/src/runtime/mod.rs::run_tier1_hello`.
-    pub const HELLO_EXIT_0: &str = "[hello] exit(0)";
+    /// A Tier-1 instance reached a clean `proc_exit(0)`. The runtime
+    /// prints `[t1:<proc_id>] exit(<code>)`
+    /// (`kernel/src/runtime/mod.rs::run_tier1`), so this matches the
+    /// proc_id-agnostic suffix for exit code 0. Two hello tenants run
+    /// per boot (proc_id 2 and 3); either reaching it satisfies the
+    /// assertion.
+    pub const TENANT_EXIT_0: &str = "] exit(0)";
+
+    /// A Tier-1 instance hit a wasmi trap with no `i32_exit_status`
+    /// (e.g. an OOB load). The runtime prints
+    /// `[t1:<proc_id>] runtime trap: <kind>` and returns `BadWasm`.
+    pub const TENANT_RUNTIME_TRAP: &str = "] runtime trap";
+
+    /// A Tier-1 instance returned from `_start` without calling
+    /// `proc_exit`. The runtime prints
+    /// `[t1:<proc_id>] returned cleanly without proc_exit`.
+    pub const TENANT_RETURNED_CLEAN: &str = "] returned cleanly";
+
+    /// The scheduler marked a Tier-1 instance faulted on a typed
+    /// `KernelError` (e.g. `BadWasm` from a load/link rejection). Sched
+    /// prints `[sched] Tier-1 instance proc_id=<n> faulted: <err>`.
+    pub const TENANT_FAULTED: &str = "faulted:";
 
     /// Printed by the kernel boot banner. Always expected — its
     /// absence indicates the kernel did not even boot.
