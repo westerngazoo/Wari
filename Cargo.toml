@@ -21,6 +21,7 @@ members = [
     "abi-shared",
     "driver-iface",
     "wari-mem",
+    "wari-wnm",
     "wasi",
     "kernel",
     "apps/hello",
