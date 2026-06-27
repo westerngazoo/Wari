@@ -61,6 +61,9 @@ compile_error!("wari-driver-net requires --features qemu or --features vf2.");
 #[cfg(all(feature = "qemu", feature = "vf2"))]
 compile_error!("wari-driver-net accepts only one of --features qemu / vf2.");
 
+#[cfg(feature = "net-diag")]
+mod diag;
+
 /// Embedded build-number tag — the kernel's `build.rs` greps the
 /// signed wasm for this string and refuses to compile if it doesn't
 /// match the kernel's own `WARI_BUILD`. Catches the stale-driver
@@ -97,10 +100,35 @@ mod plat {
 
 #[cfg(feature = "vf2")]
 mod plat {
-    /// JH7110 GMAC eth0 base on VisionFive 2 — Phase 1c will land
-    /// the GMAC implementation. Phase 1b's vf2 build is a stub.
+    /// JH7110 GMAC base on VisionFive 2. The `gmac1` cargo feature
+    /// switches between GMAC0 (eth0/end0, AON power domain) and
+    /// GMAC1 (eth1/end1, SYS power domain) — see Phase-1c-11 plan.
     #[allow(dead_code)]
+    #[cfg(not(feature = "gmac1"))]
     pub const NIC_BASE: u32 = 0x1603_0000;
+    #[allow(dead_code)]
+    #[cfg(feature = "gmac1")]
+    pub const NIC_BASE: u32 = 0x1604_0000;
+
+    /// MDIO address of the on-board YT8531C PHY. From the StarFive
+    /// BSP DT (`jh7110-starfive-visionfive-2.dtsi`):
+    ///   &gmac0 { phy0: ethernet-phy@0; }
+    ///   &gmac1 { phy1: ethernet-phy@1; }
+    /// The `@N` unit-address IS the MDIO reg per DT convention.
+    /// Build 130 discovery: builds 125..129 hard-coded literal `0`
+    /// at all 13 mdio_*_phy call sites, so GMAC1 builds were writing
+    /// 0xA003/etc to a PHY address that doesn't exist on GMAC1's bus
+    /// (or — worse — that some BSP wires to an aliased response). The
+    /// 4F51E91B reads we saw at addr 0 on GMAC1 builds were almost
+    /// certainly GMAC0's PHY answering through a NIC_BASE mismatch in
+    /// the trace window; with NIC_BASE confirmed at 0x16040000, addr 1
+    /// is the only PHY on GMAC1's bus.
+    #[allow(dead_code)]
+    #[cfg(not(feature = "gmac1"))]
+    pub const PHY_ADDR: u32 = 0;
+    #[allow(dead_code)]
+    #[cfg(feature = "gmac1")]
+    pub const PHY_ADDR: u32 = 1;
 }
 
 // ── VirtIO MMIO register offsets (VirtIO 1.2 §4.2.2) ─────────────
@@ -853,6 +881,12 @@ mod nic_iface {
     static mut SOCKET_BOUND_PORT: [u16; SOCKET_BACKING_LEN] =
         [0u16; SOCKET_BACKING_LEN];
 
+    /// Monotonic counter used as smoltcp timestamp. Incremented on
+    /// every poll() call so TCP retry timers advance even without a
+    /// real wall-clock source. Not wall-clock accurate — sufficient
+    /// for the Phase-1c demo where ARP/SYN latency << retry window.
+    static mut POLL_TICK: u64 = 0;
+
     /// Allocate a TCP smoltcp socket. Returns the raw
     /// `SocketHandle` value as i32 on success, negative errno on
     /// failure (`-3` = E_NOMEM if the buffer pool is exhausted).
@@ -935,6 +969,126 @@ mod nic_iface {
                 Ok(()) => 0,
                 Err(_) => -3,
             }
+        }
+    }
+
+    /// Phase-1c HTTP demo — report whether the listening socket has
+    /// accepted a connection. Pure state inspection — the kernel
+    /// drives `nic_iface::poll` on either side of this call so the
+    /// smoltcp state machine advances before/after.
+    ///
+    /// smoltcp's accept model is not POSIX-shaped: the SAME socket
+    /// transitions from `Listen` to `Established` when a remote SYN
+    /// arrives. There is no "accept-creates-new-socket" primitive
+    /// without an explicit re-listen. For the Phase-1c demo (one
+    /// connection per boot, served then closed) the simpler model
+    /// suffices.
+    ///
+    /// Returns:
+    /// - `1` if the socket is in `Established` and can accept a
+    ///   write (ready for `socket_send_canned` + `socket_close`),
+    /// - `0` if still listening / waiting,
+    /// - `-2` if the handle is unknown or the socket is in an
+    ///   unexpected state.
+    pub fn socket_poll_accept(raw_handle: u32) -> i32 {
+        use smoltcp::socket::tcp;
+        // SAFETY: single-thread driver (INV-1 generalized).
+        unsafe {
+            // Drive smoltcp before inspecting socket state. Without this
+            // poll, the stack never processes incoming ARP or TCP SYNs —
+            // the socket stays in Listen forever even when the peer has
+            // already sent a SYN. POLL_TICK is a monotonic counter that
+            // serves as the smoltcp timestamp; TCP retry timers advance
+            // proportionally to poll rate rather than wall clock, which is
+            // sufficient for the Phase-1c demo.
+            POLL_TICK = POLL_TICK.wrapping_add(1);
+            poll(POLL_TICK);
+
+            let sockets = match &mut *addr_of_mut!(SOCKETS) {
+                Some(s) => s,
+                None => return -2,
+            };
+            let slot = raw_handle as usize;
+            if slot >= SOCKET_BACKING_LEN {
+                return -2;
+            }
+            let handle = match SOCKET_HANDLE_FOR_BUF[slot] {
+                Some(h) => h,
+                None => return -2,
+            };
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            if socket.is_active() && socket.may_send() {
+                1
+            } else {
+                0
+            }
+        }
+    }
+
+    /// Phase-1c HTTP demo — send a hardcoded HTTP/1.0 200 OK reply on
+    /// a connected socket. Pure write — the kernel drives
+    /// `nic_iface::poll` after this call so the queued reply hits
+    /// the wire.
+    ///
+    /// Body is `b"Hello from Wari\n"`. Header declares
+    /// `Content-Length: 16` and `Connection: close`. Total 96 bytes
+    /// — fits comfortably in one TCP segment on any MTU.
+    ///
+    /// Returns:
+    /// - bytes queued for transmit on success (the full reply if the
+    ///   socket's tx buffer accepted it),
+    /// - `-2` if the handle is unknown or the socket is not in a
+    ///   sendable state,
+    /// - `-3` if smoltcp's `send_slice` returns Err.
+    ///
+    /// After this call the caller should `socket_close` to release
+    /// the smoltcp slot. smoltcp will already have queued FIN
+    /// (via `socket.close()`) so the remote sees a clean teardown.
+    ///
+    /// Phase-1c demo only: a real HTTP server uses generic
+    /// `socket_send` taking a Tier-1 lin-mem buffer. That ABI is
+    /// queued for after the demo confirms the path works end-to-end.
+    pub fn socket_send_canned(raw_handle: u32) -> i32 {
+        use smoltcp::socket::tcp;
+
+        const REPLY: &[u8] = b"HTTP/1.0 200 OK\r\n\
+            Content-Type: text/plain\r\n\
+            Content-Length: 16\r\n\
+            Connection: close\r\n\
+            \r\n\
+            Hello from Wari\n";
+
+        // SAFETY: single-thread driver (INV-1 generalized).
+        unsafe {
+            let sockets = match &mut *addr_of_mut!(SOCKETS) {
+                Some(s) => s,
+                None => return -2,
+            };
+            let slot = raw_handle as usize;
+            if slot >= SOCKET_BACKING_LEN {
+                return -2;
+            }
+            let handle = match SOCKET_HANDLE_FOR_BUF[slot] {
+                Some(h) => h,
+                None => return -2,
+            };
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            if !socket.may_send() {
+                return -2;
+            }
+            let queued = match socket.send_slice(REPLY) {
+                Ok(n) => n as i32,
+                Err(_) => return -3,
+            };
+            // Signal end-of-response so smoltcp emits FIN after the
+            // reply drains. The remote sees a clean close.
+            socket.close();
+            // Poll immediately so the queued reply + FIN are handed to
+            // the NIC DMA in this same call, rather than waiting for the
+            // next accept-loop iteration.
+            POLL_TICK = POLL_TICK.wrapping_add(1);
+            poll(POLL_TICK);
+            queued
         }
     }
 
@@ -1268,10 +1422,13 @@ pub mod vf2_phy {
     /// + Ethernet header); smoltcp passes us payload up to MTU.
     const SMOLTCP_MTU: usize = 1500;
 
-    /// JH7110 GMAC0 base address (mirror of `super::plat::NIC_BASE`
+    /// JH7110 GMAC base address (mirror of `super::plat::NIC_BASE`
     /// for vf2 builds — re-declared locally to keep this module
-    /// self-contained).
+    /// self-contained). Gated by the `gmac1` feature.
+    #[cfg(not(feature = "gmac1"))]
     const GMAC_BASE: u32 = 0x1603_0000;
+    #[cfg(feature = "gmac1")]
+    const GMAC_BASE: u32 = 0x1604_0000;
     const DMA_CH0_TX_TAIL: u32 = 0x1120;
 
     /// DWMAC4 RDES3 status bits.
@@ -1336,6 +1493,11 @@ pub mod vf2_phy {
                     vf2_rx_rearm(prev);
                 }
             }
+            // Build-129 net-diag: 17-register RX-path snapshot every
+            // ~32K calls. Branch-predictable: the early-return inside
+            // covers 99.997% of calls. See drivers/net/src/diag.rs.
+            #[cfg(feature = "net-diag")]
+            super::diag::maybe_snapshot(GMAC_BASE);
             // Round-robin walk over the 16 RX descriptors looking
             // for one whose OWN bit was cleared by the DMA engine.
             // SAFETY: single-threaded driver; static muts are the
@@ -1361,6 +1523,11 @@ pub mod vf2_phy {
                         let _ = super::wari_drv_log_u32(0x7258_4672, val);
                         vf2_state::C_FRAMES_FOUND =
                             vf2_state::C_FRAMES_FOUND.wrapping_add(1);
+                        // Build-129 net-diag: one-shot deep dump at the
+                        // critical 0→1 frame-found transition. Internal
+                        // guard makes subsequent calls no-ops.
+                        #[cfg(feature = "net-diag")]
+                        super::diag::note_first_frame(GMAC_BASE, i as u32);
                         // Stash the slot so the NEXT receive()
                         // call re-arms it (see top of fn).
                         vf2_state::PREV_YIELDED = i;
@@ -1878,36 +2045,102 @@ pub fn driver_start() {
     // v5.20 → expected version byte 0x52 (or v5.10 → 0x51).
     #[cfg(feature = "vf2")]
     {
-        const AONCRG_BASE: u32 = 0x1700_0000;
-        const ENABLE_BIT:  u32 = 0x8000_0000;
-        const AONRST_OFF:  u32 = 0x38;
-        const GMAC0_AXI_AHB_RST_MASK: u32 = 0x3; // bits 0 and 1
+        const ENABLE_BIT: u32 = 0x8000_0000;
 
-        // Step 1: enable AHB clock gate.
-        let _ = unsafe {
-            wari_net_mmio_write32(AONCRG_BASE + 0x08, ENABLE_BIT)
-        };
-        // Step 2: enable AXI clock gate.
-        let _ = unsafe {
-            wari_net_mmio_write32(AONCRG_BASE + 0x0C, ENABLE_BIT)
-        };
-        // Step 3: deassert GMAC0 reset (clear bits 0+1).
-        let rst_cur = unsafe { wari_net_mmio_read32(AONCRG_BASE + AONRST_OFF) };
-        let _ = unsafe {
-            wari_net_mmio_write32(AONCRG_BASE + AONRST_OFF,
-                rst_cur & !GMAC0_AXI_AHB_RST_MASK)
-        };
+        // ── GMAC0 path: AON CRG gates + reset ───────────────────
+        #[cfg(not(feature = "gmac1"))]
+        {
+            const AONCRG_BASE: u32 = 0x1700_0000;
+            const AONRST_OFF:  u32 = 0x38;
+            const GMAC0_AXI_AHB_RST_MASK: u32 = 0x3; // bits 0 and 1
 
-        // Verify each write landed. Tags spell 'Aon0' / 'Aon1' /
-        // 'Aon8' / 'AonR' so the trace shows what's at each offset.
-        let v08 = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x08) };
-        let _ = unsafe { wari_drv_log_u32(0x416F_6E08, v08) };
-        let v0c = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x0C) };
-        let _ = unsafe { wari_drv_log_u32(0x416F_6E0C, v0c) };
-        let v38 = unsafe { wari_net_mmio_read32(AONCRG_BASE + AONRST_OFF) };
-        let _ = unsafe { wari_drv_log_u32(0x416F_6E38, v38) };
-        let v3c = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x3C) };
-        let _ = unsafe { wari_drv_log_u32(0x416F_6E3C, v3c) };
+            // Step 1: enable AHB clock gate.
+            let _ = unsafe {
+                wari_net_mmio_write32(AONCRG_BASE + 0x08, ENABLE_BIT)
+            };
+            // Step 2: enable AXI clock gate.
+            let _ = unsafe {
+                wari_net_mmio_write32(AONCRG_BASE + 0x0C, ENABLE_BIT)
+            };
+            // Step 3: deassert GMAC0 reset (clear bits 0+1).
+            let rst_cur = unsafe { wari_net_mmio_read32(AONCRG_BASE + AONRST_OFF) };
+            let _ = unsafe {
+                wari_net_mmio_write32(AONCRG_BASE + AONRST_OFF,
+                    rst_cur & !GMAC0_AXI_AHB_RST_MASK)
+            };
+
+            // Verify each write landed. Tags spell 'Aon0' / 'Aon1' /
+            // 'Aon8' / 'AonR' so the trace shows what's at each offset.
+            let v08 = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x08) };
+            let _ = unsafe { wari_drv_log_u32(0x416F_6E08, v08) };
+            let v0c = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x0C) };
+            let _ = unsafe { wari_drv_log_u32(0x416F_6E0C, v0c) };
+            let v38 = unsafe { wari_net_mmio_read32(AONCRG_BASE + AONRST_OFF) };
+            let _ = unsafe { wari_drv_log_u32(0x416F_6E38, v38) };
+            let v3c = unsafe { wari_net_mmio_read32(AONCRG_BASE + 0x3C) };
+            let _ = unsafe { wari_drv_log_u32(0x416F_6E3C, v3c) };
+        }
+
+        // ── GMAC1 path: SYS CRG gates + reset (Phase-1c-11) ─────
+        #[cfg(feature = "gmac1")]
+        {
+            const SYSCRG_BASE: u32 = 0x1302_0000;
+            const SYSRST_OFF:  u32 = 0x300;
+            const GMAC1_RST_MASK: u32 = 0xC; // bits 2+3 = axi_rst, ahb_rst
+
+            // Step 1: enable GMAC1 AHB clock gate.
+            let _ = unsafe {
+                wari_net_mmio_write32(SYSCRG_BASE + 0x184, ENABLE_BIT)
+            };
+            // Step 2: enable GMAC1 AXI clock gate.
+            let _ = unsafe {
+                wari_net_mmio_write32(SYSCRG_BASE + 0x188, ENABLE_BIT)
+            };
+            // Step 3: deassert GMAC1 resets — RMW only. A blind write
+            // here would reset every device whose enum is in [64..96]
+            // (DMA / security / USB / PCIe).
+            let rst_cur = unsafe { wari_net_mmio_read32(SYSCRG_BASE + SYSRST_OFF) };
+            let _ = unsafe {
+                wari_net_mmio_write32(SYSCRG_BASE + SYSRST_OFF,
+                    rst_cur & !GMAC1_RST_MASK)
+            };
+
+            // Verify each write landed. Tags 'G1RG' / 'G1RA' / 'G1Rs'
+            // / 'G1Rt' (gmac1 reset assert + status).
+            let v184 = unsafe { wari_net_mmio_read32(SYSCRG_BASE + 0x184) };
+            let _ = unsafe { wari_drv_log_u32(0x4731_5247, v184) }; // 'G1RG'
+            let v188 = unsafe { wari_net_mmio_read32(SYSCRG_BASE + 0x188) };
+            let _ = unsafe { wari_drv_log_u32(0x4731_5241, v188) }; // 'G1RA'
+            let v300 = unsafe { wari_net_mmio_read32(SYSCRG_BASE + SYSRST_OFF) };
+            let _ = unsafe { wari_drv_log_u32(0x4731_5273, v300) }; // 'G1Rs'
+            let v310 = unsafe { wari_net_mmio_read32(SYSCRG_BASE + 0x310) };
+            let _ = unsafe { wari_drv_log_u32(0x4731_5274, v310) }; // 'G1Rt'
+        }
+
+        // Build 132 — phy_intf_sel write moved EARLIER (was fired
+        // after PHY init at line ~2492). Hypothesis: if SYS SYSCON
+        // +0x90 isn't programmed to RGMII before the MAC version
+        // read, the GMAC IP block latches into the wrong RX clock
+        // sourcing mode and doesn't recover when we set it later.
+        // Builds 125-131 all wrote it AFTER PHY init; if that was
+        // the bug, NmGB should climb starting with this build.
+        // Original (later) block kept as a redundant idempotent
+        // write — harmless if the value is already correct.
+        #[cfg(feature = "gmac1")]
+        {
+            const SYS_SYSCON_BASE: u32 = 0x1303_0000;
+            const PHY_INTF_OFFSET: u32 = 0x90;
+            let pi_pre = unsafe { wari_net_mmio_read32(SYS_SYSCON_BASE + PHY_INTF_OFFSET) };
+            // tag 'pIeP' (PI early Pre)
+            let _ = unsafe { wari_drv_log_u32(0x7049_4570, pi_pre) };
+            let pi_new = (pi_pre & !0x1C) | 0x04;
+            let _ = unsafe {
+                wari_net_mmio_write32(SYS_SYSCON_BASE + PHY_INTF_OFFSET, pi_new)
+            };
+            let pi_post = unsafe { wari_net_mmio_read32(SYS_SYSCON_BASE + PHY_INTF_OFFSET) };
+            // tag 'pIeN' (PI early New)
+            let _ = unsafe { wari_drv_log_u32(0x7049_454E, pi_post) };
+        }
 
         // Re-read GMAC version — this is the line that matters.
         const GMAC_VERSION_OFFSET: u32 = 0x110;
@@ -1931,8 +2164,12 @@ pub fn driver_start() {
         //   bits 20:16 RDA    register address (5b)
         //   bits 25:21 PA     PHY address (5b)
         // Data lands in the low 16 bits of MAC_MDIO_DATA (0x204).
-        let phyid1 = mdio_read_phy(plat::NIC_BASE, 0, 2);
-        let phyid2 = mdio_read_phy(plat::NIC_BASE, 0, 3);
+        // Build 130: log which PHY MDIO address we're using before
+        // doing anything else, so any subsequent PHYID = 0xFFFF /
+        // 0x0000 result is unambiguously diagnosable.
+        let _ = unsafe { wari_drv_log_u32(0x5061_4472, plat::PHY_ADDR) }; // 'PaDr'
+        let phyid1 = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 2);
+        let phyid2 = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 3);
         let _ = unsafe { wari_drv_log_u32(0x5048_5901, phyid1) }; // 'PHY\1'
         let _ = unsafe { wari_drv_log_u32(0x5048_5902, phyid2) }; // 'PHY\2'
 
@@ -1958,34 +2195,77 @@ pub fn driver_start() {
         //   bits  7:4  FE_TX_DELAY (100M)   (4-bit, 150 ps/step)
         //   bits  3:0  GE_TX_DELAY (1G)     (4-bit, 150 ps/step)
         //
-        // 1500 ps / 150 ps = 10 = 0x0A.
-        // Final value: (1<<14) | (0x0A<<10) | (0x0A<<0) = 0x680A.
+        // GMAC0 (phy0 on VF2 v1.3b dts):
+        //   rx-internal-delay-ps = 1500 → 0x0A (10 × 150ps)
+        //   tx-internal-delay-ps = 1500 → 0x0A
+        //   tx-clk-1000-inverted (bit 14 set)
+        //   Final value: (1<<14) | (0x0A<<10) | (0x0A<<0) = 0x680A.
+        //
+        // GMAC1 (phy1 on this board — `starfive,visionfive-v2`, the
+        // base v1.0/1.2 path, NOT mainline's -v1.3b override). The
+        // operator's /proc/device-tree dump confirmed:
+        //   - `ls /proc/device-tree/soc/ethernet@16040000/` shows
+        //     ethernet-phy@1 (NOT @0) → MDIO addr 1
+        //   - No `rx-internal-delay-ps` / `tx-internal-delay-ps`
+        //     anywhere in DT → BSP defaults apply
+        // BSP defaults per ytphy_of_config() in StarFive's motorcomm.c:
+        //   rx_delay_sel        = 0x2  → bits 13:10
+        //   tx_delay_sel_fe     = 0x5  → bits  7:4   (100M only, but
+        //                                              BSP always writes)
+        //   tx_delay_sel        = 0x0  → bits  3:0
+        //   tx_clk_1000_inverted = 0   → bit 14 clear
+        //   Final: (0x2<<10) | (0x5<<4) | (0x0<<0) = 0x0850.
+        // Build 130 swaps from 0x0800 (the mainline v1.3b value our
+        // builds 124-129 were guessing with) to 0x0850 (BSP-confirmed,
+        // for THIS board revision).
         const YTPHY_PAGE_SELECT:        u32 = 0x1E;
         const YTPHY_PAGE_DATA:          u32 = 0x1F;
         const YT8521_RGMII_CONFIG1_REG: u16 = 0xA003;
+        #[cfg(not(feature = "gmac1"))]
         const YT8531_RC1R_VF2_VALUE:    u16 = 0x680A;
+        #[cfg(feature = "gmac1")]
+        const YT8531_RC1R_VF2_VALUE:    u16 = 0x0850;
 
         // Pre-read so we know U-Boot's starting value.
-        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+        let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
                                YT8521_RGMII_CONFIG1_REG);
-        let rc1r_pre = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
+        let rc1r_pre = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3152, rc1r_pre) }; // 'RC1R'
 
-        // Write delays + TX clock inversion.
-        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
-                               YT8521_RGMII_CONFIG1_REG);
-        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA,
-                               YT8531_RC1R_VF2_VALUE);
+        // Build 131 — inheritance test. Linux on the same hardware
+        // receives frames perfectly with whatever value U-Boot left
+        // in 0xA003. Builds 124-130 ALL wrote a different value and
+        // ALL produced 0% RX. The single-variable test: don't write
+        // 0xA003 at all on the gmac1 path. If RX starts working, the
+        // write was the problem; if not, the value isn't the issue.
+        // GMAC0 path keeps its existing 0x680A write (proven working
+        // earlier in the project for the home-router test rig).
+        #[cfg(not(feature = "gmac1"))]
+        {
+            let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
+                                   YT8521_RGMII_CONFIG1_REG);
+            let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA,
+                                   YT8531_RC1R_VF2_VALUE);
+        }
+        #[cfg(feature = "gmac1")]
+        let _ = YT8531_RC1R_VF2_VALUE; // silence unused-const warning under gmac1
 
         // Verify-read.
-        let _ = mdio_write_phy(plat::NIC_BASE, 0, YTPHY_PAGE_SELECT,
+        let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
                                YT8521_RGMII_CONFIG1_REG);
-        let rc1r_post = mdio_read_phy(plat::NIC_BASE, 0, YTPHY_PAGE_DATA);
+        let rc1r_post = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3170, rc1r_post) }; // 'RC1p'
 
         // Force re-AN if 0xA003 changed: YT8531C latches RXC delay
         // at link-up. Without a re-AN the new delays don't take
         // effect on the live link inherited from U-Boot.
+        // Build 131: on the gmac1 path we don't write 0xA003, so
+        // we never need a fresh AN cycle — accept whatever link
+        // U-Boot brought up. Avoids a 500 ms link drop on every
+        // boot for the no-write hypothesis test.
+        #[cfg(feature = "gmac1")]
+        let needs_relink = false;
+        #[cfg(not(feature = "gmac1"))]
         let needs_relink = rc1r_pre != (YT8531_RC1R_VF2_VALUE as u32);
 
         // PR Phase-1c-5 — IEEE 802.3 auto-negotiation.
@@ -2012,8 +2292,8 @@ pub fn driver_start() {
         //   4. log final Basic Status + 1000BASE-T status
 
         // Step 1 — pre-AN snapshot.
-        let bc_pre = mdio_read_phy(plat::NIC_BASE, 0, 0);
-        let bs_pre = mdio_read_phy(plat::NIC_BASE, 0, 1);
+        let bc_pre = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 0);
+        let bs_pre = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 1);
         let _ = unsafe { wari_drv_log_u32(0x5048_5910, bc_pre) }; // 'PHY\x10'
         let _ = unsafe { wari_drv_log_u32(0x5048_5911, bs_pre) }; // 'PHY\x11'
 
@@ -2036,7 +2316,7 @@ pub fn driver_start() {
             // 'already' marker.
             let _ = unsafe { wari_drv_log_u32(0x5048_5912, 0xA17E_AD11) };
         } else {
-            let _ = mdio_write_phy(plat::NIC_BASE, 0, 0, 0x1200);
+            let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, 0, 0x1200);
             let _ = unsafe { wari_drv_log_u32(0x5048_5912, 0x0000_0000) };
         }
 
@@ -2051,7 +2331,7 @@ pub fn driver_start() {
         } else {
             let mut tries = 0u32;
             let s_final = loop {
-                let s = mdio_read_phy(plat::NIC_BASE, 0, 1);
+                let s = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 1);
                 if s & BS_AN_COMPLETE != 0 && s & BS_LINK_UP != 0 {
                     break s;
                 }
@@ -2068,7 +2348,7 @@ pub fn driver_start() {
 
         // Step 4 — 1000BASE-T status (reg 0x0A): bit 11 = "1000Mb
         // full duplex resolved", bit 10 = "1000Mb half".
-        let gig_status = mdio_read_phy(plat::NIC_BASE, 0, 0x0A);
+        let gig_status = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, 0x0A);
         let _ = unsafe { wari_drv_log_u32(0x5048_5915, gig_status) };
 
         // PR Phase-1c-5b — GMAC HW capability + DMA bus-mode dump.
@@ -2213,28 +2493,41 @@ pub fn driver_start() {
             }
         }
 
-        // PR Phase-1c-6L — JH7110 AON SYSCON GMAC0 phy-mode select.
+        // PR Phase-1c-6L / Phase-1c-11 — PHY interface select.
         //
-        // BEFORE enabling gmac0_rx (AONCRG +0x1C), we have to
-        // route the PHY's RXC clock pin into the AON CRG. That
-        // routing is gated by the AON SYSCON at 0x17010000 +
-        // offset 0x0C, bits 20:18 = phy_intf_sel:
-        //   0x1 = RGMII   (VF2 default)
-        //   0x4 = RMII
+        // GMAC0: AON SYSCON @ 0x17010000 +0x0C, bits 20:18 = mode.
+        // GMAC1: SYS SYSCON @ 0x13030000 +0x90, bits  4:2 = mode.
+        // Value 0b001 = RGMII for both.
         //
-        // Without this, the gmac0_rx gate silently rejects the
-        // enable bit because its parent isn't toggling. Read-
-        // modify-write to set bit 18 and clear bits 20:19.
-        const AON_SYSCON_BASE: u32 = 0x1701_0000;
-        const PHY_INTF_OFFSET: u32 = 0x0C;
-        let pi_pre = unsafe { wari_net_mmio_read32(AON_SYSCON_BASE + PHY_INTF_OFFSET) };
-        let _ = unsafe { wari_drv_log_u32(0x5049_5F50, pi_pre) }; // 'PI_P' pre
-        let pi_new = (pi_pre & !(0x7 << 18)) | (0x1 << 18);
-        let _ = unsafe {
-            wari_net_mmio_write32(AON_SYSCON_BASE + PHY_INTF_OFFSET, pi_new)
-        };
-        let pi_post = unsafe { wari_net_mmio_read32(AON_SYSCON_BASE + PHY_INTF_OFFSET) };
-        let _ = unsafe { wari_drv_log_u32(0x5049_5F4E, pi_post) }; // 'PI_N' new
+        // Without this, the rx_inv gate silently rejects its enable
+        // bit because its parent isn't toggling.
+        #[cfg(not(feature = "gmac1"))]
+        {
+            const AON_SYSCON_BASE: u32 = 0x1701_0000;
+            const PHY_INTF_OFFSET: u32 = 0x0C;
+            let pi_pre = unsafe { wari_net_mmio_read32(AON_SYSCON_BASE + PHY_INTF_OFFSET) };
+            let _ = unsafe { wari_drv_log_u32(0x5049_5F50, pi_pre) }; // 'PI_P' pre
+            let pi_new = (pi_pre & !(0x7 << 18)) | (0x1 << 18);
+            let _ = unsafe {
+                wari_net_mmio_write32(AON_SYSCON_BASE + PHY_INTF_OFFSET, pi_new)
+            };
+            let pi_post = unsafe { wari_net_mmio_read32(AON_SYSCON_BASE + PHY_INTF_OFFSET) };
+            let _ = unsafe { wari_drv_log_u32(0x5049_5F4E, pi_post) }; // 'PI_N' new
+        }
+        #[cfg(feature = "gmac1")]
+        {
+            const SYS_SYSCON_BASE: u32 = 0x1303_0000;
+            const PHY_INTF_OFFSET: u32 = 0x90;
+            let pi_pre = unsafe { wari_net_mmio_read32(SYS_SYSCON_BASE + PHY_INTF_OFFSET) };
+            let _ = unsafe { wari_drv_log_u32(0x5049_5F50, pi_pre) }; // 'PI_P' pre
+            // Bits[4:2] = mode; mask 0x1C, RGMII = 0b001 << 2 = 0x04.
+            let pi_new = (pi_pre & !0x1C) | 0x04;
+            let _ = unsafe {
+                wari_net_mmio_write32(SYS_SYSCON_BASE + PHY_INTF_OFFSET, pi_new)
+            };
+            let pi_post = unsafe { wari_net_mmio_read32(SYS_SYSCON_BASE + PHY_INTF_OFFSET) };
+            let _ = unsafe { wari_drv_log_u32(0x4731_5070, pi_post) }; // 'G1Pp'
+        }
 
         // PR Phase-1c-6d — enable the rest of GMAC0's datapath
         // clocks. Build 86 trace showed AHB/AXI + upstream are
@@ -2255,39 +2548,66 @@ pub fn driver_start() {
         // Note: +0x10 rmii_rtx + +0x18 tx_inv + +0x1C rx are
         // intentionally untouched — defaults are correct for
         // RGMII (VF2 phy mode).
-        const AONCRG_BASE_2: u32 = 0x1700_0000;
+        #[cfg(not(feature = "gmac1"))]
+        {
+            const AONCRG_BASE_2: u32 = 0x1700_0000;
 
-        // AON datapath: tx GMUX with mux=0 (parent gmac0_gtxclk)
-        let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x14, ENABLE_BIT) };
-        // AON: gmac0_rx MUX (id 7) — bit 31 enable + mux=0 (rgmii_rxin)
-        // CRITICAL: missed in earlier builds. Without this the RX
-        // datapath has no clock; frames deserialize but never reach
-        // MTL.
-        let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x1C, ENABLE_BIT) };
-        // AON: rx_inv bit 30 set for RGMII
-        let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x20, 0x4000_0000) };
+            // AON datapath: tx GMUX with mux=0 (parent gmac0_gtxclk)
+            let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x14, ENABLE_BIT) };
+            // AON: gmac0_rx MUX (id 7) — bit 31 enable + mux=0 (rgmii_rxin)
+            let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x1C, ENABLE_BIT) };
+            // AON: rx_inv bit 30 set for RGMII
+            let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE_2 + 0x20, 0x4000_0000) };
 
-        // SYS: gtxclk = enable + divider 5 (PLL0 1000MHz / 5 = 200MHz GTX clock)
-        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B0, ENABLE_BIT | 0x5) };
-        // SYS: ptp = enable + divider 10
-        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B4, ENABLE_BIT | 0xA) };
-        // SYS: phy MDC = enable + divider 30 (~16MHz from 500MHz)
-        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B8, ENABLE_BIT | 0x1E) };
-        // SYS: gtxc gate (parent gmac0_gtxclk)
-        let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1BC, ENABLE_BIT) };
+            // SYS: gtxclk = enable + divider 5 (PLL0 1000MHz / 5 = 200MHz)
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B0, ENABLE_BIT | 0x5) };
+            // SYS: ptp = enable + divider 10
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B4, ENABLE_BIT | 0xA) };
+            // SYS: phy MDC = enable + divider 30 (~16MHz)
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B8, ENABLE_BIT | 0x1E) };
+            // SYS: gtxc gate (parent gmac0_gtxclk)
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1BC, ENABLE_BIT) };
 
-        // Verify-read each. Tags 'AOn' / 'SyS' + low byte.
-        // Dump full GMAC0 cluster: 0x08 ahb, 0x0C axi, 0x10 rmii_rtx,
-        // 0x14 tx, 0x18 tx_inv, 0x1C rx, 0x20 rx_inv.
-        for off in [0x08u32, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20] {
-            let v = unsafe { wari_net_mmio_read32(AONCRG_BASE_2 + off) };
-            let tag = 0x414F_6E00 | (off & 0xFF); // 'AOn\0' + low
-            let _ = unsafe { wari_drv_log_u32(tag, v) };
+            // Verify-read each. Tags 'AOn' / 'SyS' + low byte.
+            for off in [0x08u32, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20] {
+                let v = unsafe { wari_net_mmio_read32(AONCRG_BASE_2 + off) };
+                let tag = 0x414F_6E00 | (off & 0xFF); // 'AOn\0' + low
+                let _ = unsafe { wari_drv_log_u32(tag, v) };
+            }
+            for off in [0x1B0u32, 0x1B4, 0x1B8, 0x1BC] {
+                let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
+                let tag = 0x5379_5300 | (off & 0xFF); // 'SyS\0' + low
+                let _ = unsafe { wari_drv_log_u32(tag, v) };
+            }
         }
-        for off in [0x1B0u32, 0x1B4, 0x1B8, 0x1BC] {
-            let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
-            let tag = 0x5379_5300 | (off & 0xFF); // 'SyS\0' + low
-            let _ = unsafe { wari_drv_log_u32(tag, v) };
+
+        // ── GMAC1 datapath clocks (all in SYS CRG) ──────────────
+        #[cfg(feature = "gmac1")]
+        {
+            // gmac1_gtxclk @ +0x190 — plain DIV, NO bit31 enable.
+            // PLL0 / 5 = 200 MHz GTX clock.
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x190, 0x5) };
+            // gmac1_ptp @ +0x198 — GDIV (en + div). en+div=10.
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x198, ENABLE_BIT | 0xA) };
+            // Shared MDC root @ +0x1B8 — both MACs share. Keep
+            // identical write so GMAC0 stays healthy on a dual-MAC
+            // build. en + div=30 (~16 MHz).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B8, ENABLE_BIT | 0x1E) };
+            // gmac1_gtxc gate @ +0x1AC.
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1AC, ENABLE_BIT) };
+            // gmac1_tx GMUX @ +0x1A4 — bit31 + mux=0 (gtxclk parent).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1A4, ENABLE_BIT) };
+            // gmac1_rx MUX @ +0x19C — bit31 + mux=0 (rgmii_rxin parent).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x19C, ENABLE_BIT) };
+            // gmac1_rx_inv @ +0x1A0 — bit30 invert (RGMII).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1A0, 0x4000_0000) };
+
+            // Verify-read: full GMAC1 cluster. Tags 'Sy1\0' + low byte.
+            for off in [0x184u32, 0x188, 0x190, 0x198, 0x19C, 0x1A0, 0x1A4, 0x1AC, 0x1B8] {
+                let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
+                let tag = 0x5379_3100 | (off & 0xFF); // 'Sy1\0' + low
+                let _ = unsafe { wari_drv_log_u32(tag, v) };
+            }
         }
 
         // Retry the DMA soft-reset clear now that upstream is on.
@@ -2426,6 +2746,18 @@ pub fn driver_start() {
                  | 0x1000_0000                // FD
                  | 64;                        // total length 64
         }
+
+        // Build 134 — MAC_RXQ_CTRL0 (0x00A0) bits[1:0] = RXQ0EN.
+        // Linux dwmac4_rx_queue_enable() writes 0b10 (DCB mode = 2)
+        // here BEFORE the MAC's RE bit is set. Build 133 wrote it
+        // AFTER and the read-back was 0 — the MAC silently rejected
+        // the change because RX queue assignment is locked once RE=1.
+        // Moving the write to right before MAC_CONFIG fixes the
+        // ordering. Verify-read tag 'RXQ0' (0x52585130) immediately
+        // confirms whether the value sticks this time.
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x0A0, 0x0000_0002) };
+        let rxq_early = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x0A0) };
+        let _ = unsafe { wari_drv_log_u32(0x5258_5130, rxq_early) }; // 'RXQ0' early
 
         // MAC_CONFIG = 0x0000_2003 (DM | TE | RE) — full-duplex +
         // enable transmit + enable receive. Build 121: added DM
@@ -2613,21 +2945,47 @@ pub fn driver_start() {
         //   MAC_PACKET_FILTER (0x008) bit 0. That makes the MAC
         //   accept every frame regardless of dst MAC, so even if
         //   the addr programming is wrong we still see traffic.
+        // VF2 EEPROM: MAC0 = 6c:cf:39:00:40:84 (eth0/end0)
+        //             MAC1 = 6c:cf:39:00:40:85 (eth1/end1)
+        // Low 4 bytes [0..3] are identical (= 0x0039CF6C); the high
+        // word's byte 5 flips :84 vs :85 → 0x80008440 vs 0x80008540.
         let mac_lo: u32 = 0x0039_CF6C;
+        #[cfg(not(feature = "gmac1"))]
         let mac_hi: u32 = 0x8000_8440;
+        #[cfg(feature = "gmac1")]
+        let mac_hi: u32 = 0x8000_8540;
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x300, mac_hi) };
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x304, mac_lo) };
 
         // MAC_PACKET_FILTER: PR bit 0 = promiscuous (accept all).
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x008, 0x0000_0001) };
 
+        // Build 133 — MAC_RXQ_CTRL0 (0x00A0) bits[1:0] = RXQ0EN.
+        // After reset this register is 0x00000000, meaning RXQ0 is
+        // DISABLED. With RXQ0 disabled the MAC's RX FSM silently
+        // drops every frame BEFORE it counts in MMC, BEFORE it
+        // reaches MTL, BEFORE it reaches DMA — which exactly
+        // matches the NmGB=0 + NT_M=0 + ND_C-not-advancing + link-up
+        // signature we observed across builds 124-132.
+        //
+        // Linux's dwmac4_rx_queue_enable() writes 0b10 = DCB mode
+        // for normal Ethernet (vs 0b01 AVB). Wari never wrote this
+        // register; that's why no frames ever made it to the
+        // descriptor ring despite everything else looking correct.
+        //
+        // Value 0x00000002 = RXQ0EN[1:0] = 10 (DCB), all other
+        // queues left disabled (we only use RXQ0).
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x0A0, 0x0000_0002) };
+
         // Verify-read.
         let mac_hi_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x300) };
         let mac_lo_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x304) };
         let pf_rb     = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x008) };
+        let rxq_rb    = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x0A0) };
         let _ = unsafe { wari_drv_log_u32(0x4D41_4348, mac_hi_rb) }; // 'MACH'
         let _ = unsafe { wari_drv_log_u32(0x4D41_434C, mac_lo_rb) }; // 'MACL'
         let _ = unsafe { wari_drv_log_u32(0x4D41_4346, pf_rb) };     // 'MACF'
+        let _ = unsafe { wari_drv_log_u32(0x5258_5130, rxq_rb) };    // 'RXQ0'
 
         // Clear status sticky bits again, longer wait.
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1160, 0x0000_FFFF) };
@@ -2797,11 +3155,16 @@ pub fn driver_start() {
             vf2_state::LIN_BASE = lin_base;
         }
 
-        // MAC bytes from EEPROM (programmed earlier into MAC_ADDR0):
-        // 6c:cf:39:00:40:84 → low = 0x0039CF6C, high = 0x80008440
-        // (high has AE bit; pull the bytes from the constant we
-        // already have).
+        // MAC bytes from EEPROM, mirroring the MAC_ADDR0 write
+        // at lines 2849-2851. eth0 = :84 (GMAC0), eth1 = :85
+        // (GMAC1). Without the cfg gate here, builds 125-128 fed
+        // :84 to wari_nic_set_mac even when the rest of the driver
+        // was correctly targeting GMAC1 — making the kernel's
+        // boot trace lie about which MAC was running.
+        #[cfg(not(feature = "gmac1"))]
         let mac: [u8; 6] = [0x6c, 0xCF, 0x39, 0x00, 0x40, 0x84];
+        #[cfg(feature = "gmac1")]
+        let mac: [u8; 6] = [0x6c, 0xCF, 0x39, 0x00, 0x40, 0x85];
 
         // Kick smoltcp Interface up. nic_iface owns the static
         // INTERFACE / SOCKETS slots; init populates them.
@@ -2820,6 +3183,13 @@ pub fn driver_start() {
         let mac_high = (mac[4] as u32) | ((mac[5] as u32) << 8);
         // SAFETY: extern host fn. Kernel cap-checks Net+WRITE.
         let _ = unsafe { wari_nic_set_mac(mac_low, mac_high) };
+
+        // Build-129 net-diag: boot-time register snapshot. Fires once
+        // at end of init so the operator sees the full RX-path state
+        // BEFORE any traffic arrives — a "this is what the MAC looks
+        // like with my init complete" baseline.
+        #[cfg(feature = "net-diag")]
+        diag::boot_dump(plat::NIC_BASE);
     }
 
     // The vf2 path is a Phase-1c stub — return immediately, leave
@@ -2906,6 +3276,12 @@ impl wari_driver_iface::NetDriver for Driver {
     fn socket_listen(handle: u32, backlog: u32) -> i32 {
         driver_socket_listen(handle, backlog)
     }
+    fn socket_accept(handle: u32) -> i32 {
+        nic_iface::socket_poll_accept(handle)
+    }
+    fn socket_send_canned(handle: u32) -> i32 {
+        nic_iface::socket_send_canned(handle)
+    }
 }
 
 wari_driver_iface::wari_net_driver!(Driver);
@@ -2947,3 +3323,9 @@ pub fn driver_socket_listen(handle: u32, backlog: u32) -> i32 {
     let _ = backlog; // smoltcp single-pending only — backlog ignored
     nic_iface::socket_listen(handle)
 }
+
+// Phase-1c HTTP demo — accept + canned-send are exported by the
+// `wari_net_driver!` macro from the `NetDriver` trait impl below
+// (which delegates to `nic_iface::socket_poll_accept` /
+// `socket_send_canned`). The macro writes manifest entries the
+// sign tool requires.

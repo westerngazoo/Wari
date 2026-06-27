@@ -206,11 +206,15 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
     //      future PR can wire IRQ-driven `wfi` to drop the busy
     //      cost.
     let net_up = runtime::tier2_net::is_installed();
-    let mut tick: u64 = 0;
     loop {
         if net_up {
-            let _ = unsafe { runtime::tier2_net::poll(tick) };
-            tick = tick.saturating_add(10);
+            // Shared monotonic tick — also consumed by the
+            // Phase-1c HTTP-demo host fns (`net_socket_accept`,
+            // `net_socket_send_canned`). Pulling the counter into
+            // a shared helper keeps smoltcp's perceived clock
+            // monotonic across both kmain idle ticks and inline
+            // host-fn driven polls.
+            let _ = unsafe { runtime::tier2_net::poll(runtime::tier2_net::next_tick()) };
         }
         if let Some(b) = mmio::uart_ns16550::try_read_byte() {
             if b == 0x12 {

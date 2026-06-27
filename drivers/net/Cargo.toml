@@ -42,6 +42,21 @@ smoltcp = { version = "0.11", default-features = false, features = [
 default = ["qemu"]
 qemu = []
 vf2  = []
+# Phase-1c-11: target the JH7110's GMAC1 (MAC base 0x16040000) instead
+# of GMAC0 (0x16030000). Only meaningful in combination with `vf2`.
+# Lets the operator wire VF2 eth0 to a Debian-side internet router and
+# VF2 eth1 to an isolated test net (e.g. OpenWrt) without cable
+# juggling. Default vf2 build keeps targeting GMAC0; enable explicitly
+# for the eth1-test rig.
+gmac1 = ["vf2"]
+# Phase-1c-12: periodic 17-register snapshot of the DWMAC RX path
+# (MMC counters, MTL debug, DMA status, current descriptor) emitted
+# every ~32K receive() calls. Plus a one-shot deep-dump on the very
+# first OWN=0 transition. Lets the operator tell which layer drops
+# frames (PHY / MAC filter / MTL FIFO / DMA) in a single screen-
+# height of trace. Opt-in for diagnostic builds; default-off keeps
+# production trace volume unchanged.
+net-diag = []
 
 [profile.release]
 panic = "abort"

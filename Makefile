@@ -10,9 +10,16 @@ KERNEL_ELF   := target/riscv64gc-unknown-none-elf/release/wari
 KERNEL_BIN   := build/wari.bin
 HELLO_WASM   := apps/hello/target/wasm32-unknown-unknown/release/wari_hello.wasm
 QEMU         := qemu-system-riscv64
+# SLIRP NAT subnet matches the driver's static IP (192.168.50.10/24
+# in nic_iface::init). The hostfwd forwards the host's TCP/8080
+# explicitly to the guest at 192.168.50.10:7000 — the Phase-1c
+# HTTP-demo Tier-1 (apps/hello, bound to port 7000) becomes
+# reachable via `curl http://localhost:8080` on the dev machine.
+# Host port is 8080 rather than 7000 because macOS's AirTunes /
+# AirPlay receiver squats on TCP/7000 by default.
 QEMU_ARGS    := -machine virt -nographic -bios default \
                 -global virtio-mmio.force-legacy=false \
-                -netdev user,id=net0 \
+                -netdev user,id=net0,net=192.168.50.0/24,host=192.168.50.2,hostfwd=tcp::8080-192.168.50.10:7000 \
                 -device virtio-net-device,netdev=net0
 
 # llvm-objcopy from Rust toolchain (install with: rustup component add llvm-tools)
@@ -124,9 +131,9 @@ build-net-driver:
 	  cargo build --release --features qemu --no-default-features
 	@cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
 		build/drivers/net-qemu.wasm
-	@echo "  [build] net driver: VF2 variant (JH7110 GMAC stub, Phase-1c)"
+	@echo "  [build] net driver: VF2 variant (JH7110 GMAC1, Phase-1c-12 + net-diag)"
 	@cd drivers/net && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo build --release --features vf2 --no-default-features
+	  cargo build --release --features "vf2 gmac1 net-diag" --no-default-features
 	@cp target/wasm32-unknown-unknown/release/wari_driver_net.wasm \
 		build/drivers/net-vf2.wasm
 

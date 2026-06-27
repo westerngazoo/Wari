@@ -4,12 +4,18 @@
 //! ## Property
 //!
 //! Every input either parses successfully or returns a typed
-//! `wasmi::Error`. **Zero panics.** A panic indicates a wasmi-side bug
-//! that breaches Wari's Layer-1 (structural) defense — see
-//! `docs/security-model.md` §"Three layers, three sandboxes". Layer 2
-//! (Sv39 MMU) would still contain a single tenant's escape, but a
-//! validator-side panic in the kernel address space is a kernel bug
-//! we must catch at fuzz time, not in production.
+//! `wasmi::Error`. **Zero panics.** A panic in the validator path is
+//! a `wasmi`-host-side soundness bug. Per `docs/security-model.md`,
+//! such a panic is NOT contained by Layer 2 (the MMU): wasmi
+//! executes in the kernel address space, so a host-Rust panic in
+//! the validator IS a kernel bug. We catch it at fuzz time so it
+//! does not become a Tier-1 → Tier-0 escape primitive in production.
+//!
+//! This harness MUST exercise the exact `wasmi` version the kernel
+//! embeds (see `tests/fuzz/Cargo.toml` — the `wasmi` pin is required
+//! to track `/kernel/Cargo.toml`). Drift here produces false
+//! assurance and was the May-2026 finding that this fuzz-version-sync
+//! PR closed.
 //!
 //! ## Run
 //!
