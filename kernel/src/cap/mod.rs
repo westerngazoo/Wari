@@ -52,6 +52,7 @@ pub mod boot;
 pub mod cspace;
 pub mod objects;
 pub mod pool;
+pub mod reg;
 pub mod revoke;
 pub mod storage;
 pub mod syscall;
@@ -78,10 +79,12 @@ pub use objects::{
     NOTIFICATION_POOL_CAPACITY, SOCKET_POOL_CAPACITY, UNTYPED_POOL_CAPACITY,
 };
 pub use pool::{BoundedQueue, Pool};
-pub use storage::{cspaces, object_pools};
+pub use reg::{RegEntry, RegTable};
+pub use storage::{cspaces, object_pools, reg_tables};
 pub use syscall::{
     cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-    cap_revoke_impl, check_cap, lin_mem_base_impl,
+    cap_register_impl, cap_revoke_impl, cap_unregister_impl, check_cap,
+    lin_mem_base_impl,
     net_socket_bind_impl, net_socket_close_impl, net_socket_create_impl,
     net_socket_listen_impl,
     nic_attach_queue_impl, nic_queue_notify_impl, nic_set_mac_impl,

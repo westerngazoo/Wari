@@ -36,6 +36,7 @@ use core::ptr::addr_of_mut;
 
 use super::cspace::{CSpace, MAX_PROCS};
 use super::objects::ObjectPools;
+use super::reg::RegTable;
 
 // ─────────────────────────────────────────────────────────────────
 // Statics
@@ -54,6 +55,12 @@ static mut CSPACES: [CSpace; MAX_PROCS] = [const { CSpace::new() }; MAX_PROCS];
 /// pool is a fixed-size slab; capacities live in `objects::*_POOL_CAPACITY`
 /// constants.
 static mut OBJECT_POOLS: ObjectPools = ObjectPools::new();
+
+/// Per-process registered-capability fast-path tables (PR cap-fastpath-1).
+/// Indexed by process id like `CSPACES`. Each `RegTable` is small
+/// (`REG_SLOTS` × a few bytes); the array is zero/`Empty`-initialized at
+/// boot via `const fn`. See `docs/cap-registered-fastpath-design.md`.
+static mut REG_TABLES: [RegTable; MAX_PROCS] = [const { RegTable::new() }; MAX_PROCS];
 
 // ─────────────────────────────────────────────────────────────────
 // Accessors
@@ -89,6 +96,19 @@ pub fn cspaces() -> &'static mut [CSpace; MAX_PROCS] {
 pub fn object_pools() -> &'static mut ObjectPools {
     // SAFETY: INV-1 + INV-8 — single-hart, statically initialized.
     unsafe { &mut *addr_of_mut!(OBJECT_POOLS) }
+}
+
+/// Return a mutable reference to the per-process registered-capability
+/// tables.
+///
+/// # Safety contract
+///
+/// Same as `cspaces()`: single-hart (INV-1), statically initialized via
+/// `const fn` (INV-8), no concurrent aliasing requirement. Callers must
+/// not hold the returned reference across another call to this function.
+pub fn reg_tables() -> &'static mut [RegTable; MAX_PROCS] {
+    // SAFETY: INV-1 + INV-8 — single-hart, statically initialized.
+    unsafe { &mut *addr_of_mut!(REG_TABLES) }
 }
 
 // ─────────────────────────────────────────────────────────────────
