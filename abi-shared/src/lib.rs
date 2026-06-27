@@ -97,14 +97,19 @@ pub const SYS_CAP_REVOKE:   usize = 19;
 pub const SYS_CAP_DELETE:   usize = 20;
 /// Read metadata for a capability (kind, rights, badge).
 pub const SYS_CAP_LOOKUP:   usize = 21;
+/// Register a capability into the per-process fast-path table; returns a
+/// registered-handle index. See `docs/cap-registered-fastpath-design.md`.
+pub const SYS_CAP_REGISTER:   usize = 22;
+/// Drop a registered fast-path handle (does not affect the capability).
+pub const SYS_CAP_UNREGISTER: usize = 23;
 
 /// Highest syscall number currently defined. Used for bounds checks
 /// in the dispatch path and for the size of any dispatch table.
 ///
 /// Note: slot 10 is **retired** (formerly `SYS_SPAWN_ELF`, see Wari
-/// R7). The live syscalls are 0..=9, 11..=16, and 17..=21 (Phase 1b
-/// cap-management).
-pub const SYS_MAX: usize = SYS_CAP_LOOKUP;
+/// R7). The live syscalls are 0..=9, 11..=16, and 17..=23 (Phase 1b
+/// cap-management + the cap-fastpath register/unregister pair).
+pub const SYS_MAX: usize = SYS_CAP_UNREGISTER;
 
 // ── Error codes ────────────────────────────────────────────────
 //
@@ -216,6 +221,335 @@ pub mod net {
     pub const NET_OP_MAX: usize = NET_CLOSE;
 }
 
+/// Registered-capability fast-path validation — the pure soundness check.
+///
+/// The fast syscall path (see `docs/cap-registered-fastpath-design.md`)
+/// lets a module register a capability once and then reference it by a
+/// small integer handle (`reg_idx`) on the hot path. This module holds
+/// the **pure** soundness predicate the kernel runs on every submission —
+/// the platform- and policy-independent part of proposed INV-α:
+///
+///   1. the handle index is in range,
+///   2. its slot is live,
+///   3. the cached generation still matches the live cap-slot generation
+///      (so a revoked/reused cap auto-invalidates — this rides the
+///      generation-counter mechanism, INV-17), and
+///   4. the operation is permitted for the cached capability.
+///
+/// Clause 4 (op vs kind+rights) is a kernel-side **policy** decision, so
+/// it is injected here as a boolean (`op_permitted`). That keeps this
+/// crate free of the op/rights table — which is designed in the kernel
+/// cap module — while still letting the soundness check be expressed and
+/// tested as one pure function. No `unsafe`, no MMIO: host-testable.
+pub mod reg {
+    /// Registered-resource slots per process. The kernel's `RegTable`
+    /// mirrors this; the validator bounds-checks `reg_idx` against it.
+    /// Single source of truth so kernel and tooling agree on the range.
+    pub const REG_SLOTS: u32 = 64;
+
+    /// Outcome of validating one registered-handle submission. Distinct
+    /// rejection reasons (not a bare `bool`) so callers and tests can
+    /// assert *why* a submission was refused.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RegCheck {
+        /// All clauses hold; the operation may proceed.
+        Ok,
+        /// `reg_idx >= REG_SLOTS` — outside the registered-table range.
+        OutOfRange,
+        /// The slot is not live (never registered, or unregistered).
+        Empty,
+        /// Cached generation != live cap-slot generation: the underlying
+        /// capability was revoked / deleted / reused (INV-17). The handle
+        /// is stale and confers nothing.
+        Stale,
+        /// The operation is not permitted for the cached kind + rights.
+        NotPermitted,
+    }
+
+    /// Validate a registered-handle submission (proposed INV-α).
+    ///
+    /// Pure: given the handle index, the slot's liveness, the cached vs
+    /// live generation, and the kernel's op-permission decision, returns
+    /// the precise [`RegCheck`]. Checks are ordered cheapest-first and
+    /// short-circuit, so a hostile `reg_idx` is rejected on the bounds
+    /// test before any slot is examined.
+    ///
+    /// # Parameters
+    /// - `reg_idx`: the submitted handle index.
+    /// - `live`: whether the slot at `reg_idx` is occupied (kind != Empty).
+    /// - `reg_generation`: generation cached in the slot at registration.
+    /// - `cur_generation`: the underlying cap slot's *current* generation.
+    /// - `op_permitted`: the kernel's decision that the op is legal for
+    ///   the cached kind + rights (clause 4, injected).
+    ///
+    /// # Returns
+    /// [`RegCheck::Ok`] iff all clauses hold; otherwise the first failing
+    /// clause in the order range → live → generation → permission.
+    ///
+    /// ```
+    /// use wari_abi::reg::{validate_handle, RegCheck, REG_SLOTS};
+    /// // Happy path: in range, live, generations match, op allowed.
+    /// assert_eq!(validate_handle(3, true, 7, 7, true), RegCheck::Ok);
+    /// // Out of range short-circuits before any slot is touched.
+    /// assert_eq!(validate_handle(REG_SLOTS, true, 7, 7, true), RegCheck::OutOfRange);
+    /// // Stale generation (the cap was revoked/reused) is rejected.
+    /// assert_eq!(validate_handle(3, true, 7, 8, true), RegCheck::Stale);
+    /// ```
+    #[inline]
+    pub const fn validate_handle(
+        reg_idx: u32,
+        live: bool,
+        reg_generation: u16,
+        cur_generation: u16,
+        op_permitted: bool,
+    ) -> RegCheck {
+        if reg_idx >= REG_SLOTS {
+            return RegCheck::OutOfRange;
+        }
+        if !live {
+            return RegCheck::Empty;
+        }
+        if reg_generation != cur_generation {
+            return RegCheck::Stale;
+        }
+        if !op_permitted {
+            return RegCheck::NotPermitted;
+        }
+        RegCheck::Ok
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ok_when_all_clauses_hold() {
+            assert_eq!(validate_handle(0, true, 0, 0, true), RegCheck::Ok);
+            assert_eq!(validate_handle(REG_SLOTS - 1, true, 42, 42, true), RegCheck::Ok);
+        }
+
+        #[test]
+        fn out_of_range_is_first_and_short_circuits() {
+            // At and beyond the bound → OutOfRange.
+            assert_eq!(validate_handle(REG_SLOTS, true, 1, 1, true), RegCheck::OutOfRange);
+            assert_eq!(validate_handle(u32::MAX, true, 1, 1, true), RegCheck::OutOfRange);
+            // OutOfRange wins even when every later clause would also fail
+            // (proves ordering: a hostile index never reaches slot reads).
+            assert_eq!(validate_handle(REG_SLOTS, false, 1, 2, false), RegCheck::OutOfRange);
+        }
+
+        #[test]
+        fn empty_slot_rejected_before_generation() {
+            assert_eq!(validate_handle(5, false, 1, 1, true), RegCheck::Empty);
+            // Empty wins over a generation mismatch and a denied op.
+            assert_eq!(validate_handle(5, false, 1, 2, false), RegCheck::Empty);
+        }
+
+        #[test]
+        fn stale_generation_rejected_before_permission() {
+            assert_eq!(validate_handle(5, true, 1, 2, true), RegCheck::Stale);
+            // Stale wins over a denied op (revocation is checked first).
+            assert_eq!(validate_handle(5, true, 9, 10, false), RegCheck::Stale);
+            // Generation wrap edge: max vs zero is still a mismatch.
+            assert_eq!(validate_handle(5, true, u16::MAX, 0, true), RegCheck::Stale);
+        }
+
+        #[test]
+        fn not_permitted_is_last_clause() {
+            assert_eq!(validate_handle(5, true, 3, 3, false), RegCheck::NotPermitted);
+        }
+
+        #[test]
+        fn const_evaluable() {
+            // Usable in const context (kernel may fold known cases).
+            const R: RegCheck = validate_handle(1, true, 0, 0, true);
+            assert_eq!(R, RegCheck::Ok);
+        }
+    }
+}
+
+/// Cap-fastpath submission/completion ring wire format (PR-2a).
+///
+/// The fast path (see `docs/cap-registered-fastpath-design.md` §5) lets a
+/// module batch operations in a shared submission queue (SQ) in its own
+/// linear memory and ring a doorbell once; the kernel drains the SQ,
+/// validates each entry against the registered-handle table, dispatches,
+/// and posts a completion-queue (CQ) entry. This module is the **pure
+/// wire format** both sides agree on: entry sizes/offsets, the v1 op
+/// codes, and a copy-before-use decoder. No kernel state, no `unsafe`,
+/// host-testable.
+///
+/// v1 ops **reuse existing capability-checked operations** reached by a
+/// registered handle — the kernel resolves the handle, re-checks it, and
+/// delegates to the matching host-fn impl. No new authority is minted by
+/// the ring itself.
+pub mod ring {
+    /// Submission-queue entry size on the wire (bytes). Layout (LE,
+    /// 8-byte aligned): `op`@0, `reg_idx`@4, `flags`@8, pad@12,
+    /// `user_data`@16, `arg0`@24, `arg1`@32.
+    pub const SQE_SIZE: usize = 40;
+    /// Completion-queue entry size on the wire (bytes). Layout (LE):
+    /// `user_data`@0, `result`@8 (i64).
+    pub const CQE_SIZE: usize = 16;
+
+    /// Wait on a registered Notification handle (delegates to the
+    /// existing `notification_wait` op).
+    pub const RING_OP_NOTIFY_WAIT: u32 = 1;
+    /// Acknowledge a registered Notification handle (delegates to the
+    /// existing `notification_ack` op).
+    pub const RING_OP_NOTIFY_ACK: u32 = 2;
+    /// Highest defined ring op. New ops are appended; never renumber.
+    pub const RING_OP_MAX: u32 = RING_OP_NOTIFY_ACK;
+
+    /// Is `op` a defined ring operation? The kernel rejects unknown ops
+    /// before touching a handle.
+    #[inline]
+    pub const fn is_known_op(op: u32) -> bool {
+        op >= RING_OP_NOTIFY_WAIT && op <= RING_OP_MAX
+    }
+
+    /// A decoded submission-queue entry. The kernel decodes one of these
+    /// out of the module's linear memory **before** any validation
+    /// (copy-before-use, INV-β), so a later mutation by the module cannot
+    /// change the decision the kernel acts on.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Sqe {
+        /// Operation code (see `RING_OP_*`).
+        pub op: u32,
+        /// Registered-handle index into the caller's RegTable.
+        pub reg_idx: u32,
+        /// Per-op flags (reserved; 0 in v1).
+        pub flags: u32,
+        /// Opaque correlation token, echoed verbatim in the matching CQE.
+        pub user_data: u64,
+        /// First op-specific argument (e.g. a linear-memory offset).
+        pub arg0: u64,
+        /// Second op-specific argument (e.g. a length).
+        pub arg1: u64,
+    }
+
+    #[inline]
+    fn rd_u32(b: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+    }
+
+    #[inline]
+    fn rd_u64(b: &[u8], at: usize) -> u64 {
+        u64::from_le_bytes([
+            b[at], b[at + 1], b[at + 2], b[at + 3],
+            b[at + 4], b[at + 5], b[at + 6], b[at + 7],
+        ])
+    }
+
+    /// Decode the `idx`-th [`Sqe`] from a submission-queue byte buffer.
+    ///
+    /// Pure, allocation-free, panic-free on any input: returns `None` if
+    /// entry `idx` would read past `bytes`. This is the copy-before-use
+    /// step (INV-β) — the caller acts on the returned owned `Sqe`, never
+    /// on the live buffer.
+    ///
+    /// ```
+    /// use wari_abi::ring::{decode_sqe, SQE_SIZE};
+    /// // Out-of-range index returns None instead of panicking.
+    /// assert_eq!(decode_sqe(&[0u8; SQE_SIZE], 1), None);
+    /// ```
+    pub fn decode_sqe(bytes: &[u8], idx: usize) -> Option<Sqe> {
+        let base = idx.checked_mul(SQE_SIZE)?;
+        let end = base.checked_add(SQE_SIZE)?;
+        if end > bytes.len() {
+            return None;
+        }
+        Some(Sqe {
+            op: rd_u32(bytes, base),
+            reg_idx: rd_u32(bytes, base + 4),
+            flags: rd_u32(bytes, base + 8),
+            user_data: rd_u64(bytes, base + 16),
+            arg0: rd_u64(bytes, base + 24),
+            arg1: rd_u64(bytes, base + 32),
+        })
+    }
+
+    /// Encode a completion-queue entry: the originating `user_data` and
+    /// the op `result` (`>= 0` success / negative errno).
+    #[inline]
+    pub fn encode_cqe(user_data: u64, result: i64) -> [u8; CQE_SIZE] {
+        let mut out = [0u8; CQE_SIZE];
+        out[0..8].copy_from_slice(&user_data.to_le_bytes());
+        out[8..16].copy_from_slice(&result.to_le_bytes());
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn op_codes_known_range() {
+            assert!(is_known_op(RING_OP_NOTIFY_WAIT));
+            assert!(is_known_op(RING_OP_NOTIFY_ACK));
+            assert!(!is_known_op(0));
+            assert!(!is_known_op(RING_OP_MAX + 1));
+            assert!(!is_known_op(u32::MAX));
+        }
+
+        #[test]
+        fn decode_sqe_reads_fields_le() {
+            let mut b = [0u8; SQE_SIZE];
+            b[0..4].copy_from_slice(&RING_OP_NOTIFY_WAIT.to_le_bytes());
+            b[4..8].copy_from_slice(&7u32.to_le_bytes()); // reg_idx
+            b[8..12].copy_from_slice(&0u32.to_le_bytes()); // flags
+            b[16..24].copy_from_slice(&0xDEAD_BEEFu64.to_le_bytes()); // user_data
+            b[24..32].copy_from_slice(&0x1000u64.to_le_bytes()); // arg0
+            b[32..40].copy_from_slice(&512u64.to_le_bytes()); // arg1
+            assert_eq!(
+                decode_sqe(&b, 0),
+                Some(Sqe {
+                    op: RING_OP_NOTIFY_WAIT,
+                    reg_idx: 7,
+                    flags: 0,
+                    user_data: 0xDEAD_BEEF,
+                    arg0: 0x1000,
+                    arg1: 512,
+                })
+            );
+        }
+
+        #[test]
+        fn decode_sqe_out_of_range_is_none_not_panic() {
+            assert_eq!(decode_sqe(&[], 0), None);
+            assert_eq!(decode_sqe(&[0u8; SQE_SIZE], 1), None);
+            // A partial trailing entry is rejected wholesale.
+            assert_eq!(decode_sqe(&[0u8; SQE_SIZE + 4], 1), None);
+            // usize overflow on idx*SQE_SIZE is handled (no panic).
+            assert_eq!(decode_sqe(&[0u8; SQE_SIZE], usize::MAX), None);
+        }
+
+        #[test]
+        fn decode_sqe_second_entry() {
+            let mut b = [0u8; SQE_SIZE * 2];
+            b[SQE_SIZE..SQE_SIZE + 4].copy_from_slice(&RING_OP_NOTIFY_ACK.to_le_bytes());
+            let sqe = decode_sqe(&b, 1);
+            assert!(sqe.is_some());
+            assert_eq!(sqe.map(|s| s.op), Some(RING_OP_NOTIFY_ACK));
+        }
+
+        #[test]
+        fn encode_cqe_roundtrips() {
+            let c = encode_cqe(0x1122_3344_5566_7788, -2);
+            assert_eq!(&c[0..8], &0x1122_3344_5566_7788u64.to_le_bytes());
+            // Compare the result bytes directly (no unwrap/try_into).
+            assert_eq!(&c[8..16], &(-2i64).to_le_bytes());
+        }
+
+        #[test]
+        fn entry_sizes_are_stable() {
+            // Wire-format ABI: these sizes are part of the contract.
+            assert_eq!(SQE_SIZE, 40);
+            assert_eq!(CQE_SIZE, 16);
+        }
+    }
+}
+
 // ── Tests — pure, runnable on host ─────────────────────────────
 
 #[cfg(test)]
@@ -248,12 +582,11 @@ mod tests {
 
     #[test]
     fn sys_max_matches_highest_syscall() {
-        // Phase 1b extended the syscall range to include the
-        // capability-management ops; SYS_MAX therefore moved from
-        // SYS_REBOOT (16) to SYS_CAP_LOOKUP (21). The test pins
-        // both the symbolic and numeric value.
-        assert_eq!(SYS_MAX, SYS_CAP_LOOKUP);
-        assert_eq!(SYS_MAX, 21);
+        // Phase 1b added the capability-management ops (→ SYS_CAP_LOOKUP
+        // = 21); the cap-fastpath register/unregister pair extends the
+        // range to 23. SYS_MAX pins both the symbolic and numeric value.
+        assert_eq!(SYS_MAX, SYS_CAP_UNREGISTER);
+        assert_eq!(SYS_MAX, 23);
     }
 
     #[test]
@@ -262,11 +595,15 @@ mod tests {
         // the previous SYS_REBOOT (16). Nothing in this range should
         // collide; the contiguous block makes the dispatch table
         // simpler downstream.
-        assert_eq!(SYS_CAP_MINT,    17);
-        assert_eq!(SYS_CAP_COPY,    18);
-        assert_eq!(SYS_CAP_REVOKE,  19);
-        assert_eq!(SYS_CAP_DELETE,  20);
-        assert_eq!(SYS_CAP_LOOKUP,  21);
+        assert_eq!(SYS_CAP_MINT,       17);
+        assert_eq!(SYS_CAP_COPY,       18);
+        assert_eq!(SYS_CAP_REVOKE,     19);
+        assert_eq!(SYS_CAP_DELETE,     20);
+        assert_eq!(SYS_CAP_LOOKUP,     21);
+        // cap-fastpath register/unregister extend the contiguous block.
+        assert_eq!(SYS_CAP_REGISTER,   22);
+        assert_eq!(SYS_CAP_UNREGISTER, 23);
+        assert_eq!(SYS_MAX,            SYS_CAP_UNREGISTER);
         // And not stepping on SYS_REBOOT.
         assert_ne!(SYS_CAP_MINT, SYS_REBOOT);
     }

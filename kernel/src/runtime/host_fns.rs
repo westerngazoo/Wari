@@ -73,7 +73,8 @@ pub fn register_host_fns(linker: &mut Linker<Tier2HostState>) -> Result<(), Kern
     // live in `cap::syscall`; we just bind them to the linker here.
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-        cap_revoke_impl, notification_ack_impl, notification_wait_impl,
+        cap_register_impl, cap_revoke_impl, cap_unregister_impl,
+        notification_ack_impl, notification_wait_impl,
         PROC_ID_TIER2_UART,
     };
     linker
@@ -118,6 +119,25 @@ pub fn register_host_fns(linker: &mut Linker<Tier2HostState>) -> Result<(), Kern
             "cap_lookup",
             |mut caller: Caller<'_, Tier2HostState>, slot: u32, out_buf: u32| -> i32 {
                 cap_lookup_impl(&mut caller, PROC_ID_TIER2_UART, slot, out_buf)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    // Cap-fastpath register/unregister (PR cap-fastpath-1).
+    linker
+        .func_wrap(
+            "wari",
+            "cap_register",
+            |_: Caller<'_, Tier2HostState>, cspace_slot: u32| -> i32 {
+                cap_register_impl(PROC_ID_TIER2_UART, cspace_slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_unregister",
+            |_: Caller<'_, Tier2HostState>, reg_idx: u32| -> i32 {
+                cap_unregister_impl(PROC_ID_TIER2_UART, reg_idx)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;
@@ -337,7 +357,8 @@ pub fn register_net_host_fns(
     // driver's proc_id baked into each closure.
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-        cap_revoke_impl, lin_mem_base_impl, nic_attach_queue_impl,
+        cap_register_impl, cap_revoke_impl, cap_unregister_impl,
+        lin_mem_base_impl, nic_attach_queue_impl,
         nic_queue_notify_impl, nic_set_mac_impl, notification_ack_impl,
         notification_wait_impl,
     };
@@ -383,6 +404,25 @@ pub fn register_net_host_fns(
             "cap_lookup",
             move |mut caller: Caller<'_, Tier2HostState>, slot: u32, out_buf: u32| -> i32 {
                 cap_lookup_impl(&mut caller, pid, slot, out_buf)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    // Cap-fastpath register/unregister (PR cap-fastpath-1).
+    linker
+        .func_wrap(
+            "wari",
+            "cap_register",
+            move |_: Caller<'_, Tier2HostState>, cspace_slot: u32| -> i32 {
+                cap_register_impl(pid, cspace_slot)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "cap_unregister",
+            move |_: Caller<'_, Tier2HostState>, reg_idx: u32| -> i32 {
+                cap_unregister_impl(pid, reg_idx)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;
