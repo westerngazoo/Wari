@@ -5,6 +5,14 @@
 # Build numbers continue monotonically from goose-os (see CLAUDE.md
 # §PR Workflow → Build numbering).
 
+# Build ergonomics (R1): prepend the rustup toolchain dir so bare `make`
+# always finds the `cargo`/`rustc` that carry the wasm32 + riscv64 targets.
+# Homebrew's cargo (no cross targets) otherwise shadows it and breaks the
+# build with "can't find crate for `core`". Removes the need to prefix
+# every invocation with PATH="$HOME/.cargo/bin:$PATH". See
+# docs/parallel-worklist.md §Build refactor.
+export PATH := $(HOME)/.cargo/bin:$(PATH)
+
 KERNEL_CRATE := wari-kernel
 KERNEL_ELF   := target/riscv64gc-unknown-none-elf/release/wari
 KERNEL_BIN   := build/wari.bin
