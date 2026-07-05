@@ -75,6 +75,7 @@ pub fn register_host_fns(linker: &mut Linker<Tier2HostState>) -> Result<(), Kern
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
         cap_register_impl, cap_revoke_impl, cap_unregister_impl,
         notification_ack_impl, notification_wait_impl,
+        ring_setup_impl, ring_submit_impl,
         PROC_ID_TIER2_UART,
     };
     linker
@@ -138,6 +139,25 @@ pub fn register_host_fns(linker: &mut Linker<Tier2HostState>) -> Result<(), Kern
             "cap_unregister",
             |_: Caller<'_, Tier2HostState>, reg_idx: u32| -> i32 {
                 cap_unregister_impl(PROC_ID_TIER2_UART, reg_idx)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    // Cap-fastpath submission ring (PR-2b).
+    linker
+        .func_wrap(
+            "wari",
+            "ring_setup",
+            |_: Caller<'_, Tier2HostState>, sq: u32, cq: u32, entries: u32| -> i32 {
+                ring_setup_impl(PROC_ID_TIER2_UART, sq, cq, entries)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "ring_submit",
+            |mut caller: Caller<'_, Tier2HostState>, n: u32| -> i32 {
+                ring_submit_impl(&mut caller, PROC_ID_TIER2_UART, n)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;
@@ -358,6 +378,7 @@ pub fn register_net_host_fns(
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
         cap_register_impl, cap_revoke_impl, cap_unregister_impl,
+        ring_setup_impl, ring_submit_impl,
         lin_mem_base_impl, nic_attach_queue_impl,
         nic_queue_notify_impl, nic_set_mac_impl, notification_ack_impl,
         notification_wait_impl,
@@ -423,6 +444,25 @@ pub fn register_net_host_fns(
             "cap_unregister",
             move |_: Caller<'_, Tier2HostState>, reg_idx: u32| -> i32 {
                 cap_unregister_impl(pid, reg_idx)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    // Cap-fastpath submission ring (PR-2b).
+    linker
+        .func_wrap(
+            "wari",
+            "ring_setup",
+            move |_: Caller<'_, Tier2HostState>, sq: u32, cq: u32, entries: u32| -> i32 {
+                ring_setup_impl(pid, sq, cq, entries)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "ring_submit",
+            move |mut caller: Caller<'_, Tier2HostState>, n: u32| -> i32 {
+                ring_submit_impl(&mut caller, pid, n)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;

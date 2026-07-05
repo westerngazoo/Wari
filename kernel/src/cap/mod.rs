@@ -53,6 +53,7 @@ pub mod cspace;
 pub mod objects;
 pub mod pool;
 pub mod reg;
+pub mod ring_drain;
 pub mod revoke;
 pub mod storage;
 pub mod syscall;
@@ -80,7 +81,8 @@ pub use objects::{
 };
 pub use pool::{BoundedQueue, Pool};
 pub use reg::{RegEntry, RegTable};
-pub use storage::{cspaces, object_pools, reg_tables};
+pub use ring_drain::{ring_setup_impl, ring_submit_impl, RingDesc};
+pub use storage::{cspaces, object_pools, reg_tables, ring_descriptors};
 pub use syscall::{
     cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
     cap_register_impl, cap_revoke_impl, cap_unregister_impl, check_cap,
