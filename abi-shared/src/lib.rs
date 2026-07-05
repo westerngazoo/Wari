@@ -102,14 +102,18 @@ pub const SYS_CAP_LOOKUP:   usize = 21;
 pub const SYS_CAP_REGISTER:   usize = 22;
 /// Drop a registered fast-path handle (does not affect the capability).
 pub const SYS_CAP_UNREGISTER: usize = 23;
+/// Configure the caller's SQ/CQ submission ring (sq_ptr, cq_ptr, entries).
+pub const SYS_RING_SETUP:     usize = 24;
+/// Drain up to N submission entries from the caller's ring.
+pub const SYS_RING_SUBMIT:    usize = 25;
 
 /// Highest syscall number currently defined. Used for bounds checks
 /// in the dispatch path and for the size of any dispatch table.
 ///
 /// Note: slot 10 is **retired** (formerly `SYS_SPAWN_ELF`, see Wari
-/// R7). The live syscalls are 0..=9, 11..=16, and 17..=23 (Phase 1b
-/// cap-management + the cap-fastpath register/unregister pair).
-pub const SYS_MAX: usize = SYS_CAP_UNREGISTER;
+/// R7). The live syscalls are 0..=9, 11..=16, and 17..=25 (Phase 1b
+/// cap-management + the cap-fastpath register/unregister + ring pair).
+pub const SYS_MAX: usize = SYS_RING_SUBMIT;
 
 // ── Error codes ────────────────────────────────────────────────
 //
@@ -582,11 +586,11 @@ mod tests {
 
     #[test]
     fn sys_max_matches_highest_syscall() {
-        // Phase 1b added the capability-management ops (→ SYS_CAP_LOOKUP
-        // = 21); the cap-fastpath register/unregister pair extends the
-        // range to 23. SYS_MAX pins both the symbolic and numeric value.
-        assert_eq!(SYS_MAX, SYS_CAP_UNREGISTER);
-        assert_eq!(SYS_MAX, 23);
+        // Cap-management ops end at SYS_CAP_LOOKUP=21; register/unregister
+        // extend to 23; the ring setup/submit pair extends to 25. SYS_MAX
+        // pins both the symbolic and numeric value.
+        assert_eq!(SYS_MAX, SYS_RING_SUBMIT);
+        assert_eq!(SYS_MAX, 25);
     }
 
     #[test]
@@ -600,10 +604,13 @@ mod tests {
         assert_eq!(SYS_CAP_REVOKE,     19);
         assert_eq!(SYS_CAP_DELETE,     20);
         assert_eq!(SYS_CAP_LOOKUP,     21);
-        // cap-fastpath register/unregister extend the contiguous block.
+        // cap-fastpath register/unregister + ring setup/submit extend the
+        // contiguous block.
         assert_eq!(SYS_CAP_REGISTER,   22);
         assert_eq!(SYS_CAP_UNREGISTER, 23);
-        assert_eq!(SYS_MAX,            SYS_CAP_UNREGISTER);
+        assert_eq!(SYS_RING_SETUP,     24);
+        assert_eq!(SYS_RING_SUBMIT,    25);
+        assert_eq!(SYS_MAX,            SYS_RING_SUBMIT);
         // And not stepping on SYS_REBOOT.
         assert_ne!(SYS_CAP_MINT, SYS_REBOOT);
     }

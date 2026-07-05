@@ -37,6 +37,7 @@ use core::ptr::addr_of_mut;
 use super::cspace::{CSpace, MAX_PROCS};
 use super::objects::ObjectPools;
 use super::reg::RegTable;
+use super::ring_drain::RingDesc;
 
 // ─────────────────────────────────────────────────────────────────
 // Statics
@@ -61,6 +62,11 @@ static mut OBJECT_POOLS: ObjectPools = ObjectPools::new();
 /// (`REG_SLOTS` × a few bytes); the array is zero/`Empty`-initialized at
 /// boot via `const fn`. See `docs/cap-registered-fastpath-design.md`.
 static mut REG_TABLES: [RegTable; MAX_PROCS] = [const { RegTable::new() }; MAX_PROCS];
+
+/// Per-process cap-fastpath ring descriptors (Lane B / B1). Records where
+/// each process's SQ/CQ ring lives in its linear memory. Indexed by
+/// process id; `active=false`-initialized at boot via `const fn`.
+static mut RING_DESCRIPTORS: [RingDesc; MAX_PROCS] = [const { RingDesc::empty() }; MAX_PROCS];
 
 // ─────────────────────────────────────────────────────────────────
 // Accessors
@@ -109,6 +115,18 @@ pub fn object_pools() -> &'static mut ObjectPools {
 pub fn reg_tables() -> &'static mut [RegTable; MAX_PROCS] {
     // SAFETY: INV-1 + INV-8 — single-hart, statically initialized.
     unsafe { &mut *addr_of_mut!(REG_TABLES) }
+}
+
+/// Return a mutable reference to the per-process ring descriptors.
+///
+/// # Safety contract
+///
+/// Same as `cspaces()`: single-hart (INV-1), statically initialized via
+/// `const fn` (INV-8). Callers must not hold the returned reference across
+/// another call to this function.
+pub fn ring_descriptors() -> &'static mut [RingDesc; MAX_PROCS] {
+    // SAFETY: INV-1 + INV-8 — single-hart, statically initialized.
+    unsafe { &mut *addr_of_mut!(RING_DESCRIPTORS) }
 }
 
 // ─────────────────────────────────────────────────────────────────
