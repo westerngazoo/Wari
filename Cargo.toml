@@ -23,6 +23,7 @@ members = [
     "wari-mem",
     "wari-wnm",
     "wari-policy",
+    "wari-ipc",
     "wasi",
     "kernel",
     "apps/hello",
