@@ -554,6 +554,173 @@ pub mod ring {
     }
 }
 
+/// WASI-NN surface (Lane B / B5) — the pure ABI enums + op codes for
+/// running inference on an accelerator.
+///
+/// The AI-OS assistant's Planner offloads the heavy math here: the WASM
+/// stays orchestration, while the model runs on the GPU/GAPU via the
+/// Tier-2 accelerator driver, capability-gated. Encodings/targets/tensor
+/// types mirror the WASI-NN proposal so standard toolchains emit
+/// compatible imports; Wari adds the `Gapu` execution target and treats
+/// models as attested capabilities (see `docs/wasi-nn-surface.md`). Pure
+/// constants + validity helpers — no kernel state, host-testable.
+pub mod nn {
+    /// Model graph encoding — which framework the attested weights are in.
+    /// Mirrors the WASI-NN `graph-encoding` enum.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum GraphEncoding {
+        /// OpenVINO IR.
+        Openvino = 0,
+        /// ONNX.
+        Onnx = 1,
+        /// TensorFlow.
+        Tensorflow = 2,
+        /// PyTorch.
+        Pytorch = 3,
+        /// GGML (llama.cpp-family quantized LLMs — the likely on-board path).
+        Ggml = 4,
+        /// Let the runtime detect the encoding from the artifact.
+        Autodetect = 5,
+    }
+
+    impl GraphEncoding {
+        /// Decode a graph-encoding discriminant.
+        #[inline]
+        pub const fn from_u8(b: u8) -> Option<GraphEncoding> {
+            match b {
+                0 => Some(GraphEncoding::Openvino),
+                1 => Some(GraphEncoding::Onnx),
+                2 => Some(GraphEncoding::Tensorflow),
+                3 => Some(GraphEncoding::Pytorch),
+                4 => Some(GraphEncoding::Ggml),
+                5 => Some(GraphEncoding::Autodetect),
+                _ => None,
+            }
+        }
+    }
+
+    /// Where the graph executes. Wari adds `Gapu` (the FPGA coprocessor)
+    /// to the WASI-NN `execution-target` set.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ExecutionTarget {
+        /// The RISC-V cores (interpreted/AOT — slow; fallback only).
+        Cpu = 0,
+        /// A PCIe GPU via the Tier-2 GPU driver.
+        Gpu = 1,
+        /// The GAPU FPGA coprocessor (Phase 3).
+        Gapu = 2,
+    }
+
+    impl ExecutionTarget {
+        /// Decode an execution-target discriminant.
+        #[inline]
+        pub const fn from_u8(b: u8) -> Option<ExecutionTarget> {
+            match b {
+                0 => Some(ExecutionTarget::Cpu),
+                1 => Some(ExecutionTarget::Gpu),
+                2 => Some(ExecutionTarget::Gapu),
+                _ => None,
+            }
+        }
+    }
+
+    /// Tensor element type (the subset Wari's accelerators support).
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TensorType {
+        /// 16-bit float.
+        F16 = 0,
+        /// 32-bit float.
+        F32 = 1,
+        /// 32-bit signed int.
+        I32 = 2,
+        /// 8-bit unsigned int (quantized).
+        U8 = 3,
+        /// 8-bit signed int (quantized).
+        I8 = 4,
+    }
+
+    impl TensorType {
+        /// Decode a tensor-type discriminant.
+        #[inline]
+        pub const fn from_u8(b: u8) -> Option<TensorType> {
+            match b {
+                0 => Some(TensorType::F16),
+                1 => Some(TensorType::F32),
+                2 => Some(TensorType::I32),
+                3 => Some(TensorType::U8),
+                4 => Some(TensorType::I8),
+                _ => None,
+            }
+        }
+    }
+
+    /// WASI-NN host-fn op codes (documentary; the live path is the
+    /// `wari_nn::*` host fns, and — for batching — the cap-fastpath ring).
+    /// Never renumber; append new ops.
+    ///
+    /// Load an attested model capability into an inference graph.
+    pub const NN_LOAD: u32 = 1;
+    /// Create an execution context for a loaded graph.
+    pub const NN_INIT_CONTEXT: u32 = 2;
+    /// Bind an input tensor (linmem region) to a context.
+    pub const NN_SET_INPUT: u32 = 3;
+    /// Run inference (delegates to the accelerator driver).
+    pub const NN_COMPUTE: u32 = 4;
+    /// Read an output tensor back into linear memory.
+    pub const NN_GET_OUTPUT: u32 = 5;
+    /// Highest defined NN op.
+    pub const NN_OP_MAX: u32 = NN_GET_OUTPUT;
+
+    /// Is `op` a defined WASI-NN operation?
+    #[inline]
+    pub const fn is_known_op(op: u32) -> bool {
+        op >= NN_LOAD && op <= NN_OP_MAX
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn graph_encoding_roundtrip() {
+            assert_eq!(GraphEncoding::from_u8(4), Some(GraphEncoding::Ggml));
+            assert_eq!(GraphEncoding::from_u8(0), Some(GraphEncoding::Openvino));
+            assert_eq!(GraphEncoding::from_u8(6), None);
+        }
+
+        #[test]
+        fn execution_target_includes_gapu() {
+            assert_eq!(ExecutionTarget::from_u8(2), Some(ExecutionTarget::Gapu));
+            assert_eq!(ExecutionTarget::from_u8(3), None);
+        }
+
+        #[test]
+        fn tensor_type_roundtrip() {
+            assert_eq!(TensorType::from_u8(1), Some(TensorType::F32));
+            assert_eq!(TensorType::from_u8(5), None);
+        }
+
+        #[test]
+        fn op_codes_known_range() {
+            assert!(is_known_op(NN_LOAD));
+            assert!(is_known_op(NN_GET_OUTPUT));
+            assert!(!is_known_op(0));
+            assert!(!is_known_op(NN_OP_MAX + 1));
+        }
+
+        #[test]
+        fn discriminants_are_stable_abi() {
+            // Wire ABI — these must not drift.
+            assert_eq!(GraphEncoding::Ggml as u8, 4);
+            assert_eq!(ExecutionTarget::Gapu as u8, 2);
+            assert_eq!(TensorType::F32 as u8, 1);
+        }
+    }
+}
+
 // ── Tests — pure, runnable on host ─────────────────────────────
 
 #[cfg(test)]
