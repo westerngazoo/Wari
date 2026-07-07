@@ -2232,14 +2232,30 @@ pub fn driver_start() {
         let rc1r_pre = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3152, rc1r_pre) }; // 'RC1R'
 
-        // Build 131 — inheritance test. Linux on the same hardware
-        // receives frames perfectly with whatever value U-Boot left
-        // in 0xA003. Builds 124-130 ALL wrote a different value and
-        // ALL produced 0% RX. The single-variable test: don't write
-        // 0xA003 at all on the gmac1 path. If RX starts working, the
-        // write was the problem; if not, the value isn't the issue.
-        // GMAC0 path keeps its existing 0x680A write (proven working
-        // earlier in the project for the home-router test rig).
+        // Build 137 — full BSP PHY init restored. The three-fault
+        // post-mortem of builds 124-136:
+        //
+        //   fault A: PHY MDIO address was 0, real PHY at 1  (fixed 130)
+        //   fault B: SYSCRG clock cluster wrong, RX clock 0 (fixed 136)
+        //   fault C: PHY left at U-Boot residue 0xA003=0x00F1
+        //            (rx-delay 0) instead of Linux's working config
+        //
+        // Each individual fix was "disproven" on silicon because the
+        // other two faults still zeroed RX: build 127 wrote the right
+        // PHY values to the wrong address through dead clocks; build
+        // 130 fixed the address but clocks were still dead; build 131
+        // then REMOVED the PHY writes (the "inheritance test") on the
+        // grounds they "didn't help." Build 136's golden clocks made
+        // NmGB=0 finally attributable to the PHY alone: U-Boot's
+        // 0x00F1 has RX delay 0, Linux's ytphy_of_config runs 0x0850.
+        //
+        // This restores the exact 3-step RMW sequence StarFive's
+        // motorcomm.c ytphy_of_config() applies to phy1, now on the
+        // correct address (1) with correct clocks:
+        //   1. 0xA001 Chip Config:      clear bit 8 (RXC_DLY_EN=0)
+        //   2. 0xA010 Pad Drive:        rxc_ds=6, rxd_ds=3
+        //   3. 0xA003 RGMII Config 1:   rx=0x2, fe=0x5, ge=0x0 → 0x0850
+        // GMAC0 path unchanged (single 0x680A write, proven working).
         #[cfg(not(feature = "gmac1"))]
         {
             let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
@@ -2248,7 +2264,46 @@ pub fn driver_start() {
                                    YT8531_RC1R_VF2_VALUE);
         }
         #[cfg(feature = "gmac1")]
-        let _ = YT8531_RC1R_VF2_VALUE; // silence unused-const warning under gmac1
+        {
+            const YT8521_CHIP_CONFIG_REG: u16 = 0xA001;
+            const YT8531_PAD_DRIVE_REG:   u16 = 0xA010;
+
+            // ext_rmw: page-select, read, modify, page-select, write.
+            // Returns the pre-modify value for logging.
+            let ext_rmw = |reg: u16, clr: u32, set: u32| -> u32 {
+                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR,
+                                       YTPHY_PAGE_SELECT, reg);
+                let old = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR,
+                                        YTPHY_PAGE_DATA);
+                let new = (old & !clr) | set;
+                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR,
+                                       YTPHY_PAGE_SELECT, reg);
+                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR,
+                                       YTPHY_PAGE_DATA, new as u16);
+                old
+            };
+
+            // Step 1 — 0xA001: clear RXC_DLY_EN (bit 8). The 300 ps
+            // rx delay lives in the low half of the delay LUT; bit 8
+            // selects the +1.9 ns high half, which must be OFF.
+            let cc_pre = ext_rmw(YT8521_CHIP_CONFIG_REG, 0x0000_0100, 0);
+            let _ = unsafe { wari_drv_log_u32(0x4343_3072, cc_pre) };  // 'CC0r'
+
+            // Step 2 — 0xA010: pad drive strength. rxc_ds = 6 (bits
+            // 15:13), rxd_ds_hi = 0 (bit 12), rxd_ds_low = 3 (bits
+            // 5:4). Mask 0xF030, value 0xC030. Per yt8531_set_ds
+            // with the BSP LDO table (3970 uA -> 6, 2910 uA -> 3).
+            let pd_pre = ext_rmw(YT8531_PAD_DRIVE_REG,
+                                 0x0000_F030, 0x0000_C030);
+            let _ = unsafe { wari_drv_log_u32(0x5044_5372, pd_pre) };  // 'PDSr'
+
+            // Step 3 — 0xA003: the RGMII delays. RMW only the delay
+            // nibbles (13:10, 7:4, 3:0), preserving bits 15:14 and
+            // 9:8 whatever the strap set them to.
+            let _ = ext_rmw(YT8521_RGMII_CONFIG1_REG,
+                            0x0000_3CFF,
+                            YT8531_RC1R_VF2_VALUE as u32);
+        }
 
         // Verify-read.
         let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
@@ -2256,17 +2311,10 @@ pub fn driver_start() {
         let rc1r_post = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3170, rc1r_post) }; // 'RC1p'
 
-        // Force re-AN if 0xA003 changed: YT8531C latches RXC delay
-        // at link-up. Without a re-AN the new delays don't take
-        // effect on the live link inherited from U-Boot.
-        // Build 131: on the gmac1 path we don't write 0xA003, so
-        // we never need a fresh AN cycle — accept whatever link
-        // U-Boot brought up. Avoids a 500 ms link drop on every
-        // boot for the no-write hypothesis test.
-        #[cfg(feature = "gmac1")]
-        let needs_relink = false;
-        #[cfg(not(feature = "gmac1"))]
-        let needs_relink = rc1r_pre != (YT8531_RC1R_VF2_VALUE as u32);
+        // Force re-AN whenever the PHY config changed: the YT8531C
+        // latches RGMII timing at link-up, so the new delays only
+        // take effect on a fresh link cycle.
+        let needs_relink = rc1r_pre != rc1r_post;
 
         // PR Phase-1c-5 — IEEE 802.3 auto-negotiation.
         //
