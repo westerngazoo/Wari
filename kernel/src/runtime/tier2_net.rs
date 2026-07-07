@@ -82,28 +82,38 @@ pub struct Tier2NetHandle {
 /// kmain idle loop.
 static mut TIER2_NET: Option<Tier2NetHandle> = None;
 
-/// Kernel-wide monotonic tick (ms). Advanced by [`next_tick`] on
-/// every smoltcp-driving call: kmain's idle-loop `poll`, plus the
-/// new accept / send_canned host fns. Phase-1c QEMU demo timestamp
-/// — not wall-clock, just monotonic-enough for smoltcp retransmit
-/// decisions on a short-lived connection.
-static mut TICK_MS: u64 = 0;
+/// RISC-V `time` CSR frequency. JH7110's CLINT timebase runs at
+/// 4 MHz (Linux dts `timebase-frequency = <4000000>`); QEMU virt
+/// uses 10 MHz.
+#[cfg(feature = "vf2")]
+const TIMEBASE_HZ: u64 = 4_000_000;
+#[cfg(feature = "qemu")]
+const TIMEBASE_HZ: u64 = 10_000_000;
 
-/// Advance and return the kernel-wide monotonic tick (10 ms steps).
-/// Single-hart so no atomic needed (INV-1).
+/// Real monotonic milliseconds from the RISC-V `time` CSR.
 ///
-/// # Safety
-/// INV-1 (single-hart). Caller must not hold a live borrow of
-/// `TICK_MS` (none exists outside this function; it is a u64 read +
-/// write under INV-1, which is sound).
+/// Build 138 — replaces the old `TICK_MS += 10` per-idle-iteration
+/// counter. That counter advanced smoltcp's virtual clock ~1000x
+/// faster than wall time (the idle loop spins ~100k times per real
+/// second, so smoltcp saw ~1000 virtual seconds per real second).
+/// Consequence on silicon: smoltcp's 60-second neighbor-cache
+/// lifetime expired every ~60 real MILLISECONDS, so the ARP entry
+/// for the ping peer was almost always stale — an ICMP echo could
+/// only be answered in the brief window right after an ARP
+/// exchange refreshed the cache. Observed as intermittent,
+/// worsening ping timeouts on build 137 despite a fully working
+/// RX/TX datapath (MMC counters clean, no FIFO overflow, no MTL
+/// missed, no RBU). Every smoltcp timer (ARP, TCP retransmit,
+/// delayed-ACK) was similarly compressed — this fix is a
+/// prerequisite for the Net-6d TCP demo, not just for ping.
 pub fn next_tick() -> u64 {
-    // SAFETY: INV-1 — single-hart, no other writer; u64 store is
-    // single instruction on RV64.
-    unsafe {
-        let t = *addr_of_mut!(TICK_MS);
-        *addr_of_mut!(TICK_MS) = t.saturating_add(10);
-        t
-    }
+    let t: u64;
+    // SAFETY: `rdtime` reads the S-mode `time` CSR — side-effect
+    // free, always readable (no TVM/counter-enable trap: OpenSBI
+    // delegates TIME counter access on both platforms). R6: no
+    // memory access, no ordering requirement.
+    unsafe { core::arch::asm!("rdtime {t}", t = out(reg) t) };
+    t / (TIMEBASE_HZ / 1000)
 }
 
 /// Single accessor for the `TIER2_NET` singleton. Returns
