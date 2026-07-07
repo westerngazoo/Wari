@@ -2582,28 +2582,64 @@ pub fn driver_start() {
         }
 
         // ── GMAC1 datapath clocks (all in SYS CRG) ──────────────
+        //
+        // Build 136 — GOLDEN-REFERENCE EXACT MATCH. The 2026-07-06
+        // register dump from working Linux (5.15.0-starfive, end1
+        // receiving 23K+ packets, scripts/dump-gmac1-regs.sh) showed
+        // builds 125-135 had the clock cluster WRONG:
+        //
+        //   reg     Linux(works)  Wari(0 frames)  meaning
+        //   +0x190  0x0000000C    0x00000005      gtxclk div 12 not 5
+        //   +0x194  0x00000001    (never set)     rmii_rtx div 1
+        //   +0x19C  0x00000020    0x00000000      gmac1_rx — RX CLOCK;
+        //                                          our bit31 write never
+        //                                          stuck, Linux uses 0x20
+        //   +0x1A4  0x81000000    0x80000000      tx mux parent 1 (the
+        //                                          'tx-use-rgmii-clk'
+        //                                          quirk), not parent 0
+        //   +0x1A8  0x40000000    (never set)     tx_inv bit30
+        //   +0x1AC  0x80000020    0x80000000      gtxc en + 0x20 low
+        //
+        // With +0x19C = 0 the MAC RX domain has no clock — the exact
+        // all-zeros signature (MMC=0, MTL=0, DMA idle, link up) that
+        // survived every PHY-register theory from builds 124-135.
+        // RXQ_CTRL0 (builds 133/134) also reads 0 on working Linux —
+        // that theory is dead; the register is a no-op here.
+        //
+        // Philosophy: copy the working system EXACTLY, no theorizing
+        // about what bit 5 means. Linux receives frames with these
+        // values; Wari now writes the identical cluster.
         #[cfg(feature = "gmac1")]
         {
-            // gmac1_gtxclk @ +0x190 — plain DIV, NO bit31 enable.
-            // PLL0 / 5 = 200 MHz GTX clock.
-            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x190, 0x5) };
-            // gmac1_ptp @ +0x198 — GDIV (en + div). en+div=10.
+            // gmac1_gtxclk @ +0x190 — div 12 (golden).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x190, 0x0000_000C) };
+            // gmac1_rmii_rtx @ +0x194 — div 1 (golden; feeds tx mux parent 1).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x194, 0x0000_0001) };
+            // gmac1_ptp @ +0x198 — en + div 10 (already matched golden).
             let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x198, ENABLE_BIT | 0xA) };
-            // Shared MDC root @ +0x1B8 — both MACs share. Keep
-            // identical write so GMAC0 stays healthy on a dual-MAC
-            // build. en + div=30 (~16 MHz).
-            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B8, ENABLE_BIT | 0x1E) };
-            // gmac1_gtxc gate @ +0x1AC.
-            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1AC, ENABLE_BIT) };
-            // gmac1_tx GMUX @ +0x1A4 — bit31 + mux=0 (gtxclk parent).
-            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1A4, ENABLE_BIT) };
-            // gmac1_rx MUX @ +0x19C — bit31 + mux=0 (rgmii_rxin parent).
-            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x19C, ENABLE_BIT) };
-            // gmac1_rx_inv @ +0x1A0 — bit30 invert (RGMII).
+            // gmac1_rx @ +0x19C — 0x20 (golden). NOT bit31: builds
+            // 125-135 wrote ENABLE_BIT here and it silently read back
+            // as 0. Linux's working value has no bit31 at all.
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x19C, 0x0000_0020) };
+            // gmac1_rx_inv @ +0x1A0 — bit30 (already matched golden).
             let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1A0, 0x4000_0000) };
+            // gmac1_tx GMUX @ +0x1A4 — en + mux parent 1 (golden).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1A4, 0x8100_0000) };
+            // gmac1_tx_inv @ +0x1A8 — bit30 (golden).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1A8, 0x4000_0000) };
+            // gmac1_gtxc @ +0x1AC — en + 0x20 (golden).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1AC, ENABLE_BIT | 0x20) };
+            // Shared MDC root @ +0x1B8 — Wari's en+div30 kept: MDIO
+            // is proven working under Wari (PHYID reads OK). Linux
+            // runs 0x0A here; both work, don't touch what works.
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B8, ENABLE_BIT | 0x1E) };
 
-            // Verify-read: full GMAC1 cluster. Tags 'Sy1\0' + low byte.
-            for off in [0x184u32, 0x188, 0x190, 0x198, 0x19C, 0x1A0, 0x1A4, 0x1AC, 0x1B8] {
+            // Verify-read: full GMAC1 cluster incl. the previously
+            // unlogged 0x18C (gmac_src, U-Boot-owned, golden = 2)
+            // and the newly written 0x194 / 0x1A8.
+            // Tags 'Sy1\0' + low byte.
+            for off in [0x184u32, 0x188, 0x18C, 0x190, 0x194, 0x198,
+                        0x19C, 0x1A0, 0x1A4, 0x1A8, 0x1AC, 0x1B8] {
                 let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
                 let tag = 0x5379_3100 | (off & 0xFF); // 'Sy1\0' + low
                 let _ = unsafe { wari_drv_log_u32(tag, v) };
