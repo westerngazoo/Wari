@@ -2232,14 +2232,30 @@ pub fn driver_start() {
         let rc1r_pre = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3152, rc1r_pre) }; // 'RC1R'
 
-        // Build 131 — inheritance test. Linux on the same hardware
-        // receives frames perfectly with whatever value U-Boot left
-        // in 0xA003. Builds 124-130 ALL wrote a different value and
-        // ALL produced 0% RX. The single-variable test: don't write
-        // 0xA003 at all on the gmac1 path. If RX starts working, the
-        // write was the problem; if not, the value isn't the issue.
-        // GMAC0 path keeps its existing 0x680A write (proven working
-        // earlier in the project for the home-router test rig).
+        // Build 137 — full BSP PHY init restored. The three-fault
+        // post-mortem of builds 124-136:
+        //
+        //   fault A: PHY MDIO address was 0, real PHY at 1  (fixed 130)
+        //   fault B: SYSCRG clock cluster wrong, RX clock 0 (fixed 136)
+        //   fault C: PHY left at U-Boot residue 0xA003=0x00F1
+        //            (rx-delay 0) instead of Linux's working config
+        //
+        // Each individual fix was "disproven" on silicon because the
+        // other two faults still zeroed RX: build 127 wrote the right
+        // PHY values to the wrong address through dead clocks; build
+        // 130 fixed the address but clocks were still dead; build 131
+        // then REMOVED the PHY writes (the "inheritance test") on the
+        // grounds they "didn't help." Build 136's golden clocks made
+        // NmGB=0 finally attributable to the PHY alone: U-Boot's
+        // 0x00F1 has RX delay 0, Linux's ytphy_of_config runs 0x0850.
+        //
+        // This restores the exact 3-step RMW sequence StarFive's
+        // motorcomm.c ytphy_of_config() applies to phy1, now on the
+        // correct address (1) with correct clocks:
+        //   1. 0xA001 Chip Config:      clear bit 8 (RXC_DLY_EN=0)
+        //   2. 0xA010 Pad Drive:        rxc_ds=6, rxd_ds=3
+        //   3. 0xA003 RGMII Config 1:   rx=0x2, fe=0x5, ge=0x0 → 0x0850
+        // GMAC0 path unchanged (single 0x680A write, proven working).
         #[cfg(not(feature = "gmac1"))]
         {
             let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
@@ -2248,7 +2264,46 @@ pub fn driver_start() {
                                    YT8531_RC1R_VF2_VALUE);
         }
         #[cfg(feature = "gmac1")]
-        let _ = YT8531_RC1R_VF2_VALUE; // silence unused-const warning under gmac1
+        {
+            const YT8521_CHIP_CONFIG_REG: u16 = 0xA001;
+            const YT8531_PAD_DRIVE_REG:   u16 = 0xA010;
+
+            // ext_rmw: page-select, read, modify, page-select, write.
+            // Returns the pre-modify value for logging.
+            let ext_rmw = |reg: u16, clr: u32, set: u32| -> u32 {
+                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR,
+                                       YTPHY_PAGE_SELECT, reg);
+                let old = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR,
+                                        YTPHY_PAGE_DATA);
+                let new = (old & !clr) | set;
+                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR,
+                                       YTPHY_PAGE_SELECT, reg);
+                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR,
+                                       YTPHY_PAGE_DATA, new as u16);
+                old
+            };
+
+            // Step 1 — 0xA001: clear RXC_DLY_EN (bit 8). The 300 ps
+            // rx delay lives in the low half of the delay LUT; bit 8
+            // selects the +1.9 ns high half, which must be OFF.
+            let cc_pre = ext_rmw(YT8521_CHIP_CONFIG_REG, 0x0000_0100, 0);
+            let _ = unsafe { wari_drv_log_u32(0x4343_3072, cc_pre) };  // 'CC0r'
+
+            // Step 2 — 0xA010: pad drive strength. rxc_ds = 6 (bits
+            // 15:13), rxd_ds_hi = 0 (bit 12), rxd_ds_low = 3 (bits
+            // 5:4). Mask 0xF030, value 0xC030. Per yt8531_set_ds
+            // with the BSP LDO table (3970 uA -> 6, 2910 uA -> 3).
+            let pd_pre = ext_rmw(YT8531_PAD_DRIVE_REG,
+                                 0x0000_F030, 0x0000_C030);
+            let _ = unsafe { wari_drv_log_u32(0x5044_5372, pd_pre) };  // 'PDSr'
+
+            // Step 3 — 0xA003: the RGMII delays. RMW only the delay
+            // nibbles (13:10, 7:4, 3:0), preserving bits 15:14 and
+            // 9:8 whatever the strap set them to.
+            let _ = ext_rmw(YT8521_RGMII_CONFIG1_REG,
+                            0x0000_3CFF,
+                            YT8531_RC1R_VF2_VALUE as u32);
+        }
 
         // Verify-read.
         let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
@@ -2256,17 +2311,10 @@ pub fn driver_start() {
         let rc1r_post = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3170, rc1r_post) }; // 'RC1p'
 
-        // Force re-AN if 0xA003 changed: YT8531C latches RXC delay
-        // at link-up. Without a re-AN the new delays don't take
-        // effect on the live link inherited from U-Boot.
-        // Build 131: on the gmac1 path we don't write 0xA003, so
-        // we never need a fresh AN cycle — accept whatever link
-        // U-Boot brought up. Avoids a 500 ms link drop on every
-        // boot for the no-write hypothesis test.
-        #[cfg(feature = "gmac1")]
-        let needs_relink = false;
-        #[cfg(not(feature = "gmac1"))]
-        let needs_relink = rc1r_pre != (YT8531_RC1R_VF2_VALUE as u32);
+        // Force re-AN whenever the PHY config changed: the YT8531C
+        // latches RGMII timing at link-up, so the new delays only
+        // take effect on a fresh link cycle.
+        let needs_relink = rc1r_pre != rc1r_post;
 
         // PR Phase-1c-5 — IEEE 802.3 auto-negotiation.
         //
@@ -2582,28 +2630,64 @@ pub fn driver_start() {
         }
 
         // ── GMAC1 datapath clocks (all in SYS CRG) ──────────────
+        //
+        // Build 136 — GOLDEN-REFERENCE EXACT MATCH. The 2026-07-06
+        // register dump from working Linux (5.15.0-starfive, end1
+        // receiving 23K+ packets, scripts/dump-gmac1-regs.sh) showed
+        // builds 125-135 had the clock cluster WRONG:
+        //
+        //   reg     Linux(works)  Wari(0 frames)  meaning
+        //   +0x190  0x0000000C    0x00000005      gtxclk div 12 not 5
+        //   +0x194  0x00000001    (never set)     rmii_rtx div 1
+        //   +0x19C  0x00000020    0x00000000      gmac1_rx — RX CLOCK;
+        //                                          our bit31 write never
+        //                                          stuck, Linux uses 0x20
+        //   +0x1A4  0x81000000    0x80000000      tx mux parent 1 (the
+        //                                          'tx-use-rgmii-clk'
+        //                                          quirk), not parent 0
+        //   +0x1A8  0x40000000    (never set)     tx_inv bit30
+        //   +0x1AC  0x80000020    0x80000000      gtxc en + 0x20 low
+        //
+        // With +0x19C = 0 the MAC RX domain has no clock — the exact
+        // all-zeros signature (MMC=0, MTL=0, DMA idle, link up) that
+        // survived every PHY-register theory from builds 124-135.
+        // RXQ_CTRL0 (builds 133/134) also reads 0 on working Linux —
+        // that theory is dead; the register is a no-op here.
+        //
+        // Philosophy: copy the working system EXACTLY, no theorizing
+        // about what bit 5 means. Linux receives frames with these
+        // values; Wari now writes the identical cluster.
         #[cfg(feature = "gmac1")]
         {
-            // gmac1_gtxclk @ +0x190 — plain DIV, NO bit31 enable.
-            // PLL0 / 5 = 200 MHz GTX clock.
-            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x190, 0x5) };
-            // gmac1_ptp @ +0x198 — GDIV (en + div). en+div=10.
+            // gmac1_gtxclk @ +0x190 — div 12 (golden).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x190, 0x0000_000C) };
+            // gmac1_rmii_rtx @ +0x194 — div 1 (golden; feeds tx mux parent 1).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x194, 0x0000_0001) };
+            // gmac1_ptp @ +0x198 — en + div 10 (already matched golden).
             let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x198, ENABLE_BIT | 0xA) };
-            // Shared MDC root @ +0x1B8 — both MACs share. Keep
-            // identical write so GMAC0 stays healthy on a dual-MAC
-            // build. en + div=30 (~16 MHz).
-            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B8, ENABLE_BIT | 0x1E) };
-            // gmac1_gtxc gate @ +0x1AC.
-            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1AC, ENABLE_BIT) };
-            // gmac1_tx GMUX @ +0x1A4 — bit31 + mux=0 (gtxclk parent).
-            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1A4, ENABLE_BIT) };
-            // gmac1_rx MUX @ +0x19C — bit31 + mux=0 (rgmii_rxin parent).
-            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x19C, ENABLE_BIT) };
-            // gmac1_rx_inv @ +0x1A0 — bit30 invert (RGMII).
+            // gmac1_rx @ +0x19C — 0x20 (golden). NOT bit31: builds
+            // 125-135 wrote ENABLE_BIT here and it silently read back
+            // as 0. Linux's working value has no bit31 at all.
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x19C, 0x0000_0020) };
+            // gmac1_rx_inv @ +0x1A0 — bit30 (already matched golden).
             let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1A0, 0x4000_0000) };
+            // gmac1_tx GMUX @ +0x1A4 — en + mux parent 1 (golden).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1A4, 0x8100_0000) };
+            // gmac1_tx_inv @ +0x1A8 — bit30 (golden).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1A8, 0x4000_0000) };
+            // gmac1_gtxc @ +0x1AC — en + 0x20 (golden).
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1AC, ENABLE_BIT | 0x20) };
+            // Shared MDC root @ +0x1B8 — Wari's en+div30 kept: MDIO
+            // is proven working under Wari (PHYID reads OK). Linux
+            // runs 0x0A here; both work, don't touch what works.
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x1B8, ENABLE_BIT | 0x1E) };
 
-            // Verify-read: full GMAC1 cluster. Tags 'Sy1\0' + low byte.
-            for off in [0x184u32, 0x188, 0x190, 0x198, 0x19C, 0x1A0, 0x1A4, 0x1AC, 0x1B8] {
+            // Verify-read: full GMAC1 cluster incl. the previously
+            // unlogged 0x18C (gmac_src, U-Boot-owned, golden = 2)
+            // and the newly written 0x194 / 0x1A8.
+            // Tags 'Sy1\0' + low byte.
+            for off in [0x184u32, 0x188, 0x18C, 0x190, 0x194, 0x198,
+                        0x19C, 0x1A0, 0x1A4, 0x1A8, 0x1AC, 0x1B8] {
                 let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
                 let tag = 0x5379_3100 | (off & 0xFF); // 'Sy1\0' + low
                 let _ = unsafe { wari_drv_log_u32(tag, v) };
