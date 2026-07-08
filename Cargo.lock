@@ -399,6 +399,10 @@ name = "wari-integration-tests"
 version = "0.0.1"
 
 [[package]]
+name = "wari-ipc"
+version = "0.0.1"
+
+[[package]]
 name = "wari-kernel"
 version = "0.0.1"
 dependencies = [
@@ -411,6 +415,10 @@ dependencies = [
 
 [[package]]
 name = "wari-mem"
+version = "0.0.1"
+
+[[package]]
+name = "wari-policy"
 version = "0.0.1"
 
 [[package]]
