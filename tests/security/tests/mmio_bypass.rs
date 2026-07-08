@@ -8,7 +8,7 @@
 //! binds `wasi_snapshot_preview1::*` for Tier-1; `wari::*` is
 //! Tier-2-only — see `loader::load_tier1`). The instantiation step
 //! fails with a `LinkerError`, folded into `KernelError::BadWasm`.
-//! The kernel logs `tier-1 hello failed: BadWasm` and halts cleanly.
+//! The scheduler logs `... faulted: BadWasm` and halts cleanly.
 //!
 //! Even if a future Tier-1 module did somehow get `wari::mmio_write8`
 //! registered, the host-fn-side capability gate
@@ -29,7 +29,7 @@
 //!
 //! Phase-0 follow-up: build `apps/hello-mmio-bypass.wasm` that imports
 //! `wari::mmio_write8`, swap it in for the embedded blob, and assert
-//! the kernel logs `tier-1 hello failed: BadWasm` (linker error path)
+//! the kernel logs `... faulted: BadWasm` (linker error path)
 //! without panicking.
 
 use wari_security_tests::{boot_kernel_capture, markers, DEFAULT_WALLCLOCK};
@@ -52,7 +52,7 @@ fn mmio_bypass_is_blocked() {
     // structural assertion; this test covers the runtime no-panic
     // assertion.
     assert!(
-        text.contains(markers::HELLO_EXIT_0),
+        text.contains(markers::TENANT_EXIT_0),
         "Tier-1 normal path unhealthy — exit-0 not reached:\n{text}",
     );
 

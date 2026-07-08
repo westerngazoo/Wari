@@ -40,12 +40,12 @@ fn oom_bomb_is_contained() {
     // Kernel must reach a terminal Tier-1 state within the budget —
     // either a clean exit (well-formed blob) or a typed rejection
     // (adversarial blob). The OOM bomb's failure mode under wasmi is
-    // either "module fails to instantiate" → `tier-1 hello failed`
+    // either "module fails to instantiate" → `... faulted: BadWasm`
     // path or "memory.grow returns -1; module continues normally" →
-    // `[hello] exit(...)`. Both are observed terminal states, not a
+    // `[t1:N] exit(...)`. Both are observed terminal states, not a
     // hung kernel.
     let terminal =
-        text.contains(markers::HELLO_EXIT_0) || text.contains("tier-1 hello failed");
+        text.contains(markers::TENANT_EXIT_0) || text.contains(markers::TENANT_FAULTED);
     assert!(
         terminal,
         "kernel did not reach a terminal Tier-1 state — possible \
@@ -53,7 +53,7 @@ fn oom_bomb_is_contained() {
     );
 
     // No kernel panic. A wasmi-contained trap is logged as part of
-    // `tier-1 hello failed: BadWasm`, never as a Rust panic.
+    // `... faulted: BadWasm`, never as a Rust panic.
     assert!(
         !text.contains("panicked at"),
         "rust panic detected in oom_bomb run:\n{text}",

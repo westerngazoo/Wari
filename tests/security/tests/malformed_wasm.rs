@@ -5,9 +5,8 @@
 //!
 //! The kernel's Tier-1 loader (`kernel/src/runtime/loader.rs::load_tier1`)
 //! folds every wasmi parse / validate failure into
-//! `KernelError::BadWasm`. The runner (`run_tier1_hello`) prints
-//! `wari runtime: tier-1 hello failed: BadWasm` and halts in `kmain`
-//! without panicking.
+//! `KernelError::BadWasm`. The scheduler marks the instance
+//! `... faulted: BadWasm` and halts in `kmain` without panicking.
 //!
 //! ## Phase-0 implementation note
 //!
@@ -17,7 +16,7 @@
 //!
 //! For this PR, the test asserts the **structural** property: the
 //! kernel that ships with the standard build path reaches
-//! `[hello] exit(0)` (proving the loader pipeline accepts a *well-
+//! `[t1:N] exit(0)` (proving the loader pipeline accepts a *well-
 //! formed* blob and the no-panic property holds). The malformed-input
 //! arm of the property is covered by the `kernel/src/runtime/loader.rs`
 //! contract (`map_err(|_| KernelError::BadWasm)`) which folds every
@@ -25,7 +24,7 @@
 //!
 //! Phase-0 follow-up (tracked in audit doc): swap the embedded blob at
 //! build time with a malformed sample and re-run this test; expect
-//! `tier-1 hello failed: BadWasm` instead of `exit(0)`. Both are
+//! `... faulted: BadWasm` instead of `exit(0)`. Both are
 //! acceptable — neither panics.
 
 use wari_security_tests::{boot_kernel_capture, markers, DEFAULT_WALLCLOCK};
@@ -44,11 +43,11 @@ fn malformed_wasm_does_not_panic() {
 
     // Property 2: either the loader accepted the well-formed blob
     // (exit-0 marker) OR rejected a hypothetical malformed blob via
-    // the typed `tier-1 hello failed: BadWasm` path. **Either way no
+    // the typed `... faulted: BadWasm` path. **Either way no
     // kernel panic** — the kernel never falls into the bare wfi loop
     // without one of these markers.
-    let exited_cleanly = text.contains(markers::HELLO_EXIT_0);
-    let rejected_typed = text.contains("tier-1 hello failed");
+    let exited_cleanly = text.contains(markers::TENANT_EXIT_0);
+    let rejected_typed = text.contains(markers::TENANT_FAULTED);
     assert!(
         exited_cleanly || rejected_typed,
         "kernel reached neither exit-0 nor typed-rejection:\n{text}",
