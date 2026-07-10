@@ -71,6 +71,13 @@ pub const E_NOTCONN: i32 = -5;
 /// Returned to WASM when a TCP connect attempt is rejected by the
 /// peer (RST). Added in PR Net-2; consumed by PR Net-6.
 pub const E_REFUSED: i32 = -6;
+/// Returned to WASM when an accept busy-poll exceeds its wall-clock
+/// budget (`wari_abi::net::ACCEPT_DEADLINE_MS`, measured from the
+/// first `net_socket_accept` call on the handle). Persistent: every
+/// subsequent accept on the handle returns this until the socket is
+/// closed. Phase-1c Ctrl-R fix B — bounds how long a Tier-1 accept
+/// loop can starve the kmain idle loop.
+pub const E_TIMEDOUT: i32 = -7;
 
 // ─────────────────────────────────────────────────────────────────
 // check_cap — runtime permission gate

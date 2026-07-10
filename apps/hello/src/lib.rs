@@ -167,12 +167,24 @@ pub extern "C" fn _start() -> ! {
     }
     print(b"  http: listening on :7000\r\n");
 
+    // Kernel-side wall-clock deadline (Phase-1c Ctrl-R fix B):
+    // `net_socket_accept` returns E_TIMEDOUT (-7) once the 60 s
+    // accept window expires, so the busy-poll below is bounded by
+    // time even if ACCEPT_MAX_ITERS would take hours to count down
+    // on silicon. Matches `kernel/src/cap/syscall.rs::E_TIMEDOUT`.
+    const E_TIMEDOUT: i32 = -7;
+
     let mut i: u32 = 0;
     let mut accepted = false;
     while i < ACCEPT_MAX_ITERS {
         let rc = unsafe { wasi::net_socket_accept(8) };
         if rc == 1 {
             accepted = true;
+            break;
+        }
+        if rc == E_TIMEDOUT {
+            // Expected when no client connects inside the window;
+            // the shared "accept timeout" epilogue below reports it.
             break;
         }
         if rc < 0 {

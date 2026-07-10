@@ -82,6 +82,25 @@ pub struct Tier2NetHandle {
 /// kmain idle loop.
 static mut TIER2_NET: Option<Tier2NetHandle> = None;
 
+/// Accept-deadline tracking slots (Phase-1c Ctrl-R fix B), indexed
+/// by the driver's raw smoltcp socket handle. Sized above the
+/// driver's `SOCKET_BACKING_LEN` (4) with headroom; a handle at or
+/// beyond this bound is simply not deadline-tracked (degrades to
+/// the old unbounded behavior rather than misindexing).
+const ACCEPT_TRACK_SLOTS: usize = 8;
+
+/// Per-handle timestamp of the FIRST `socket_accept` call, in
+/// monotonic ms (`next_tick`). `None` = no accept window open.
+/// Set on first accept, cleared on successful accept and on
+/// `socket_close`; once `ACCEPT_DEADLINE_MS` elapses, `socket_accept`
+/// returns `E_TIMEDOUT` persistently until the socket is closed.
+///
+/// Why kernel-side: the kernel owns the monotonic clock, and the
+/// bound must hold for ANY Tier-1 caller — a misbehaving tenant's
+/// blind busy-poll (50M iterations ≈ hours on silicon) must not be
+/// able to starve the kmain idle loop and its Ctrl-R reboot check.
+static mut ACCEPT_FIRST_MS: [Option<u64>; ACCEPT_TRACK_SLOTS] = [None; ACCEPT_TRACK_SLOTS];
+
 /// RISC-V `time` CSR frequency. JH7110's CLINT timebase runs at
 /// 4 MHz (Linux dts `timebase-frequency = <4000000>`); QEMU virt
 /// uses 10 MHz.
@@ -203,12 +222,19 @@ pub unsafe fn socket_create(proto: u32) -> Result<i32, KernelError> {
 }
 
 /// Tear down a smoltcp socket via the driver. Same return
-/// convention + safety as [`socket_create`].
+/// convention + safety as [`socket_create`]. Also closes any open
+/// accept-deadline window for the handle so a reused handle starts
+/// with a fresh window (see `ACCEPT_FIRST_MS`).
 ///
 /// # Safety
 ///
 /// Same as [`socket_create`].
 pub unsafe fn socket_close(handle: u32) -> Result<i32, KernelError> {
+    if (handle as usize) < ACCEPT_TRACK_SLOTS {
+        // SAFETY: INV-1 (single-hart host-fn path), as in
+        // socket_accept.
+        unsafe { (*addr_of_mut!(ACCEPT_FIRST_MS))[handle as usize] = None };
+    }
     // SAFETY: INV-1 + INV-8.
     // SAFETY: helper docstring + per-fn SAFETY block above.
     let slot = unsafe { tier2_net_slot() };
@@ -249,11 +275,38 @@ pub unsafe fn socket_listen(handle: u32, backlog: u32) -> Result<i32, KernelErro
 /// Phase-1c HTTP demo — drive one smoltcp poll, then check whether
 /// `handle` has transitioned from listening to connected. Returns 1
 /// if a connection is ready for `socket_send_canned`, 0 if still
-/// waiting, negative on driver error.
+/// waiting, `E_TIMEDOUT` once the accept window has expired,
+/// negative errno on driver error.
+///
+/// The accept window opens at the FIRST call for `handle` and lasts
+/// `wari_abi::net::ACCEPT_DEADLINE_MS` of wall-clock time; after
+/// that, every call returns `E_TIMEDOUT` (no poll driven) until the
+/// socket is closed. Phase-1c Ctrl-R fix B — see `ACCEPT_FIRST_MS`.
 ///
 /// # Safety
 /// Same as [`socket_create`].
 pub unsafe fn socket_accept(handle: u32, tick_ms: u64) -> Result<i32, KernelError> {
+    // Deadline gate first: an expired window answers without
+    // touching the driver (the kmain idle loop owns polling once
+    // tenants exit).
+    if (handle as usize) < ACCEPT_TRACK_SLOTS {
+        // SAFETY: INV-1 (single-hart) — socket_accept/socket_close
+        // are host-fn paths on the one hart; no concurrent access.
+        // INV-8 install-then-read ordering as for TIER2_NET.
+        let first = unsafe { &mut (*addr_of_mut!(ACCEPT_FIRST_MS))[handle as usize] };
+        match *first {
+            None => *first = Some(tick_ms),
+            Some(t0) => {
+                if crate::abi::net::deadline_exceeded(
+                    t0,
+                    tick_ms,
+                    crate::abi::net::ACCEPT_DEADLINE_MS,
+                ) {
+                    return Ok(crate::cap::syscall::E_TIMEDOUT);
+                }
+            }
+        }
+    }
     // SAFETY: INV-1 + INV-8.
     let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
         .expect("TIER2_NET ref always valid (static)");
@@ -264,9 +317,16 @@ pub unsafe fn socket_accept(handle: u32, tick_ms: u64) -> Result<i32, KernelErro
         .poll_fn
         .call(&mut h.store, tick_ms)
         .map_err(|_| KernelError::DriverError)?;
-    h.socket_accept_fn
+    let rc = h
+        .socket_accept_fn
         .call(&mut h.store, handle)
-        .map_err(|_| KernelError::DriverError)
+        .map_err(|_| KernelError::DriverError)?;
+    if rc == 1 && (handle as usize) < ACCEPT_TRACK_SLOTS {
+        // Connection accepted — the window served its purpose.
+        // SAFETY: INV-1, as above.
+        unsafe { (*addr_of_mut!(ACCEPT_FIRST_MS))[handle as usize] = None };
+    }
+    Ok(rc)
 }
 
 /// Phase-1c HTTP demo — queue the canned HTTP/1.0 200 OK reply on a
