@@ -223,6 +223,41 @@ pub mod net {
 
     /// Largest opcode currently defined. Dispatch tables size off this.
     pub const NET_OP_MAX: usize = NET_CLOSE;
+
+    // ── Accept-deadline policy (Phase-1c, Ctrl-R fix B) ──────────
+    //
+    // A Tier-1 accept busy-poll (`net_socket_accept` host fn) is
+    // bounded by wall-clock, kernel-side — the kernel owns the
+    // monotonic clock (`rdtime`), so the time policy lives where
+    // the time source is. Without this, a demo app's blind
+    // iteration cap (50M iters ≈ minutes on QEMU, hours on VF2
+    // silicon under wasmi interpretation) starved the post-scheduler
+    // idle loop — and with it the Ctrl-R reboot check — for the
+    // board's entire useful uptime.
+
+    /// Wall-clock budget for one accept busy-poll, in milliseconds,
+    /// measured from the first `net_socket_accept` call on a handle.
+    /// Generous enough for a human-paced `curl` on either platform.
+    pub const ACCEPT_DEADLINE_MS: u64 = 60_000;
+
+    /// Pure deadline predicate: has `now_ms` passed `first_ms` by at
+    /// least `budget_ms`? Saturating — a `now_ms` earlier than
+    /// `first_ms` (which a monotonic clock never produces, but a
+    /// caller bug could) reads as zero elapsed, never as expired.
+    ///
+    /// ```
+    /// use wari_abi::net::{deadline_exceeded, ACCEPT_DEADLINE_MS};
+    /// // Just under budget: still inside the window.
+    /// assert!(!deadline_exceeded(1_000, 1_000 + ACCEPT_DEADLINE_MS - 1, ACCEPT_DEADLINE_MS));
+    /// // Exactly at budget: expired.
+    /// assert!(deadline_exceeded(1_000, 1_000 + ACCEPT_DEADLINE_MS, ACCEPT_DEADLINE_MS));
+    /// // Clock skew (now < first) saturates to zero elapsed, not expired.
+    /// assert!(!deadline_exceeded(5_000, 0, ACCEPT_DEADLINE_MS));
+    /// ```
+    #[inline]
+    pub const fn deadline_exceeded(first_ms: u64, now_ms: u64, budget_ms: u64) -> bool {
+        now_ms.saturating_sub(first_ms) >= budget_ms
+    }
 }
 
 /// Registered-capability fast-path validation — the pure soundness check.
