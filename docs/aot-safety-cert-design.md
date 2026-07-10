@@ -213,3 +213,65 @@ Sources: [VeriWasm paper (UCSD)](https://cseweb.ucsd.edu/~dstefan/pubs/johnson:2
   choosing A first does not foreclose C (same format, richer payload).
 - **D5 — Run this track in parallel** with M0/M1 — it is the AOT long
   pole and dominates the schedule.
+
+---
+
+## 12 · RFC: VeriWasm Transfer to RV64
+
+VeriWasm proves SFI isolation on x86-64. When transferring to RV64 and our target ABI, the analysis simplifies significantly:
+
+1. **Instruction Decoding**: x86-64 instructions are variable-length; jumping into the middle of an instruction is a core attack vector VeriWasm must prove impossible. RV64 instructions are fixed 32-bit (or 16-bit with the 'C' extension). A simple alignment check (`pc % 2 == 0` or `pc % 4 == 0`) proves decode safety, eliminating the complex disassembly lattice.
+2. **Stack Confinement**: x86-64 implicit stack operations (`push`/`pop`/`call`/`ret`) complicate bounds checking. RV64 uses explicit loads/stores relative to `sp`. VeriWasm's stack-depth tracking transfers cleanly: the checker simply verifies that `sp` modifications are static and bounded per-function.
+3. **Indirect Branches**: x86-64 indirect jumps use arbitrary registers. RV64 uses `jalr`. If the compiler emits indirect calls through a dedicated jump table, the checker only needs to verify the bounds-check/masking logic immediately preceding the `jalr`.
+
+## 13 · RFC: Cert Wire Format (Model C Witness Payload)
+
+The `SafetyCert` WNM section (when carrying Model C witnesses) encodes the facts required for a single-pass verification. The format is a dense binary structure:
+
+- `magic` (4 bytes): `\0WSC` (Wari Safety Cert)
+- `version` (1 byte): `0x01`
+- `num_functions` (u32, LE)
+- `functions` (Array of `num_functions`):
+  - `text_offset` (u32): Offset of the function in the `.text` section.
+  - `stack_frame_size` (u32): Proven maximum stack depth used by the function.
+  - `num_mem_accesses` (u32): Count of load/store operations.
+  - `mem_accesses` (Array of `u32`): Offsets of masked memory instructions.
+  - `num_indirect_branches` (u32): Count of `jalr` instructions.
+  - `indirect_branches` (Array of `u32`): Offsets of bounds-checked `jalr` instructions.
+
+The checker runs in a single pass over the `.text` section. When it reaches a memory or branch instruction, it consumes the next witness. If the witness matches the instruction type and the preceding instructions correctly apply the required mask/bounds-check, it proceeds. If the instruction is un-witnessed or the mask is invalid, the checker rejects the module.
+
+## 14 · RFC: Trust Claim
+
+**What this certificate catches:**
+- **Sandbox Escapes**: Any memory load or store that attempts to access addresses outside the linear memory boundary or the instance's stack.
+- **Control Flow Hijacking**: Any jump to a non-approved address (e.g., jumping into the middle of an instruction, ROP chains, or jumping to arbitrary kernel code).
+- **Unsanctioned Host Transitions**: Any attempt to perform raw `ecall`s or bypass the defined host-call trampoline.
+
+**What this certificate DOES NOT catch:**
+- **Functional Logic Bugs**: If the compiler erroneously emits an `add` instead of a `sub`, the cert will pass, provided the operation doesn't violate memory bounds. SFI guarantees *isolation*, not *correctness*.
+- **Data Leaks via Side Channels**: Timing or cache side-channel attacks within the sanctioned boundary are not mitigated.
+
+## 15 · RFC: Worked Example (`arith.wasm`)
+
+Consider a minimal `arith.wasm` that adds two arguments and returns the result (no memory access, no indirect calls).
+
+**Compiled RV64 `.text`:**
+```assembly
+0x00: add a0, a0, a1
+0x04: ret
+```
+
+**Corresponding Model C `SafetyCert` Payload:**
+```
+[ 0x00, 0x57, 0x53, 0x43 ] // Magic "\0WSC"
+[ 0x01 ]                   // Version 1
+[ 0x01, 0x00, 0x00, 0x00 ] // num_functions = 1
+[ 0x00, 0x00, 0x00, 0x00 ] // text_offset = 0
+[ 0x00, 0x00, 0x00, 0x00 ] // stack_frame_size = 0
+[ 0x00, 0x00, 0x00, 0x00 ] // num_mem_accesses = 0
+[ 0x00, 0x00, 0x00, 0x00 ] // num_indirect_branches = 0
+```
+
+The on-device checker verifies the `text_hash`, then parses the cert. It scans the `.text` section from `0x00` to `0x08`. It encounters no memory or indirect branch instructions. It verifies the stack depth does not exceed `0` and that the function ends with a safe `ret` (`jalr x0, 0(x1)`). The module is accepted and mapped RX-only.
+
