@@ -735,16 +735,21 @@ macro_rules! wari_uart_driver {
 /// (PR Net-6a), `socket_bind`, `socket_listen` (PR Net-6c —
 /// TCP server side of the socket API).
 ///
-/// 6 imports cover what the smoltcp-backed VirtIO driver actually
-/// calls today: `net_mmio_write32`, `net_mmio_read32`,
+/// 8 imports cover what the smoltcp-backed driver actually calls
+/// (or `#[used]`-pins) today: `net_mmio_write32`, `net_mmio_read32`,
 /// `nic_set_mac`, `nic_attach_queue`, `nic_queue_notify`,
-/// `lin_mem_base`. The `notification_wait` / `notification_ack`
+/// `lin_mem_base`, `drv_log_u32` (boot milestones, always-on) and
+/// `drv_trace_u32` (per-frame RX/TX tags, debug-kernel gated).
+/// The `notification_wait` / `notification_ack`
 /// host fns are declared in the driver source for a future PR
 /// but not yet invoked, so LTO strips the imports from the WASM —
 /// adding them to the manifest would make the sign-tool refuse
 /// the binary as "manifest declares an import the wasm does not
 /// request". Re-add them when the driver actually calls them.
-pub const NET_MANIFEST_SIZE: usize = manifest_size(11, 7);
+/// (Platform-asymmetric imports must be `#[used]`-pinned on the
+/// platform that doesn't call them — see `vf2_keep_imports` /
+/// `qemu_keep_imports` in `drivers/net/src/lib.rs`.)
+pub const NET_MANIFEST_SIZE: usize = manifest_size(11, 8);
 
 /// Declare a Tier-2 network driver.
 ///
@@ -765,7 +770,7 @@ pub const NET_MANIFEST_SIZE: usize = manifest_size(11, 7);
 /// ```
 ///
 /// Expands to the 5 wasm-ABI shims (`_start`, `poll`, `tx_send`,
-/// `rx_pop`, `rx_recycle`) and a 612-byte `WARI_DRIVER_MANIFEST`
+/// `rx_pop`, `rx_recycle`) and a `NET_MANIFEST_SIZE`-byte `WARI_DRIVER_MANIFEST`
 /// static in section `wari_driver_manifest`, declaring kind = Net
 /// and the 8 host-fn imports the smoltcp-backed virtio driver
 /// requires.
@@ -886,6 +891,7 @@ macro_rules! wari_net_driver {
                     (b"wari", b"nic_queue_notify", $crate::FuncSig::U32I32),
                     (b"wari", b"lin_mem_base",     $crate::FuncSig::UnitU64),
                     (b"wari", b"drv_log_u32",      $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"drv_trace_u32",    $crate::FuncSig::U32xU32I32),
                 ],
             );
     };
@@ -996,5 +1002,17 @@ mod tests {
         let e = core::mem::size_of::<ExportDecl>();
         let i = core::mem::size_of::<ImportDecl>();
         assert_eq!(h + 2 * e + 2 * i, 192);
+    }
+
+    #[test]
+    fn worked_net_manifest_size() {
+        // Net = 11 exports + 8 imports (7 original + drv_trace_u32,
+        // the debug-gated hot-path trace added when the per-frame
+        // RX/TX tags were demoted off the always-on drv_log_u32):
+        // 16 + 11*36 + 8*52 = 828. Locks NET_MANIFEST_SIZE to the
+        // declared counts so an import-table edit that forgets the
+        // constant (or vice versa) fails here before the sign-tool.
+        assert_eq!(NET_MANIFEST_SIZE, 828);
+        assert_eq!(manifest_size(11, 8), NET_MANIFEST_SIZE);
     }
 }

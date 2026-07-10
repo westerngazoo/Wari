@@ -215,6 +215,21 @@ extern "C" {
     #[link_name = "drv_log_u32"]
     fn wari_drv_log_u32(tag: u32, val: u32) -> i32;
 
+    /// Hot-path diagnostic line. Identical wire contract to
+    /// `drv_log_u32`, but kernel-side the print compiles out unless
+    /// the `debug-kernel` feature is on — safe to call per frame.
+    /// The RX/TX per-event tags (dPrb / rXFr / rXTl / rXCn / rXCe /
+    /// rXDr / tXTr) go through this: on a production `kernel-vf2`
+    /// build, always-on `drv_log_u32` cost ~3.6 ms of blocking
+    /// 115200-baud UART per line — ~14 ms per received frame —
+    /// capping RX service at ~70 frames/s and showing up as a hard
+    /// 11 ms ping-RTT floor plus ring-overflow packet loss under
+    /// LAN broadcast bursts. See docs/diagnostic-tags.md.
+    /// (QEMU builds pin this via `qemu_keep_imports` so both
+    /// platform wasms request the same manifest import set.)
+    #[link_name = "drv_trace_u32"]
+    fn wari_drv_trace_u32(tag: u32, val: u32) -> i32;
+
     #[allow(dead_code)]
     #[link_name = "notification_wait"]
     fn wari_notification_wait(slot: u32) -> i32;
@@ -1468,7 +1483,7 @@ pub mod vf2_phy {
                 let py = vf2_state::PREV_YIELDED as u32;
                 if py != vf2_state::LAST_PREV_YIELDED_LOGGED {
                     vf2_state::LAST_PREV_YIELDED_LOGGED = py;
-                    let _ = super::wari_drv_log_u32(0x6450_7262, py);
+                    let _ = super::wari_drv_trace_u32(0x6450_7262, py);
                 }
                 if vf2_state::RX_CALL_COUNT & 0xFFFF == 0 {
                     let _ = super::wari_drv_log_u32(0x5374_5263, vf2_state::C_RECEIVE_CALLS);
@@ -1520,7 +1535,7 @@ pub mod vf2_phy {
                         // logged as 0x72 because 0x72 already had bit
                         // 1 set). See docs/diagnostic-tags.md.
                         let val = ((i as u32) << 24) | (rdes3 & 0x00FF_FFFF);
-                        let _ = super::wari_drv_log_u32(0x7258_4672, val);
+                        let _ = super::wari_drv_trace_u32(0x7258_4672, val);
                         vf2_state::C_FRAMES_FOUND =
                             vf2_state::C_FRAMES_FOUND.wrapping_add(1);
                         // Build-129 net-diag: one-shot deep dump at the
@@ -1567,15 +1582,17 @@ pub mod vf2_phy {
     /// store ensures the U74 store buffer has flushed before the
     /// next poll re-reads RDES3 — JH7110 GMAC is IO-coherent for
     /// DDR, but a CPU-local store buffer can hide the update.
-    /// Also logs `rXCn`+idx so future traces can distinguish the
-    /// consumed-vs-leaked descriptor cases.
+    /// Also traces `rXCn`+idx (debug-kernel builds) so traces can
+    /// distinguish the consumed-vs-leaked descriptor cases.
     fn vf2_rx_rearm(idx: usize) {
         unsafe {
             // Bump counter for the periodic StRa stat dump. The
             // earlier per-step rRaE/rRaB/rRaW/rRaX saturation tags
             // are gone (build 119) — they were diagnostic crutches
             // from the stale-driver hunt and the counters subsume
-            // them now. rXCn + rXTl below still emit per-event so
+            // them now. rXCn + rXTl below still emit per-event —
+            // via drv_trace_u32 (debug-kernel builds only), so a
+            // production build pays no per-frame UART cost — and
             // operators can see EACH rearm in the trace if they
             // need to.
             vf2_state::C_REARM_CALLS = vf2_state::C_REARM_CALLS.wrapping_add(1);
@@ -1597,9 +1614,9 @@ pub mod vf2_phy {
                 (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
             let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
             // tag = 'rXTl' — RX tail doorbell write.
-            let _ = super::wari_drv_log_u32(0x7258_546C, rx_tail_pa);
+            let _ = super::wari_drv_trace_u32(0x7258_546C, rx_tail_pa);
             // tag = 'rXCn' — descriptor re-armed. val = slot idx.
-            let _ = super::wari_drv_log_u32(0x7258_434E, idx as u32);
+            let _ = super::wari_drv_trace_u32(0x7258_434E, idx as u32);
         }
     }
 
@@ -1614,7 +1631,7 @@ pub mod vf2_phy {
             // frame rather than silently leaking the token.
             unsafe {
                 vf2_state::C_CONSUME_CALLS = vf2_state::C_CONSUME_CALLS.wrapping_add(1);
-                let _ = super::wari_drv_log_u32(0x7258_4365, self.idx as u32);
+                let _ = super::wari_drv_trace_u32(0x7258_4365, self.idx as u32);
             }
             // SAFETY: single-threaded driver; this slot's buffer is
             // exclusively ours until we re-arm the descriptor below.
@@ -1641,7 +1658,7 @@ pub mod vf2_phy {
             // already-consumed case where idx == usize::MAX.
             unsafe {
                 vf2_state::C_DROP_CALLS = vf2_state::C_DROP_CALLS.wrapping_add(1);
-                let _ = super::wari_drv_log_u32(0x7258_4472, self.idx as u32);
+                let _ = super::wari_drv_trace_u32(0x7258_4472, self.idx as u32);
             }
             if self.idx != usize::MAX {
                 vf2_rx_rearm(self.idx);
@@ -1672,7 +1689,7 @@ pub mod vf2_phy {
             unsafe {
                 vf2_state::C_TX_SENT = vf2_state::C_TX_SENT.wrapping_add(1);
                 let val = ((i as u32) << 24) | ((len as u32) & 0x00FF_FFFF);
-                let _ = super::wari_drv_log_u32(0x7458_5472, val);
+                let _ = super::wari_drv_trace_u32(0x7458_5472, val);
             }
 
             // Publish: descriptor + bump tail.
@@ -3314,13 +3331,26 @@ mod vf2_keep_imports {
     static F: unsafe extern "C" fn() -> u64 = wari_lin_mem_base;
 }
 
+// Mirror image of vf2_keep_imports: the per-frame trace call sites
+// (dPrb / rXFr / rXTl / rXCn / rXCe / rXDr / tXTr) live in the
+// vf2-only GMAC module, so the QEMU wasm would otherwise drop the
+// `drv_trace_u32` import and the sign-tool's bidirectional check
+// ("manifest declares an import the wasm does not request") would
+// refuse the binary. Same #[used] function-pointer pin idiom.
+#[cfg(feature = "qemu")]
+mod qemu_keep_imports {
+    use super::*;
+    #[used]
+    static G: unsafe extern "C" fn(u32, u32) -> i32 = wari_drv_trace_u32;
+}
+
 // ── Tier-2 net driver registration (PR DI-4) ─────────────────────
 //
 // The driver author's surface for Phase-2 onward is the
 // `wari_driver_iface::NetDriver` trait + the `wari_net_driver!`
 // macro. The macro emits the wasm-ABI shims (`_start`, `poll`,
-// `tx_send`, `rx_pop`, `rx_recycle`) and the 612-byte manifest
-// in WASM custom section `wari_driver_manifest`.
+// `tx_send`, `rx_pop`, `rx_recycle`) and the NET_MANIFEST_SIZE-byte
+// manifest in WASM custom section `wari_driver_manifest`.
 //
 // The trait methods just delegate into the existing `driver_*`
 // functions to keep the migration narrow — no logic moves. A
