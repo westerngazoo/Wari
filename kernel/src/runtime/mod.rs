@@ -31,6 +31,7 @@ pub mod manifest;
 pub mod net_blob;
 pub mod noop_blob;
 pub mod sign;
+pub mod tier1_pool;
 pub mod tier2_net;
 pub mod tier2_uart;
 pub mod uart_blob;

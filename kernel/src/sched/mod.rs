@@ -156,11 +156,28 @@ pub fn run() -> Result<(), KernelError> {
         let next_id = pick_next_tenant();
         let proc_id = match next_id {
             Some(id) => id,
-            None => return Ok(()), // no tenants left to run
+            None => {
+                // No Ready tenant left. If tenants are still
+                // Blocked, every one of them waits on a peer that
+                // will never run again — the all-blocked condition
+                // (IPC deadlock, or a peer exited without replying).
+                // Phase-2's endpoint-revoke sweep will turn these
+                // into per-process errors; until then, report and
+                // return so kmain reaches the idle loop (Ctrl-R
+                // stays available) instead of hanging silently.
+                let blocked = count_blocked();
+                if blocked > 0 {
+                    kprintln!(
+                        "[sched] {} tenant(s) permanently blocked (no runnable peer) — abandoning",
+                        blocked
+                    );
+                }
+                return Ok(());
+            }
         };
 
-        // Mark Running, run, mark terminated. Three short borrows
-        // of `processes()` so we never alias.
+        // Mark Running, step, mark result. Short borrows of
+        // `processes()` so we never alias.
         //
         // Each borrow `?`-propagates `KernelError::NoSuchProcess`
         // rather than `.unwrap()`-panicking. `pick_next_tenant`
@@ -178,13 +195,6 @@ pub fn run() -> Result<(), KernelError> {
             proc.state = ProcessState::Running;
         }
 
-        kprintln!(
-            "[sched] starting Tier-1 instance proc_id={}", proc_id
-        );
-
-        // Resolve the module_id from the registered process and
-        // dispatch to runtime::run_tier1. Phase 1b only supports
-        // ModuleId::Tier1Hello, but the dispatch is shaped to grow.
         let module_id = {
             let table = processes();
             table[proc_id as usize]
@@ -192,33 +202,78 @@ pub fn run() -> Result<(), KernelError> {
                 .ok_or(KernelError::NoSuchProcess)?
                 .module_id
         };
-        let blob = blob_for(module_id);
-        let result = runtime::run_tier1(proc_id, blob, module_id);
 
-        let final_state = match result {
-            Ok(code) => {
+        // Step the tenant: first entry instantiates + runs `_start`
+        // resumably; a woken (previously Blocked) tenant resumes its
+        // parked invocation with the syscall result the waker left
+        // in its pool slot. See runtime::tier1_pool's yield protocol.
+        use runtime::tier1_pool::{self, StepOutcome};
+        let outcome = if tier1_pool::is_live(proc_id) {
+            kprintln!("[sched] resuming Tier-1 instance proc_id={}", proc_id);
+            tier1_pool::resume(proc_id)
+        } else {
+            kprintln!("[sched] starting Tier-1 instance proc_id={}", proc_id);
+            tier1_pool::start(proc_id, blob_for(module_id), module_id)
+        };
+
+        let final_state = match outcome {
+            StepOutcome::Exited(code) => {
                 kprintln!(
                     "[sched] Tier-1 instance proc_id={} exited (code={})",
                     proc_id, code
                 );
-                ProcessState::Exited(code)
+                Some(ProcessState::Exited(code))
             }
-            Err(e) => {
+            StepOutcome::Faulted => {
                 kprintln!(
-                    "[sched] Tier-1 instance proc_id={} faulted: {:?}",
-                    proc_id, e
+                    "[sched] Tier-1 instance proc_id={} faulted",
+                    proc_id
                 );
-                ProcessState::Faulted
+                Some(ProcessState::Faulted)
+            }
+            StepOutcome::Blocked => {
+                // The yielding host fn must have already moved the
+                // process to Blocked (and queued it on its Endpoint)
+                // BEFORE returning IpcBlock — the scheduler only
+                // verifies. A tenant that yielded without blocking
+                // itself violates the protocol: fail closed.
+                let table = processes();
+                let proc = table[proc_id as usize]
+                    .as_mut()
+                    .ok_or(KernelError::NoSuchProcess)?;
+                if proc.is_blocked() {
+                    None // state already correct; leave it
+                } else {
+                    kprintln!(
+                        "[sched] proc_id={} yielded without blocking — faulting",
+                        proc_id
+                    );
+                    tier1_pool::release(proc_id);
+                    Some(ProcessState::Faulted)
+                }
             }
         };
-        {
+        if let Some(state) = final_state {
             let table = processes();
             let proc = table[proc_id as usize]
                 .as_mut()
                 .ok_or(KernelError::NoSuchProcess)?;
-            proc.state = final_state;
+            proc.state = state;
         }
     }
+}
+
+/// Count tenants currently in `Blocked` — used by `run` to detect
+/// and report the all-blocked (deadlock) condition.
+fn count_blocked() -> usize {
+    let table = processes();
+    let mut n = 0;
+    for slot in table.iter().flatten() {
+        if slot.is_blocked() {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Wake the process at `proc_id` out of `Blocked` into `Ready`.
