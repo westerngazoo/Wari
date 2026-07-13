@@ -16,6 +16,11 @@ path = "src/main.rs"
 [dependencies]
 wari-abi = { path = "../abi-shared" }
 wari-mem = { path = "../wari-mem" }
+# Synchronous-IPC rendezvous core (Lane B / B2): the pure decision
+# logic (`resolve`) plus the shared `BlockReason` vocabulary the
+# scheduler's `ProcessState::Blocked` embeds. One source of truth —
+# the kernel must not mirror these enums.
+wari-ipc = { path = "../wari-ipc" }
 # Driver contract: manifest types + DriverKind/FuncSig enums +
 # DriverManifestError. Pure no_std types — same crate every
 # Tier-2 driver depends on, so the kernel parser and the macro

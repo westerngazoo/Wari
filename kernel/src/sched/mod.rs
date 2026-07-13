@@ -221,6 +221,36 @@ pub fn run() -> Result<(), KernelError> {
     }
 }
 
+/// Wake the process at `proc_id` out of `Blocked` into `Ready`.
+///
+/// The rendezvous path calls this when a peer's send/recv/reply
+/// completes a blocked process's wait; the Phase-2 endpoint-revoke
+/// sweep calls it for every waiter queued on a dying endpoint (the
+/// no-permanent-block invariant, docs/ipc-design.md §7).
+///
+/// # Errors
+/// - `KernelError::InvalidArgument` — `proc_id` out of range.
+/// - `KernelError::NoSuchProcess` — empty slot, or the process is
+///   not Blocked ("not in the expected state" per the taxonomy).
+///   Waking a Running/Exited process is a caller bug the kernel
+///   refuses rather than absorbs; the *idempotent* variant for
+///   revoke sweeps is `Process::wake`'s bool return, reached via
+///   `processes()` directly.
+pub fn wake(proc_id: u8) -> Result<(), KernelError> {
+    if (proc_id as usize) >= MAX_PROCS {
+        return Err(KernelError::InvalidArgument);
+    }
+    let table = processes();
+    let proc = table[proc_id as usize]
+        .as_mut()
+        .ok_or(KernelError::NoSuchProcess)?;
+    if proc.wake() {
+        Ok(())
+    } else {
+        Err(KernelError::NoSuchProcess)
+    }
+}
+
 /// Find the lowest `proc_id` whose state is `Ready`. Returns `None`
 /// if no `Ready` tenant exists.
 fn pick_next_tenant() -> Option<u8> {
