@@ -112,7 +112,16 @@ pub struct Process {
     /// is Blocked; read back by the process's own send/recv host fn
     /// when it resumes. `MsgRegs::EMPTY` outside an IPC exchange.
     pub msg_regs: MsgRegs,
+    /// Linear-memory offset of the caller's message buffer, recorded
+    /// when the process blocks in `recv`/`call` so the scheduler can
+    /// flush a delivered `msg_regs` into it just before resuming
+    /// (`runtime::tier1_pool::flush_msg_to_linmem`). [`NO_MSG_BUF`]
+    /// = nothing to flush.
+    pub msg_buf: u32,
 }
+
+/// Sentinel for [`Process::msg_buf`]: no flush pending.
+pub const NO_MSG_BUF: u32 = u32::MAX;
 
 impl Process {
     pub const fn new(proc_id: u8, tier: Tier, module_id: ModuleId) -> Self {
@@ -122,6 +131,7 @@ impl Process {
             module_id,
             state: ProcessState::Ready,
             msg_regs: MsgRegs::EMPTY,
+            msg_buf: NO_MSG_BUF,
         }
     }
 
@@ -135,6 +145,7 @@ impl Process {
             module_id,
             state: ProcessState::Library,
             msg_regs: MsgRegs::EMPTY,
+            msg_buf: NO_MSG_BUF,
         }
     }
 

@@ -86,6 +86,21 @@ mod wasi {
         /// negative errno. Kernel drives one smoltcp poll after the
         /// queue so the segment leaves the device on the same hop.
         pub fn net_socket_send_canned(slot: u32) -> i32;
+
+        // ── Synchronous IPC (Option B brick 3b) ──────────────────
+        // `slot` = Endpoint cap slot; `msg_ptr` = linmem offset of a
+        // 40-byte message buffer (badge u64 | 4×u64 words, LE —
+        // wari_abi::net::IPC_MSG_BYTES). Return 0 or negative errno.
+        // recv/call suspend this instance until a peer rendezvouses;
+        // call's reply overwrites the same buffer (seL4 MR in/out).
+        /// Send + await reply (suspends until replied).
+        pub fn ipc_call(slot: u32, msg_ptr: u32) -> i32;
+        /// Receive into `msg_ptr` (suspends if no sender waiting).
+        pub fn ipc_recv(slot: u32, msg_ptr: u32) -> i32;
+        /// Reply to the caller awaiting on this endpoint.
+        pub fn ipc_reply(slot: u32, msg_ptr: u32) -> i32;
+        /// This instance's proc_id (role-splitting for the demo).
+        pub fn proc_self() -> i32;
     }
 
     /// WASI Preview 1 `iovec` — `(buf, buf_len)` pair.
@@ -123,6 +138,43 @@ pub extern "C" fn _start() -> ! {
     // errno return (which we ignore — Phase 0's `_start` always exits
     // success).
     let _ = unsafe { wasi::fd_write(1, &iov, 1, &mut nwritten) };
+
+    // ── Option B brick 3b — cross-tenant synchronous IPC demo ────
+    //
+    // Both hello instances hold a READ+WRITE cap to ONE shared
+    // Endpoint at SLOT_IPC (cap::boot). Role split by proc_self():
+    //   proc 2 (instance A): ipc_call with "PING" in word 0, then
+    //     print the reply that overwrote the same buffer.
+    //   proc 3 (instance B): ipc_recv (rendezvouses with A's queued
+    //     call), print what arrived, ipc_reply "PONG".
+    // Whichever instance runs first blocks (suspends via the kernel
+    // yield protocol) until the other rendezvouses — this exchange
+    // is the first cross-tenant synchronous IPC on Wari.
+    const SLOT_IPC: u32 = 3;
+    let me = unsafe { wasi::proc_self() };
+    let mut ipc_msg = [0u8; 40];
+    if me == 2 {
+        ipc_msg[8..12].copy_from_slice(b"PING");
+        let rc = unsafe { wasi::ipc_call(SLOT_IPC, ipc_msg.as_ptr() as u32) };
+        if rc == 0 {
+            let mut line = *b"  ipc: reply=????\r\n";
+            line[13..17].copy_from_slice(&ipc_msg[8..12]);
+            print(&line);
+        } else {
+            print(b"  ipc: call err\r\n");
+        }
+    } else {
+        let rc = unsafe { wasi::ipc_recv(SLOT_IPC, ipc_msg.as_ptr() as u32) };
+        if rc == 0 {
+            let mut line = *b"  ipc: got=???? -> replying PONG\r\n";
+            line[11..15].copy_from_slice(&ipc_msg[8..12]);
+            print(&line);
+            ipc_msg[8..12].copy_from_slice(b"PONG");
+            let _ = unsafe { wasi::ipc_reply(SLOT_IPC, ipc_msg.as_ptr() as u32) };
+        } else {
+            print(b"  ipc: recv err\r\n");
+        }
+    }
 
     // Phase-1c HTTP demo — full end-to-end:
     //   create → bind 7000 → listen → busy-poll accept → send_canned → close
