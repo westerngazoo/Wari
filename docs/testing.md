@@ -40,7 +40,12 @@ graph TB
 **Rule**: if a pure module grows `unsafe` or MMIO, split — pure stays
 host-testable; impure moves to a `_glue` file.
 
-**Run**: `cargo test --workspace`. Must pass on every PR.
+**Run**: `make test-unit` — an explicit host-crate `-p` list
+(`Makefile::HOST_CRATES`), not `--workspace`: the kernel and the
+wasm32 crates define their own `#[panic_handler]` and cannot build
+under the host test harness (see `kernel-host-testing-design.md` §2).
+`scripts/build.sh` runs the same gate as its step [1/7]. Must pass
+on every PR.
 
 ### Integration tests — slow, meaningful
 

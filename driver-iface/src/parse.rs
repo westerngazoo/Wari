@@ -133,12 +133,12 @@ fn parse_payload(payload: &[u8]) -> Result<DriverManifestView<'_>, DriverManifes
         return Err(DriverManifestError::Truncated);
     }
 
+    let header_ptr = payload.as_ptr() as *const ManifestHeader;
     // SAFETY: payload bounds-checked to be at least
     // size_of::<ManifestHeader>(). `ManifestHeader` is `repr(C,
     // packed)` with byte alignment, so any byte boundary is a
     // valid `*const ManifestHeader`. We never form &-references
     // to packed fields — accessors use raw-pointer reads.
-    let header_ptr = payload.as_ptr() as *const ManifestHeader;
     let header: &ManifestHeader = unsafe { &*header_ptr };
 
     if header.magic != MAGIC {
@@ -155,6 +155,7 @@ fn parse_payload(payload: &[u8]) -> Result<DriverManifestView<'_>, DriverManifes
     let export_count = unsafe {
         unaligned_u16(core::ptr::addr_of!(header.export_count))
     } as usize;
+    // SAFETY: same.
     let import_count = unsafe {
         unaligned_u16(core::ptr::addr_of!(header.import_count))
     } as usize;

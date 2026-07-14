@@ -15,9 +15,10 @@
 #   - builds 130..134: hand-run 8-step pipeline on a box without make;
 #     every invocation risked a skipped sign or a mismatched WARI_BUILD.
 #
-# This script is the single entrypoint. It ALWAYS builds the full
-# closure of everything the kernel include_bytes!'s (Tier-1 programs,
-# UART driver both platforms, net driver both platforms, signatures),
+# This script is the single entrypoint. It ALWAYS runs the host
+# unit-test gate (pure-logic crates), then builds the full closure of
+# everything the kernel include_bytes!'s (Tier-1 programs, UART
+# driver both platforms, net driver both platforms, signatures),
 # then the kernel, then verifies every embedded build tag matches —
 # and only then advances .build_number. There is no partial mode.
 #
@@ -113,21 +114,34 @@ STEP="find-objcopy"
 OBJCOPY="$(find "$HOME/.rustup" -name 'llvm-objcopy*' -type f 2>/dev/null | head -1)"
 [ -n "$OBJCOPY" ] || { echo "llvm-objcopy not found (rustup component add llvm-tools)"; exit 1; }
 
-# ── 1. Tier-1 programs ──────────────────────────────────────────
+# ── 1. host unit tests (pure-logic gate) ────────────────────────
+STEP="host-unit-tests"
+echo "--- [1/7] Host unit tests (pure-logic crates)"
+# Same crate list as Makefile::HOST_CRATES — keep the two in sync.
+# Explicit -p list, NOT --workspace: the kernel and the wasm32
+# crates cannot build under the host test harness (E0152 + RISC-V
+# asm — see docs/kernel-host-testing-design.md §2). Duplicated here
+# rather than shelling out to make because this script exists
+# precisely for boxes without make (see header).
+cargo test --quiet \
+    -p wari-abi -p wari-driver-iface -p wari-mem -p wari-wnm \
+    -p wari-policy -p wari-ipc -p wari-wasi
+
+# ── 2. Tier-1 programs ──────────────────────────────────────────
 STEP="tier1-programs"
 mkdir -p build/apps
 IFS=',' read -ra PROG_ARR <<< "$PROGRAMS"
 for p in "${PROG_ARR[@]}"; do
-    echo "--- [1/6] Tier-1 program: $p"
+    echo "--- [2/7] Tier-1 program: $p"
     [ -d "apps/$p" ] || { echo "apps/$p does not exist"; exit 1; }
     ( cd "apps/$p" && cargo build --release )
     cp "target/wasm32-unknown-unknown/release/wari_${p}.wasm" "build/apps/${p}.wasm"
 done
 
-# ── 2. UART driver, both platforms + sign ───────────────────────
+# ── 3. UART driver, both platforms + sign ───────────────────────
 STEP="uart-driver"
 mkdir -p build/drivers
-echo "--- [2/6] UART driver (qemu + vf2) + sign"
+echo "--- [3/7] UART driver (qemu + vf2) + sign"
 ( cd drivers/uart && cargo build --release --features qemu --no-default-features )
 cp target/wasm32-unknown-unknown/release/wari_driver_uart.wasm build/drivers/uart-qemu.wasm
 ( cd drivers/uart && cargo build --release --features vf2 --no-default-features )
@@ -137,9 +151,9 @@ cargo run --quiet --manifest-path scripts/Cargo.toml --bin sign-module -- \
 cargo run --quiet --manifest-path scripts/Cargo.toml --bin sign-module -- \
     build/drivers/uart-vf2.wasm build/drivers/uart-vf2.signed.wasm
 
-# ── 3. Net driver, both platforms + sign (I2) ───────────────────
+# ── 4. Net driver, both platforms + sign (I2) ───────────────────
 STEP="net-driver"
-echo "--- [3/6] Net driver vf2 [$DRV_FEATURES] + qemu + sign"
+echo "--- [4/7] Net driver vf2 [$DRV_FEATURES] + qemu + sign"
 ( cd drivers/net && WARI_BUILD=$NEXT_BUILD \
     cargo build --release --features "$DRV_FEATURES" --no-default-features \
     --target wasm32-unknown-unknown )
@@ -156,16 +170,16 @@ cargo run --quiet --manifest-path scripts/Cargo.toml --bin sign-module -- \
 cargo run --quiet --manifest-path scripts/Cargo.toml --bin sign-module -- \
     build/drivers/net-qemu.wasm build/drivers/net-qemu.signed.wasm
 
-# ── 4. kernel ───────────────────────────────────────────────────
+# ── 5. kernel ───────────────────────────────────────────────────
 STEP="kernel"
-echo "--- [4/6] Kernel [$KRN_FEATURES]"
+echo "--- [5/7] Kernel [$KRN_FEATURES]"
 ( cd kernel && WARI_BUILD=$NEXT_BUILD \
     cargo build --release --features "$KRN_FEATURES" --no-default-features )
 "$OBJCOPY" -O binary target/riscv64gc-unknown-none-elf/release/wari build/wari.bin
 
-# ── 5. verify (I3 gate) ─────────────────────────────────────────
+# ── 6. verify (I3 gate) ─────────────────────────────────────────
 STEP="verify"
-echo "--- [5/6] Verify"
+echo "--- [6/7] Verify"
 KBIN="$(strings build/wari.bin | grep '^WARI-BUILD-TAG-' | head -1 | sed 's/WARI-BUILD-TAG-//')"
 DVF2="$(strings build/drivers/net-vf2.signed.wasm | grep '^WARI-DRV-BUILD-TAG-' | head -1 | sed 's/WARI-DRV-BUILD-TAG-//')"
 DQEM="$(strings build/drivers/net-qemu.signed.wasm | grep '^WARI-DRV-BUILD-TAG-' | head -1 | sed 's/WARI-DRV-BUILD-TAG-//')"
@@ -184,7 +198,7 @@ done
 # Only now advance the number (I3).
 echo "$NEXT_BUILD" > .build_number
 
-# ── 6. per-branch/profile archive ───────────────────────────────
+# ── 7. per-branch/profile archive ───────────────────────────────
 STEP="archive"
 OUT="build/out/$BRANCH_SLUG/$PROFILE"
 mkdir -p "$OUT"
@@ -204,7 +218,7 @@ cp build/drivers/net-qemu.signed.wasm "$OUT/net-qemu.signed.wasm"
     echo "programs: $PROGRAMS"
 } > "$OUT/build-info.txt"
 
-# ── 6b. release pointer + optional publish ─────────────────────
+# ── 7b. release pointer + optional publish ─────────────────────
 #
 # build/wari.bin is NOT tracked by git anymore (binary artifacts in
 # git made every parallel branch conflict on an unmergeable file).
@@ -217,7 +231,7 @@ REL_TAG="build-${NEXT_BUILD}-${BRANCH_SLUG}"
 echo "$REL_TAG" > build/wari.release
 if [ "$PUBLISH" = "1" ]; then
     STEP="publish"
-    echo "--- [6b] Publishing release $REL_TAG"
+    echo "--- [7b] Publishing release $REL_TAG"
     {
         echo "Build $NEXT_BUILD ($PROFILE) — branch $BRANCH @ $SHA"
         echo ""
@@ -237,7 +251,7 @@ else
     echo "    or: gh release create $REL_TAG build/wari.bin build/drivers/net-*.signed.wasm)"
 fi
 
-echo "--- [6/6] Done"
+echo "--- [7/7] Done"
 echo ""
 echo "=== BUILD $NEXT_BUILD OK ($PROFILE) ==="
 echo "    canonical: build/wari.bin (embedded tag WARI-BUILD-TAG-$NEXT_BUILD)"
