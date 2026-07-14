@@ -206,6 +206,15 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
     //      future PR can wire IRQ-driven `wfi` to drop the busy
     //      cost.
     let net_up = runtime::tier2_net::is_installed();
+    // UART-RX trace (debug-kernel builds): heartbeat every 10 s of
+    // monotonic time. Proves (a) the idle loop is alive, (b) the
+    // rdtime-derived clock runs at wall speed (stopwatch the line
+    // spacing), and (c) how LSR reads under 8-bit vs 32-bit access —
+    // hold any key ≥ 10 s and compare bit 0 (DR) in both lanes. See
+    // uart_ns16550::debug_lsr_snapshot for why the widths may differ
+    // on the JH7110 DW8250.
+    const HEARTBEAT_MS: u64 = 10_000;
+    let mut next_beat: u64 = 0;
     loop {
         if net_up {
             // Shared monotonic tick — also consumed by the
@@ -216,11 +225,21 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
             // host-fn driven polls.
             let _ = unsafe { runtime::tier2_net::poll(runtime::tier2_net::next_tick()) };
         }
+        let now = runtime::tier2_net::next_tick();
+        if now >= next_beat {
+            next_beat = now + HEARTBEAT_MS;
+            let (_l8, _l32) = mmio::uart_ns16550::debug_lsr_snapshot();
+            kdebug!(uart, "[idle] t={}ms lsr8={:#04x} lsr32={:#010x}", now, _l8, _l32);
+        }
         if let Some(b) = mmio::uart_ns16550::try_read_byte() {
             if b == 0x12 {
                 kprintln!("\r\n[reboot] Ctrl-R received, restarting via SBI...");
                 sbi::system_reset();
             }
+            // Echo every non-Ctrl-R byte so the operator can see
+            // whether keypresses reach the kernel at all (the
+            // terminal → adapter → DW8250 → try_read_byte path).
+            kdebug!(uart, "rx byte={:#04x} t={}ms", b, now);
         }
     }
 }
