@@ -19,6 +19,46 @@
 
 use crate::cap::{ModuleId, Tier};
 
+/// Why a blocked process is blocked — re-exported from `wari-ipc`,
+/// the pure rendezvous core (Lane B / B2). One source of truth: the
+/// decision logic in `wari_ipc::resolve` returns these same values,
+/// so the scheduler cannot drift from the IPC state machine.
+pub use wari_ipc::BlockReason;
+
+/// seL4-style message registers — the slice of TCB context a
+/// synchronous IPC transfer carries (design: `docs/ipc-design.md`
+/// §3, "short messages in registers, no copy on the fast path").
+///
+/// A message is a `badge` (identifies the sender's capability to
+/// the receiver) plus [`MSG_WORDS`] data words. Larger payloads go
+/// through shared linear memory via the cap-fastpath ring (B1);
+/// IPC itself stays register-sized.
+///
+/// Under the Option-B plan this is the first slice of the full TCB
+/// register context: the rendezvous transfer needs exactly these
+/// words. The complete GPR save/restore area arrives with timer
+/// preemption (a later brick) and will embed this struct rather
+/// than replace it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsgRegs {
+    /// Capability badge presented to the receiver. 0 = unbadged.
+    pub badge: u64,
+    /// Message payload words (seL4's MRs).
+    pub words: [u64; MSG_WORDS],
+}
+
+/// Number of data words a message carries (`docs/ipc-design.md`
+/// §9.2 — badge + 4 words).
+pub const MSG_WORDS: usize = 4;
+
+impl MsgRegs {
+    /// The zero message: unbadged, all words 0.
+    pub const EMPTY: MsgRegs = MsgRegs {
+        badge: 0,
+        words: [0; MSG_WORDS],
+    };
+}
+
 /// Lifecycle state of a process tracked by the scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
@@ -33,6 +73,20 @@ pub enum ProcessState {
     /// host fns). Conceptually `Ready` but with a different
     /// lifecycle: the scheduler does not pick it for `run`.
     Library,
+    /// Process is blocked on a synchronous-IPC object and must not
+    /// be scheduled until a rendezvous (or a revoke of that object)
+    /// readies it. Invariant (docs/ipc-design.md §7): `Blocked` is
+    /// always paired with the object it waits on — `ep_idx` is the
+    /// Endpoint pool index — so revoking that endpoint can find and
+    /// wake every waiter with an error instead of leaking a
+    /// permanently-blocked process.
+    Blocked {
+        /// Which wait this is (sender / receiver / caller /
+        /// awaiting-reply) — `wari_ipc::BlockReason`.
+        reason: BlockReason,
+        /// Endpoint pool index the process is queued on.
+        ep_idx: u8,
+    },
     /// Process exited cleanly with the given code.
     Exited(i32),
     /// Process trapped (kernel-side fault, BadWasm at runtime, etc.)
@@ -53,6 +107,11 @@ pub struct Process {
     pub tier: Tier,
     pub module_id: ModuleId,
     pub state: ProcessState,
+    /// Message registers — the IPC slice of this process's TCB
+    /// context. Written by a rendezvous transfer while the process
+    /// is Blocked; read back by the process's own send/recv host fn
+    /// when it resumes. `MsgRegs::EMPTY` outside an IPC exchange.
+    pub msg_regs: MsgRegs,
 }
 
 impl Process {
@@ -62,6 +121,7 @@ impl Process {
             tier,
             module_id,
             state: ProcessState::Ready,
+            msg_regs: MsgRegs::EMPTY,
         }
     }
 
@@ -74,6 +134,7 @@ impl Process {
             tier,
             module_id,
             state: ProcessState::Library,
+            msg_regs: MsgRegs::EMPTY,
         }
     }
 
@@ -86,6 +147,55 @@ impl Process {
     pub fn is_terminated(&self) -> bool {
         matches!(self.state, ProcessState::Exited(_) | ProcessState::Faulted)
     }
+
+    /// `true` if the process is blocked on an IPC object.
+    pub fn is_blocked(&self) -> bool {
+        matches!(self.state, ProcessState::Blocked { .. })
+    }
+
+    /// Block this process on the endpoint at `ep_idx` for `reason`.
+    ///
+    /// # Contract
+    /// - Precondition: the process is `Running` (only the currently
+    ///   executing process can block itself — a scheduler invariant
+    ///   the caller upholds; this method does not verify it because
+    ///   the Phase-2 wake-on-revoke path also legitimately rewrites
+    ///   `Blocked → Blocked` when promoting `CallWait → ReplyWait`).
+    /// - Postcondition: `is_blocked()`, and the pairing invariant
+    ///   holds — the state names the endpoint it waits on.
+    /// - Panics: never.
+    pub fn block(&mut self, reason: BlockReason, ep_idx: u8) {
+        self.state = ProcessState::Blocked { reason, ep_idx };
+    }
+
+    /// Wake a blocked process: `Blocked → Ready`. Returns `false`
+    /// (and changes nothing) if the process was not blocked — wake
+    /// is idempotent-safe so the endpoint-revoke sweep can call it
+    /// unconditionally on every queued TcbRef.
+    pub fn wake(&mut self) -> bool {
+        if self.is_blocked() {
+            self.state = ProcessState::Ready;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Transfer one message: copy the sender's message registers into
+/// the receiver's. The rendezvous data plane — deliberately a pure
+/// function over two `MsgRegs` (no process-table access) so it is
+/// host-testable and, later, Kani-provable alongside
+/// `wari_ipc::resolve` (the decision plane).
+///
+/// # Contract
+/// - Postcondition: receiver's regs are byte-identical to the
+///   sender's at call time; sender's regs are unchanged (seL4
+///   semantics — delivery does not consume the sender's MRs).
+/// - Panics: never.
+#[inline]
+pub fn transfer_msg(sender: &MsgRegs, receiver: &mut MsgRegs) {
+    *receiver = *sender;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -126,5 +236,66 @@ mod tests {
         p.state = ProcessState::Faulted;
         assert!(p.is_terminated());
         assert!(!p.is_runnable());
+    }
+
+    #[test]
+    fn blocked_is_not_runnable_and_pairs_with_endpoint() {
+        let mut p = Process::new(2, Tier::One, ModuleId::Tier1Hello);
+        p.block(BlockReason::RecvWait, 3);
+        assert!(p.is_blocked());
+        assert!(!p.is_runnable());
+        assert!(!p.is_terminated());
+        // The pairing invariant (ipc-design §7): the state itself
+        // names the endpoint, so a revoke sweep can find waiters.
+        assert_eq!(
+            p.state,
+            ProcessState::Blocked { reason: BlockReason::RecvWait, ep_idx: 3 }
+        );
+    }
+
+    #[test]
+    fn wake_readies_only_blocked() {
+        let mut p = Process::new(2, Tier::One, ModuleId::Tier1Hello);
+        p.block(BlockReason::CallWait, 0);
+        assert!(p.wake());
+        assert_eq!(p.state, ProcessState::Ready);
+        assert!(p.is_runnable());
+        // Idempotent-safe: waking a non-blocked process is a no-op.
+        assert!(!p.wake());
+        assert_eq!(p.state, ProcessState::Ready);
+        // Never wakes a terminated process into Ready.
+        p.state = ProcessState::Exited(0);
+        assert!(!p.wake());
+        assert_eq!(p.state, ProcessState::Exited(0));
+    }
+
+    #[test]
+    fn call_wait_promotes_to_reply_wait() {
+        // The kernel promotes CallWait → ReplyWait once a receiver
+        // takes the message (wari_ipc::BlockReason docs). block()
+        // permits the Blocked → Blocked rewrite.
+        let mut p = Process::new(2, Tier::One, ModuleId::Tier1Hello);
+        p.block(BlockReason::CallWait, 1);
+        p.block(BlockReason::ReplyWait, 1);
+        assert_eq!(
+            p.state,
+            ProcessState::Blocked { reason: BlockReason::ReplyWait, ep_idx: 1 }
+        );
+    }
+
+    #[test]
+    fn transfer_copies_and_preserves_sender() {
+        let src = MsgRegs { badge: 0xB0, words: [1, 2, 3, 4] };
+        let mut dst = MsgRegs::EMPTY;
+        transfer_msg(&src, &mut dst);
+        assert_eq!(dst, src);
+        // seL4 semantics: delivery does not consume the sender's MRs.
+        assert_eq!(src.words, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn fresh_process_has_empty_msg_regs() {
+        let p = Process::new(2, Tier::One, ModuleId::Tier1Hello);
+        assert_eq!(p.msg_regs, MsgRegs::EMPTY);
     }
 }
