@@ -28,6 +28,7 @@ mod abi;
 mod boot;
 mod cap;
 mod error;
+mod ipc;
 mod kputc;
 mod mem;
 mod mmio;

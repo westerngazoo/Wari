@@ -409,6 +409,7 @@ dependencies = [
  "ed25519-dalek",
  "wari-abi",
  "wari-driver-iface",
+ "wari-ipc",
  "wari-mem",
  "wasmi",
 ]
