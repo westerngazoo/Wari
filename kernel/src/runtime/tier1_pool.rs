@@ -282,3 +282,47 @@ pub fn release(proc_id: u8) {
         pool()[proc_id as usize] = None;
     }
 }
+<<<<<<< HEAD
+
+/// Flush a woken process's delivered message (`Process::msg_regs`)
+/// into its linear memory at the offset it recorded when blocking
+/// (`Process::msg_buf`), then clear the record. Called by the
+/// scheduler immediately before [`resume`] — the only moment the
+/// kernel may safely touch this instance's `Store` (no wasmi frame
+/// of this instance can be live: its invocation is parked here).
+///
+/// No-op if nothing was recorded. A failed write (offset out of
+/// bounds — the tenant passed a bogus pointer when it blocked)
+/// leaves the buffer unwritten; the resume value already carries
+/// the syscall's rc, and a tenant that lied about its own buffer
+/// only corrupts its own view (fails closed at the trust boundary).
+pub fn flush_msg_to_linmem(proc_id: u8) {
+    use crate::sched::process::NO_MSG_BUF;
+    let (regs, ptr) = {
+        let table = crate::sched::processes();
+        match table[proc_id as usize].as_mut() {
+            Some(p) if p.msg_buf != NO_MSG_BUF => {
+                let out = (p.msg_regs, p.msg_buf);
+                p.msg_buf = NO_MSG_BUF;
+                out
+            }
+            _ => return,
+        }
+    };
+    let slot = match pool()[proc_id as usize].as_mut() {
+        Some(s) => s,
+        None => return,
+    };
+    let memory = match slot
+        .instance
+        .get_export(&slot.store, "memory")
+        .and_then(|e| e.into_memory())
+    {
+        Some(m) => m,
+        None => return,
+    };
+    let bytes = crate::ipc::encode_msg(&regs);
+    let _ = memory.write(&mut slot.store, ptr as usize, &bytes);
+}
+=======
+>>>>>>> origin/main

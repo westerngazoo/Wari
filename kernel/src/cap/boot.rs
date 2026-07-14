@@ -88,6 +88,15 @@ pub const PROC_ID_TIER2_NET: u8 = 4;
 /// Socket cap into the caller's `slot_for_cap`.
 pub const SLOT_NET: u8 = 2;
 
+/// Conventional cap-slot index for the Tier-1 demo IPC endpoint
+/// (Option B brick 3b). Both hello instances hold READ+WRITE caps
+/// to ONE shared endpoint here, so instance A can `ipc_call` and
+/// instance B can `ipc_recv`/`ipc_reply` across their isolation
+/// boundary. Phase-2 proper mints per-channel endpoints with
+/// asymmetric rights (caller WRITE-only, servicer READ+WRITE); the
+/// symmetric demo grant is called out in the PR's security notes.
+pub const SLOT_IPC: u8 = 3;
+
 const SLOT_PRIMARY: u8 = 0;
 /// Slot index for the exit cap (Tier-1 only).
 const SLOT_EXIT: u8 = 1;
@@ -221,6 +230,29 @@ pub fn init_root_caps() -> Result<(), KernelError> {
         // PR Net-6b: install Net cap into both Tier-1 hello CSpaces.
         install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO,   net_pool_idx);
         install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO_B, net_pool_idx);
+    }
+
+    // 5b-ipc (Option B brick 3b). One shared demo IPC endpoint,
+    // READ+WRITE cap at SLOT_IPC in both Tier-1 hello CSpaces —
+    // the channel for the cross-tenant call/recv/reply demo.
+    {
+        let pools = object_pools();
+        let demo_ep_idx = pools.endpoints.alloc(Endpoint::new())?;
+        if let Some(ep) = pools.endpoints.get_mut(demo_ep_idx) {
+            ep.refcount = 2; // one cap in each hello CSpace
+        }
+        let _ = pools;
+        let cs = cspaces();
+        for pid in [PROC_ID_TIER1_HELLO, PROC_ID_TIER1_HELLO_B] {
+            cs[pid as usize].slots[SLOT_IPC as usize] = Cap {
+                badge: 0,
+                parent: CapId::ROOT,
+                generation: 0,
+                pool_index: demo_ep_idx,
+                kind: ObjectKind::Endpoint,
+                rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
+            };
+        }
     }
     let pools = object_pools();
 

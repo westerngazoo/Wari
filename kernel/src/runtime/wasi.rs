@@ -299,6 +299,72 @@ pub fn register_wasi_host_fns(
         )
         .map_err(|_| KernelError::BadWasm)?;
 
+    // Option B brick 3b — synchronous IPC over Endpoint caps.
+    // Each fn takes (endpoint cap slot, linmem offset of a 40-byte
+    // message buffer — wari_abi::net::IPC_MSG_BYTES) and returns 0
+    // or a negative errno. `recv`/`call` (and a queued `send`) may
+    // suspend the tenant via the tier1_pool yield protocol
+    // (Err(IpcBlock)); the closures' fallible signatures are what
+    // carry that yield out to wasmi's resumable machinery.
+    linker
+        .func_wrap(
+            "wari",
+            "ipc_send",
+            move |mut caller: Caller<'_, Tier1HostState>,
+                  slot: u32,
+                  msg_ptr: u32|
+                  -> Result<i32, Error> {
+                crate::ipc::ipc_send_impl(&mut caller, pid, slot, msg_ptr)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "ipc_recv",
+            move |mut caller: Caller<'_, Tier1HostState>,
+                  slot: u32,
+                  msg_ptr: u32|
+                  -> Result<i32, Error> {
+                crate::ipc::ipc_recv_impl(&mut caller, pid, slot, msg_ptr)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "ipc_call",
+            move |mut caller: Caller<'_, Tier1HostState>,
+                  slot: u32,
+                  msg_ptr: u32|
+                  -> Result<i32, Error> {
+                crate::ipc::ipc_call_impl(&mut caller, pid, slot, msg_ptr)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "ipc_reply",
+            move |mut caller: Caller<'_, Tier1HostState>,
+                  slot: u32,
+                  msg_ptr: u32|
+                  -> Result<i32, Error> {
+                crate::ipc::ipc_reply_impl(&mut caller, pid, slot, msg_ptr)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    // Identity probe for role-splitting demos: which proc am I?
+    // Deliberately minimal — returns the proc_id the kernel already
+    // baked into this instance's host-fn closures; no new authority.
+    linker
+        .func_wrap(
+            "wari",
+            "proc_self",
+            move |_: Caller<'_, Tier1HostState>| -> i32 { pid as i32 },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
     Ok(())
 }
 

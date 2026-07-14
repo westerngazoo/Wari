@@ -210,6 +210,11 @@ pub fn run() -> Result<(), KernelError> {
         use runtime::tier1_pool::{self, StepOutcome};
         let outcome = if tier1_pool::is_live(proc_id) {
             kprintln!("[sched] resuming Tier-1 instance proc_id={}", proc_id);
+            // Deliver any message a rendezvous parked in this
+            // process's msg_regs while it was blocked — this is the
+            // one safe moment to write its linear memory (no wasmi
+            // frame of this instance can be live).
+            tier1_pool::flush_msg_to_linmem(proc_id);
             tier1_pool::resume(proc_id)
         } else {
             kprintln!("[sched] starting Tier-1 instance proc_id={}", proc_id);

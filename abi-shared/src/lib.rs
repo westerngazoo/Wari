@@ -240,6 +240,19 @@ pub mod net {
     /// Generous enough for a human-paced `curl` on either platform.
     pub const ACCEPT_DEADLINE_MS: u64 = 60_000;
 
+    // ── Synchronous IPC message layout (Option B brick 3b) ───────
+    //
+    // The wire layout of one message in Tier-1 linear memory, shared
+    // by the kernel's ipc host fns and every WASM consumer. Mirrors
+    // the kernel's `MsgRegs` (badge + 4 data words), little-endian.
+
+    /// Bytes of one IPC message in linear memory:
+    /// `badge: u64 | words: [u64; 4]`, little-endian, packed.
+    pub const IPC_MSG_BYTES: usize = 40;
+
+    /// Number of payload words per message (excludes the badge).
+    pub const IPC_MSG_WORDS: usize = 4;
+
     /// Pure deadline predicate: has `now_ms` passed `first_ms` by at
     /// least `budget_ms`? Saturating — a `now_ms` earlier than
     /// `first_ms` (which a monotonic clock never produces, but a
