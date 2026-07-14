@@ -87,8 +87,35 @@ _wari_pull_and_verify() {
         fi
     fi
 
+    # Artifact-release flow: wari.bin is no longer tracked by git
+    # (binary artifacts made every parallel branch conflict on an
+    # unmergeable file). The repo tracks build/wari.release — a
+    # one-line pointer to the GitHub Release tag carrying this
+    # build's binaries. Download when the on-disk binary is missing
+    # or its embedded WARI-BUILD-TAG doesn't match the pointer; the
+    # embedded-tag verification below then runs on the downloaded
+    # file exactly as it always did on the git-tracked one.
+    if [ -s build/wari.release ]; then
+        local rel_tag rel_build have_build
+        rel_tag=$(head -1 build/wari.release | tr -d '[:space:]')
+        rel_build="${rel_tag#build-}"; rel_build="${rel_build%%-*}"
+        have_build=$(_wari_embedded_build build/wari.bin)
+        if [ "$have_build" != "$rel_build" ]; then
+            echo "Fetching release artifact $rel_tag (have build $have_build, want $rel_build)..."
+            local rel_url="https://github.com/westerngazoo/Wari/releases/download/${rel_tag}/wari.bin"
+            if ! curl -fSL --retry 3 -o build/wari.bin.tmp "$rel_url"; then
+                echo "ERROR: download failed: $rel_url"
+                echo "       Was this build published? (scripts/build.sh --publish)"
+                rm -f build/wari.bin.tmp
+                return 1
+            fi
+            mv build/wari.bin.tmp build/wari.bin
+        fi
+    fi
+
     if [ ! -s build/wari.bin ]; then
         echo "ERROR: build/wari.bin missing or empty after pull"
+        [ -s build/wari.release ] || echo "       (no build/wari.release pointer either — pre-release-flow branch?)"
         return 1
     fi
 

@@ -70,10 +70,12 @@ PROFILE="${1:-}"
 shift || true
 PROGRAMS="hello"
 BUMP=1
+PUBLISH=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --programs) PROGRAMS="$2"; shift 2 ;;
         --no-bump)  BUMP=0; shift ;;
+        --publish)  PUBLISH=1; shift ;;
         *) echo "unknown option: $1"; exit 2 ;;
     esac
 done
@@ -202,12 +204,45 @@ cp build/drivers/net-qemu.signed.wasm "$OUT/net-qemu.signed.wasm"
     echo "programs: $PROGRAMS"
 } > "$OUT/build-info.txt"
 
+# ── 6b. release pointer + optional publish ─────────────────────
+#
+# build/wari.bin is NOT tracked by git anymore (binary artifacts in
+# git made every parallel branch conflict on an unmergeable file).
+# Instead the repo tracks build/wari.release — a one-line text
+# pointer naming the GitHub Release tag that carries this build's
+# binaries. The device-side `wari go` downloads the binary named by
+# the pointer and verifies its embedded WARI-BUILD-TAG as before.
+STEP="release-pointer"
+REL_TAG="build-${NEXT_BUILD}-${BRANCH_SLUG}"
+echo "$REL_TAG" > build/wari.release
+if [ "$PUBLISH" = "1" ]; then
+    STEP="publish"
+    echo "--- [6b] Publishing release $REL_TAG"
+    {
+        echo "Build $NEXT_BUILD ($PROFILE) — branch $BRANCH @ $SHA"
+        echo ""
+        echo "sha256:"
+        shasum -a 256 build/wari.bin build/drivers/net-vf2.signed.wasm build/drivers/net-qemu.signed.wasm 2>/dev/null \
+          || sha256sum build/wari.bin build/drivers/net-vf2.signed.wasm build/drivers/net-qemu.signed.wasm
+    } > /tmp/wari-release-notes.txt
+    gh release create "$REL_TAG" \
+        build/wari.bin \
+        build/drivers/net-vf2.signed.wasm \
+        build/drivers/net-qemu.signed.wasm \
+        --title "Build $NEXT_BUILD ($PROFILE, $BRANCH_SLUG)" \
+        --notes-file /tmp/wari-release-notes.txt
+    echo "    published: $REL_TAG"
+else
+    echo "    release pointer: $REL_TAG  (NOT published — run with --publish"
+    echo "    or: gh release create $REL_TAG build/wari.bin build/drivers/net-*.signed.wasm)"
+fi
+
 echo "--- [6/6] Done"
 echo ""
 echo "=== BUILD $NEXT_BUILD OK ($PROFILE) ==="
 echo "    canonical: build/wari.bin (embedded tag WARI-BUILD-TAG-$NEXT_BUILD)"
 echo "    archive:   $OUT/"
 echo ""
-echo "    To deploy: git add build/wari.bin .build_number && git commit && git push"
+echo "    To deploy: build with --publish, then git add build/wari.release .build_number && git commit && git push"
 echo "    On VF2:    wari upgrade && wari go -y      (flashes main)"
 echo "               wari go-branch $BRANCH          (flashes this branch)"
