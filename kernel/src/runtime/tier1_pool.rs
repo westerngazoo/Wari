@@ -282,6 +282,7 @@ pub fn release(proc_id: u8) {
         pool()[proc_id as usize] = None;
     }
 }
+<<<<<<< HEAD
 
 /// Flush a woken process's delivered message (`Process::msg_regs`)
 /// into its linear memory at the offset it recorded when blocking
@@ -323,3 +324,5 @@ pub fn flush_msg_to_linmem(proc_id: u8) {
     let bytes = crate::ipc::encode_msg(&regs);
     let _ = memory.write(&mut slot.store, ptr as usize, &bytes);
 }
+=======
+>>>>>>> origin/main
