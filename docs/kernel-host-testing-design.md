@@ -1,8 +1,13 @@
 # Wari — Kernel Host-Testing Strategy (RFC)
 
-> **Status**: PROPOSAL — awaiting architect decision. No code lands
-> with this document (Co-Architect Protocol §1–2: options proposed,
-> Gustavo picks, then execution).
+> **Status**: ACCEPTED — 2026-07-14, Gustavo picked the §8 staged
+> hybrid (B-first): §6 gate repair immediately, Option B as the
+> standing direction. Execution: gate repair PR #58; `wari-sched` +
+> `wari-cap` seed (lane B-1, seeded early because `Process` carries
+> `Tier`/`ModuleId`) PR #59; `wari-validate` (lane B-2) PR #60. The
+> B-3 cap slices follow once the extraction template from #59/#60
+> survives review. §8's optional minimal-A subset was not requested
+> and is not planned.
 > **Author**: Claude (probe + evidence from a clean worktree,
 > 2026-07-13, post-build-142 tree).
 > **Phase alignment**: closes a Phase-1c testing-gate gap; Option B
