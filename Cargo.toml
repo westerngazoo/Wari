@@ -24,6 +24,8 @@ members = [
     "wari-wnm",
     "wari-policy",
     "wari-ipc",
+    "wari-cap",
+    "wari-sched",
     "wasi",
     "kernel",
     "apps/hello",

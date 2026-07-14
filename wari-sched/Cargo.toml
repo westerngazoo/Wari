@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "wari-sched"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# Pure logic. `#![cfg_attr(not(test), no_std)]` keeps it no_std for
+# the kernel build; the test profile links std so
+# `cargo test -p wari-sched` runs on host. Both dependencies are
+# themselves pure no_std crates: `wari-cap` supplies the Tier /
+# ModuleId identity enums a Process carries, `wari-ipc` supplies
+# BlockReason (one source of truth with the rendezvous decision core).
+[dependencies]
+wari-cap = { path = "../wari-cap" }
+wari-ipc = { path = "../wari-ipc" }
+
+[dev-dependencies]
