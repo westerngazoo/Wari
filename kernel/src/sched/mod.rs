@@ -269,16 +269,12 @@ pub fn run() -> Result<(), KernelError> {
 }
 
 /// Count tenants currently in `Blocked` — used by `run` to detect
-/// and report the all-blocked (deadlock) condition.
+/// and report the all-blocked (deadlock) condition. Decision logic
+/// in `wari_sched::count_blocked` (host-tested); this wrapper only
+/// snapshots the table.
 fn count_blocked() -> usize {
     let table = processes();
-    let mut n = 0;
-    for slot in table.iter().flatten() {
-        if slot.is_blocked() {
-            n += 1;
-        }
-    }
-    n
+    wari_sched::count_blocked(table.iter().map(|slot| slot.map(|p| p.state)))
 }
 
 /// Wake the process at `proc_id` out of `Blocked` into `Ready`.
@@ -312,17 +308,12 @@ pub fn wake(proc_id: u8) -> Result<(), KernelError> {
 }
 
 /// Find the lowest `proc_id` whose state is `Ready`. Returns `None`
-/// if no `Ready` tenant exists.
+/// if no `Ready` tenant exists. Decision logic in
+/// `wari_sched::pick_next_tenant` (host-tested); this wrapper only
+/// snapshots the table.
 fn pick_next_tenant() -> Option<u8> {
     let table = processes();
-    for i in 0..MAX_PROCS {
-        if let Some(p) = &table[i] {
-            if matches!(p.state, ProcessState::Ready) {
-                return Some(i as u8);
-            }
-        }
-    }
-    None
+    wari_sched::pick_next_tenant(table.iter().map(|slot| slot.map(|p| p.state)))
 }
 
 /// Resolve a `ModuleId` to the embedded WASM blob bytes.

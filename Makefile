@@ -191,7 +191,8 @@ objdump: build
 # scripts/build.sh step [1/7] (build.sh cannot depend on make — it
 # exists for boxes without it).
 HOST_CRATES := -p wari-abi -p wari-driver-iface -p wari-mem \
-               -p wari-wnm -p wari-policy -p wari-ipc -p wari-wasi
+               -p wari-wnm -p wari-policy -p wari-ipc -p wari-wasi \
+               -p wari-cap -p wari-sched
 
 test-unit:
 	cargo test $(HOST_CRATES)

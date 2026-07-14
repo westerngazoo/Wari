@@ -372,6 +372,10 @@ name = "wari-abi"
 version = "0.0.1"
 
 [[package]]
+name = "wari-cap"
+version = "0.0.1"
+
+[[package]]
 name = "wari-driver-iface"
 version = "0.0.1"
 
@@ -408,9 +412,11 @@ version = "0.0.1"
 dependencies = [
  "ed25519-dalek",
  "wari-abi",
+ "wari-cap",
  "wari-driver-iface",
  "wari-ipc",
  "wari-mem",
+ "wari-sched",
  "wasmi",
 ]
 
@@ -421,6 +427,14 @@ version = "0.0.1"
 [[package]]
 name = "wari-policy"
 version = "0.0.1"
+
+[[package]]
+name = "wari-sched"
+version = "0.0.1"
+dependencies = [
+ "wari-cap",
+ "wari-ipc",
+]
 
 [[package]]
 name = "wari-security-tests"

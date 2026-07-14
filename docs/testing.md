@@ -34,7 +34,10 @@ graph TB
   - `kernel/src/mem/page_alloc.rs` — bitmap invariants, conservation
   - `kernel/src/mem/page_table.rs` — Sv39 walk against fake memory
   - `kernel/src/validate.rs` — argument validators
-  - `kernel/src/sched/process.rs` — PCB state-machine transitions
+  - `wari-sched` — PCB state machine + pick-next policy (extracted
+    from `kernel/src/sched/`; the kernel keeps a re-export shim)
+  - `wari-cap` — static caps table + Tier/ModuleId (first extracted
+    slice; the dynamic cap modules follow per the extraction RFC)
   - `kernel/src/ipc.rs` — rendezvous state machine (mostly pure)
 
 **Rule**: if a pure module grows `unsafe` or MMIO, split — pure stays
