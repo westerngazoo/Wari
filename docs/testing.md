@@ -33,7 +33,8 @@ graph TB
   - `wari-abi` — syscall numbers, error encoding, opcode tables
   - `kernel/src/mem/page_alloc.rs` — bitmap invariants, conservation
   - `kernel/src/mem/page_table.rs` — Sv39 walk against fake memory
-  - `kernel/src/validate.rs` — argument validators
+  - `wari-validate` — argument validators + both platforms' MMIO
+    window tables (extracted; the kernel shim binds the platform)
   - `wari-sched` — PCB state machine + pick-next policy (extracted
     from `kernel/src/sched/`; the kernel keeps a re-export shim)
   - `wari-cap` — static caps table + Tier/ModuleId (first extracted

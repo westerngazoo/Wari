@@ -417,6 +417,7 @@ dependencies = [
  "wari-ipc",
  "wari-mem",
  "wari-sched",
+ "wari-validate",
  "wasmi",
 ]
 
@@ -438,6 +439,10 @@ dependencies = [
 
 [[package]]
 name = "wari-security-tests"
+version = "0.0.1"
+
+[[package]]
+name = "wari-validate"
 version = "0.0.1"
 
 [[package]]

@@ -26,6 +26,7 @@ members = [
     "wari-ipc",
     "wari-cap",
     "wari-sched",
+    "wari-validate",
     "wasi",
     "kernel",
     "apps/hello",
