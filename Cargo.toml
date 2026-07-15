@@ -30,7 +30,7 @@ members = [
     "drivers/uart",
     "drivers/net",
     "tests/integration",
-    "tests/security",
+    "tests/security", "tools/wari-bench",
     # tools/*    — populated as needed
     # tests/fuzz — populated per-phase
 ]
