@@ -645,6 +645,9 @@ mod tests {
     }
 
     #[test]
+    // identity_op allowed: the `+ 0x000` below keeps the three offset
+    // assertions visually parallel (0x000 / 0x123 / 0xFFF).
+    #[allow(clippy::identity_op)]
     fn walk_preserves_page_offset_in_phys() {
         // Different offsets in the same page should resolve to distinct
         // PAs that share the same page base.

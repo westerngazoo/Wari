@@ -525,6 +525,11 @@ pub const fn manifest_size(export_count: usize, import_count: usize) -> usize {
 /// offset. Imports additionally carry a module name (always
 /// `"wari"` in Phase 2, but spelled out per descriptor for
 /// future namespacing).
+// clippy::panic allowed: every panic! below is a const-eval assert —
+// all in-tree callers invoke this through the `wari_driver!` macro in
+// const context, so a violated bound aborts the *build*, never a
+// running kernel. See the doc contract above.
+#[allow(clippy::panic)]
 pub const fn build_manifest<const N: usize>(
     kind: DriverKind,
     exports: &[(&[u8], FuncSig)],
@@ -536,7 +541,7 @@ pub const fn build_manifest<const N: usize>(
     }
 
     let mut buf = [0u8; N];
-    let mut i = 0;
+    let mut i;
 
     // Header: magic + abi_version + kind + export_count +
     //         import_count + flags.  Little-endian per repr(C).
@@ -615,6 +620,9 @@ pub const fn build_manifest<const N: usize>(
 /// Compile-time panic if `name.len() >= N` (i.e. the trailing NUL
 /// would not fit). This catches over-long export names at build
 /// time, before the manifest is ever signed.
+// clippy::panic allowed: const-eval assert per the # Panics contract
+// above — fires at build time, not at runtime.
+#[allow(clippy::panic)]
 pub const fn pad_name<const N: usize>(name: &[u8]) -> [u8; N] {
     let mut out = [0u8; N];
     let mut i = 0;

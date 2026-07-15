@@ -859,6 +859,9 @@ mod tests {
     }
 
     #[test]
+    // The unit binding below is the point of the test (a deliberate
+    // name-collision tripwire), not an accident — see its comment.
+    #[allow(clippy::let_unit_value)]
     fn sys_spawn_slot_is_retired() {
         // Slot 10 is the retired SYS_SPAWN_ELF position. It must NOT
         // reappear in Wari — CLAUDE R7 forbids any ELF entry point in
