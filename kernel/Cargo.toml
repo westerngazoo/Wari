@@ -28,6 +28,10 @@ wari-ipc = { path = "../wari-ipc" }
 # docs/kernel-host-testing-design.md.
 wari-cap = { path = "../wari-cap" }
 wari-sched = { path = "../wari-sched" }
+# Pure syscall-boundary validators (B-2), incl. both platforms' NIC
+# MMIO window tables as data; kernel/src/validate.rs shims them and
+# binds the platform choice.
+wari-validate = { path = "../wari-validate" }
 # Driver contract: manifest types + DriverKind/FuncSig enums +
 # DriverManifestError. Pure no_std types — same crate every
 # Tier-2 driver depends on, so the kernel parser and the macro
