@@ -76,10 +76,8 @@ mod diag;
 /// rodata and `strings(1)` can find it.
 #[used]
 #[no_mangle]
-pub static WARI_DRV_BUILD_TAG: &[u8] = concat!(
-    "WARI-DRV-BUILD-TAG-",
-    env!("WARI_BUILD"),
-).as_bytes();
+pub static WARI_DRV_BUILD_TAG: &[u8] =
+    concat!("WARI-DRV-BUILD-TAG-", env!("WARI_BUILD"),).as_bytes();
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -137,18 +135,18 @@ mod plat {
 // device (network, block, console, etc.). VirtIO-net's device-specific
 // config starts at 0x100.
 
-const VIRTIO_MMIO_MAGIC_VALUE:         u32 = 0x000;
-const VIRTIO_MMIO_VERSION:             u32 = 0x004;
-const VIRTIO_MMIO_DEVICE_ID:           u32 = 0x008;
+const VIRTIO_MMIO_MAGIC_VALUE: u32 = 0x000;
+const VIRTIO_MMIO_VERSION: u32 = 0x004;
+const VIRTIO_MMIO_DEVICE_ID: u32 = 0x008;
 #[allow(dead_code)]
-const VIRTIO_MMIO_VENDOR_ID:           u32 = 0x00c;
-const VIRTIO_MMIO_DEVICE_FEATURES:     u32 = 0x010;
+const VIRTIO_MMIO_VENDOR_ID: u32 = 0x00c;
+const VIRTIO_MMIO_DEVICE_FEATURES: u32 = 0x010;
 const VIRTIO_MMIO_DEVICE_FEATURES_SEL: u32 = 0x014;
-const VIRTIO_MMIO_DRIVER_FEATURES:     u32 = 0x020;
+const VIRTIO_MMIO_DRIVER_FEATURES: u32 = 0x020;
 const VIRTIO_MMIO_DRIVER_FEATURES_SEL: u32 = 0x024;
-const VIRTIO_MMIO_STATUS:              u32 = 0x070;
+const VIRTIO_MMIO_STATUS: u32 = 0x070;
 /// Device-specific config region; for VirtIO-net see §5.1.4.
-const VIRTIO_MMIO_CONFIG:              u32 = 0x100;
+const VIRTIO_MMIO_CONFIG: u32 = 0x100;
 
 // ── VirtIO magic + protocol constants (VirtIO 1.2 §4.2.2.1) ──────
 
@@ -168,13 +166,13 @@ const VIRTIO_DEVICE_ID_NET: u32 = 1;
 // ── VirtIO Status bits (VirtIO 1.2 §2.1) ─────────────────────────
 
 const VIRTIO_STATUS_ACKNOWLEDGE: u32 = 0x01;
-const VIRTIO_STATUS_DRIVER:      u32 = 0x02;
-const VIRTIO_STATUS_DRIVER_OK:   u32 = 0x04;
+const VIRTIO_STATUS_DRIVER: u32 = 0x02;
+const VIRTIO_STATUS_DRIVER_OK: u32 = 0x04;
 const VIRTIO_STATUS_FEATURES_OK: u32 = 0x08;
 #[allow(dead_code)]
 const VIRTIO_STATUS_NEEDS_RESET: u32 = 0x40;
 #[allow(dead_code)]
-const VIRTIO_STATUS_FAILED:      u32 = 0x80;
+const VIRTIO_STATUS_FAILED: u32 = 0x80;
 
 // ── VirtIO feature bits we negotiate ─────────────────────────────
 //
@@ -326,17 +324,10 @@ static mut TX_USED: UsedRing = UsedRing {
 /// (which writes the VirtIO MMIO queue-config registers).
 ///
 /// `queue_idx`: 0 = rx, 1 = tx (VirtIO-net §5.1.6.1 convention).
-fn attach_queue(
-    queue_idx: u32,
-    desc_off: u32,
-    avail_off: u32,
-    used_off: u32,
-) -> Result<(), ()> {
+fn attach_queue(queue_idx: u32, desc_off: u32, avail_off: u32, used_off: u32) -> Result<(), ()> {
     // SAFETY: extern host-fn call. Kernel does cap check + bounds
     // check on the offsets, then writes VirtIO MMIO queue regs.
-    let r = unsafe {
-        wari_nic_attach_queue(queue_idx, desc_off, avail_off, used_off, QUEUE_SIZE)
-    };
+    let r = unsafe { wari_nic_attach_queue(queue_idx, desc_off, avail_off, used_off, QUEUE_SIZE) };
     if r == 0 {
         Ok(())
     } else {
@@ -372,7 +363,9 @@ pub struct PacketBuffer {
 }
 
 static mut RX_BUFS: [PacketBuffer; RX_BUF_COUNT] = [const {
-    PacketBuffer { bytes: [0; ETH_FRAME_MAX] }
+    PacketBuffer {
+        bytes: [0; ETH_FRAME_MAX],
+    }
 }; RX_BUF_COUNT];
 /// Convenience scratch for callers that don't supply their own
 /// buffer. Currently unused by the driver itself; PR Net-5's
@@ -380,7 +373,9 @@ static mut RX_BUFS: [PacketBuffer; RX_BUF_COUNT] = [const {
 /// frames here and calls `tx_send(addr_of_mut!(TX_BUF) as u32,
 /// len)`. Kept exported so it survives optimization.
 #[no_mangle]
-pub static mut TX_BUF: PacketBuffer = PacketBuffer { bytes: [0; ETH_FRAME_MAX] };
+pub static mut TX_BUF: PacketBuffer = PacketBuffer {
+    bytes: [0; ETH_FRAME_MAX],
+};
 
 // PR Phase-1c-6e — VF2 GMAC0 DMA descriptor rings.
 // 16 descriptors × 16 bytes = 256 B each. repr(C, align(16))
@@ -515,19 +510,19 @@ pub static mut VF2_RX_BUFS: VF2RxBuffers = VF2RxBuffers {
 #[cfg(feature = "vf2")]
 #[no_mangle]
 pub static VF2_FIRST_PKT: [u8; 64] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,             // dst broadcast
-    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84,             // src VF2 MAC0
-    0x08, 0x06,                                     // ethertype ARP
-    0x00, 0x01,                                     // HTYPE Ethernet
-    0x08, 0x00,                                     // PTYPE IPv4
-    0x06, 0x04,                                     // HLEN/PLEN
-    0x00, 0x01,                                     // OPER request
-    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84,             // SHA
-    0xC0, 0xA8, 0x7A, 0x0A,                         // SPA 192.168.122.10
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,             // THA
-    0xC0, 0xA8, 0x7A, 0x01,                         // TPA 192.168.122.1
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // dst broadcast
+    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84, // src VF2 MAC0
+    0x08, 0x06, // ethertype ARP
+    0x00, 0x01, // HTYPE Ethernet
+    0x08, 0x00, // PTYPE IPv4
+    0x06, 0x04, // HLEN/PLEN
+    0x00, 0x01, // OPER request
+    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84, // SHA
+    0xC0, 0xA8, 0x7A, 0x0A, // SPA 192.168.122.10
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // THA
+    0xC0, 0xA8, 0x7A, 0x01, // TPA 192.168.122.1
     // pad to 64
-    0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 /// Driver-side ring index tracking. Phase-1b keeps it simple — no
@@ -600,10 +595,10 @@ fn write_u64_le(off: u32, val: u64) {
 ///   struct virtq_desc { le64 addr; le32 len; le16 flags; le16 next; }
 fn write_desc(desc_off: u32, idx: u16, buf_pa: u64, len: u32, flags: u16, next: u16) {
     let off = desc_off + (idx as u32) * 16;
-    write_u64_le(off, buf_pa);          // addr
-    write_u32_le(off + 8, len);         // len
-    write_u16_le(off + 12, flags);      // flags
-    write_u16_le(off + 14, next);       // next
+    write_u64_le(off, buf_pa); // addr
+    write_u32_le(off + 8, len); // len
+    write_u16_le(off + 12, flags); // flags
+    write_u16_le(off + 14, next); // next
 }
 
 /// Populate the rx queue: build 8 descriptors, each pointing at a
@@ -631,8 +626,7 @@ fn populate_rx() -> Result<(), ()> {
     // SAFETY: addr_of_mut! over indexed static doesn't deref, but
     // Rust's E0133 still flags the index expression. Single-thread
     // driver, no data race.
-    let rx_buf0_off =
-        unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
+    let rx_buf0_off = unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
 
     // Build 8 descriptors, one per rx buffer.
     for i in 0..RX_BUF_COUNT {
@@ -668,7 +662,11 @@ fn populate_rx() -> Result<(), ()> {
 
     // Kick the device. SAFETY: extern host-fn, kernel cap-checks.
     let r = unsafe { wari_nic_queue_notify(0) };
-    if r == 0 { Ok(()) } else { Err(()) }
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 // ── Exported RX/TX helpers (consumed by PR Net-5 / smoltcp) ──────
@@ -761,8 +759,7 @@ pub fn driver_rx_pop() -> u64 {
     }
     // SAFETY: addr_of_mut! doesn't deref; the index expression
     // requires unsafe. Single-thread driver, no race.
-    let buf_off =
-        unsafe { core::ptr::addr_of_mut!(RX_BUFS[desc_id as usize]) } as u32;
+    let buf_off = unsafe { core::ptr::addr_of_mut!(RX_BUFS[desc_id as usize]) } as u32;
     (buf_off as u64) | ((used_len as u64) << 32)
 }
 
@@ -784,11 +781,8 @@ pub fn driver_rx_recycle(desc_idx: u32) -> i32 {
     // SAFETY: addr_of_mut! over indexed static doesn't deref, but
     // Rust's E0133 still flags the index expression. Single-thread
     // driver, no data race.
-    let rx_buf0_off =
-        unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
-    let buf_pa = lin_base
-        + (rx_buf0_off as u64)
-        + (desc_idx as u64) * (ETH_FRAME_MAX as u64);
+    let rx_buf0_off = unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
+    let buf_pa = lin_base + (rx_buf0_off as u64) + (desc_idx as u64) * (ETH_FRAME_MAX as u64);
 
     // Rewrite the descriptor (idempotent).
     write_desc(
@@ -889,12 +883,11 @@ mod nic_iface {
     /// which is just as opaque and doesn't depend on smoltcp's
     /// internal layout staying repr(transparent) across patch
     /// releases.
-    static mut SOCKET_HANDLE_FOR_BUF: [Option<smoltcp::iface::SocketHandle>;
-        SOCKET_BACKING_LEN] = [None; SOCKET_BACKING_LEN];
+    static mut SOCKET_HANDLE_FOR_BUF: [Option<smoltcp::iface::SocketHandle>; SOCKET_BACKING_LEN] =
+        [None; SOCKET_BACKING_LEN];
     /// Per-buffer-slot bound port (set by socket_bind, consumed
     /// by socket_listen). 0 = unbound.
-    static mut SOCKET_BOUND_PORT: [u16; SOCKET_BACKING_LEN] =
-        [0u16; SOCKET_BACKING_LEN];
+    static mut SOCKET_BOUND_PORT: [u16; SOCKET_BACKING_LEN] = [0u16; SOCKET_BACKING_LEN];
 
     /// Monotonic counter used as smoltcp timestamp. Incremented on
     /// every poll() call so TCP retry timers advance even without a
@@ -919,12 +912,8 @@ mod nic_iface {
                 Some(i) => i,
                 None => return Err(-3), // E_NOMEM
             };
-            let rx_buf = tcp::SocketBuffer::new(
-                &mut SOCKET_RX_BUFS[slot][..],
-            );
-            let tx_buf = tcp::SocketBuffer::new(
-                &mut SOCKET_TX_BUFS[slot][..],
-            );
+            let rx_buf = tcp::SocketBuffer::new(&mut SOCKET_RX_BUFS[slot][..]);
+            let tx_buf = tcp::SocketBuffer::new(&mut SOCKET_TX_BUFS[slot][..]);
             let socket = tcp::Socket::new(rx_buf, tx_buf);
             let handle = sockets.add(socket);
             SOCKET_HANDLE_FOR_BUF[slot] = Some(handle);
@@ -1147,7 +1136,9 @@ mod nic_iface {
         let mut iface = unsafe {
             Interface::new(
                 config,
-                addr_of_mut!(DEVICE).as_mut().expect("DEVICE static is non-null"),
+                addr_of_mut!(DEVICE)
+                    .as_mut()
+                    .expect("DEVICE static is non-null"),
                 Instant::from_millis(0),
             )
         };
@@ -1233,13 +1224,8 @@ pub fn driver_poll(timestamp_ms: u64) -> i32 {
 pub mod phy {
     use core::sync::atomic::{compiler_fence, Ordering};
 
-    use super::{
-        rx_pop, rx_recycle, tx_send, ETH_FRAME_MAX, RX_BUFS, TX_BUF,
-        VIRTIO_NET_HDR_LEN,
-    };
-    use smoltcp::phy::{
-        Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken,
-    };
+    use super::{rx_pop, rx_recycle, tx_send, ETH_FRAME_MAX, RX_BUFS, TX_BUF, VIRTIO_NET_HDR_LEN};
+    use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
     use smoltcp::time::Instant;
 
     /// Zero-sized Device handle. All state lives in `super`'s
@@ -1282,10 +1268,7 @@ pub mod phy {
             caps
         }
 
-        fn receive(
-            &mut self,
-            _timestamp: Instant,
-        ) -> Option<(NicRxToken, NicTxToken)> {
+        fn receive(&mut self, _timestamp: Instant) -> Option<(NicRxToken, NicTxToken)> {
             let packed = rx_pop();
             if packed == 0 {
                 return None;
@@ -1298,8 +1281,7 @@ pub mod phy {
             // sizeof(buf) gives the index. SAFETY: addr_of_mut!
             // over indexed-into static needs the unsafe gate even
             // though it doesn't deref.
-            let rx_buf0_off =
-                unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
+            let rx_buf0_off = unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
             let desc_idx = (buf_off - rx_buf0_off) / (ETH_FRAME_MAX as u32);
 
             let rx = NicRxToken {
@@ -1335,17 +1317,13 @@ pub mod phy {
             // Skip the 12-byte VirtIO-net header to expose the raw
             // Ethernet frame to smoltcp.
             let frame_off = self.buf_off + VIRTIO_NET_HDR_LEN as u32;
-            let frame_len = self
-                .used_len
-                .saturating_sub(VIRTIO_NET_HDR_LEN as u32) as usize;
+            let frame_len = self.used_len.saturating_sub(VIRTIO_NET_HDR_LEN as u32) as usize;
             // SAFETY: buf_off is the offset of an entry of RX_BUFS
             // (each ETH_FRAME_MAX bytes long); used_len ≤
             // ETH_FRAME_MAX (device wrote ≤ that many bytes,
             // checked at attach time). Single-threaded. smoltcp
             // 0.11 takes &mut [u8] to allow in-place processing.
-            let slice = unsafe {
-                core::slice::from_raw_parts_mut(frame_off as *mut u8, frame_len)
-            };
+            let slice = unsafe { core::slice::from_raw_parts_mut(frame_off as *mut u8, frame_len) };
             let r = f(slice);
 
             // After the closure runs, recycle the buffer back to
@@ -1368,24 +1346,17 @@ pub mod phy {
         {
             // Frame goes after the 12-byte VirtIO-net header.
             let total_len = len + VIRTIO_NET_HDR_LEN;
-            let tx_buf_off =
-                core::ptr::addr_of_mut!(TX_BUF) as u32;
+            let tx_buf_off = core::ptr::addr_of_mut!(TX_BUF) as u32;
             let frame_off = tx_buf_off + VIRTIO_NET_HDR_LEN as u32;
             // SAFETY: TX_BUF is ETH_FRAME_MAX bytes; total_len ≤
             // SMOLTCP_MTU + 12 < ETH_FRAME_MAX. Single-threaded.
-            let slice = unsafe {
-                core::slice::from_raw_parts_mut(frame_off as *mut u8, len)
-            };
+            let slice = unsafe { core::slice::from_raw_parts_mut(frame_off as *mut u8, len) };
 
             // Zero the VirtIO-net header (no protocol features
             // negotiated → 12 zero bytes).
             // SAFETY: TX_BUF is owned, header is in-bounds.
             unsafe {
-                core::ptr::write_bytes(
-                    tx_buf_off as *mut u8,
-                    0,
-                    VIRTIO_NET_HDR_LEN,
-                );
+                core::ptr::write_bytes(tx_buf_off as *mut u8, 0, VIRTIO_NET_HDR_LEN);
             }
 
             let r = f(slice);
@@ -1410,8 +1381,7 @@ pub mod phy {
 #[cfg(feature = "vf2")]
 pub mod vf2_phy {
     use super::{
-        vf2_state, wari_net_mmio_write32, VF2_RX_BUFS, VF2_RX_RING,
-        VF2_TX_BUFS, VF2_TX_RING,
+        vf2_state, wari_net_mmio_write32, VF2_RX_BUFS, VF2_RX_RING, VF2_TX_BUFS, VF2_TX_RING,
     };
     use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
     use smoltcp::time::Instant;
@@ -1451,8 +1421,8 @@ pub mod vf2_phy {
 
     /// DWMAC4 TDES3 — OWN | LD | FD set with packet length in low 15.
     const TDES3_OWN: u32 = 0x8000_0000;
-    const TDES3_LD:  u32 = 0x2000_0000;
-    const TDES3_FD:  u32 = 0x1000_0000;
+    const TDES3_LD: u32 = 0x2000_0000;
+    const TDES3_FD: u32 = 0x1000_0000;
 
     impl Device for NicDevice {
         type RxToken<'a> = Vf2NicRxToken;
@@ -1467,10 +1437,7 @@ pub mod vf2_phy {
             caps
         }
 
-        fn receive(
-            &mut self,
-            _ts: Instant,
-        ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        fn receive(&mut self, _ts: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
             // Build-118: change-detection dPrb + cumulative counter
             // dump (see docs/diagnostic-tags.md). dPrb fires only
             // when PREV_YIELDED's value flips — stuck-at-MAX bugs
@@ -1536,8 +1503,7 @@ pub mod vf2_phy {
                         // 1 set). See docs/diagnostic-tags.md.
                         let val = ((i as u32) << 24) | (rdes3 & 0x00FF_FFFF);
                         let _ = super::wari_drv_trace_u32(0x7258_4672, val);
-                        vf2_state::C_FRAMES_FOUND =
-                            vf2_state::C_FRAMES_FOUND.wrapping_add(1);
+                        vf2_state::C_FRAMES_FOUND = vf2_state::C_FRAMES_FOUND.wrapping_add(1);
                         // Build-129 net-diag: one-shot deep dump at the
                         // critical 0→1 frame-found transition. Internal
                         // guard makes subsequent calls no-ops.
@@ -1548,7 +1514,9 @@ pub mod vf2_phy {
                         vf2_state::PREV_YIELDED = i;
                         return Some((
                             Vf2NicRxToken { idx: i, len },
-                            Vf2NicTxToken { idx: vf2_state::TX_NEXT },
+                            Vf2NicTxToken {
+                                idx: vf2_state::TX_NEXT,
+                            },
                         ));
                     }
                 }
@@ -1596,22 +1564,21 @@ pub mod vf2_phy {
             // operators can see EACH rearm in the trace if they
             // need to.
             vf2_state::C_REARM_CALLS = vf2_state::C_REARM_CALLS.wrapping_add(1);
-            let bp: u64 = vf2_state::LIN_BASE
-                + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
+            let bp: u64 =
+                vf2_state::LIN_BASE + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
             let d = &mut VF2_RX_RING.descs[idx];
             d[0] = bp as u32;
             d[1] = (bp >> 32) as u32;
             d[2] = 0;
             d[3] = 0xC100_0000; // OWN | IOC | BUF1V
-            // Re-kick the RX_TAIL doorbell so DWMAC4 walks the
-            // descriptor we just rearmed. The host-fn call crosses
-            // the wasm→native boundary and naturally serializes,
-            // so no explicit fence is needed (and inline asm wouldn't
-            // compile to wasm anyway — that's how builds 107..114
-            // silently shipped a stale driver).
+                                // Re-kick the RX_TAIL doorbell so DWMAC4 walks the
+                                // descriptor we just rearmed. The host-fn call crosses
+                                // the wasm→native boundary and naturally serializes,
+                                // so no explicit fence is needed (and inline asm wouldn't
+                                // compile to wasm anyway — that's how builds 107..114
+                                // silently shipped a stale driver).
             let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
-            let rx_tail_pa: u32 =
-                (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
+            let rx_tail_pa: u32 = (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
             let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
             // tag = 'rXTl' — RX tail doorbell write.
             let _ = super::wari_drv_trace_u32(0x7258_546C, rx_tail_pa);
@@ -1695,8 +1662,8 @@ pub mod vf2_phy {
             // Publish: descriptor + bump tail.
             // SAFETY: same scoping invariants.
             unsafe {
-                let bp: u64 = vf2_state::LIN_BASE
-                    + (core::ptr::addr_of!(VF2_TX_BUFS.bufs[i]) as u32) as u64;
+                let bp: u64 =
+                    vf2_state::LIN_BASE + (core::ptr::addr_of!(VF2_TX_BUFS.bufs[i]) as u32) as u64;
                 let d = &mut VF2_TX_RING.descs[i];
                 d[0] = bp as u32;
                 d[1] = (bp >> 32) as u32;
@@ -1710,9 +1677,7 @@ pub mod vf2_phy {
                 // Tail = address of next descriptor (DWMAC processes
                 // descriptors while CURR < TAIL). Store fence first
                 // so DMA sees our descriptor write before the kick.
-                core::sync::atomic::compiler_fence(
-                    core::sync::atomic::Ordering::SeqCst,
-                );
+                core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
                 let tail_pa: u32 = (vf2_state::LIN_BASE
                     + (core::ptr::addr_of!(VF2_TX_RING.descs[next]) as u32) as u64)
                     as u32;
@@ -1816,9 +1781,7 @@ fn init_virtio() -> Result<[u8; 6], ()> {
     // §3.1.1 step 5 — set FEATURES_OK to lock the negotiation.
     nic_write32(
         VIRTIO_MMIO_STATUS,
-        VIRTIO_STATUS_ACKNOWLEDGE
-            | VIRTIO_STATUS_DRIVER
-            | VIRTIO_STATUS_FEATURES_OK,
+        VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK,
     )?;
 
     // §3.1.1 step 6 — verify FEATURES_OK is still set. If the
@@ -1911,30 +1874,22 @@ fn init_virtio() -> Result<[u8; 6], ()> {
 #[cfg(feature = "vf2")]
 fn mdio_read_phy(gmac_base: u32, phy_addr: u32, reg: u32) -> u32 {
     const MAC_MDIO_ADDRESS_OFFSET: u32 = 0x200;
-    const MAC_MDIO_DATA_OFFSET:    u32 = 0x204;
-    const GB: u32                      = 1 << 0;
-    const GOC_READ: u32                = 0b11 << 2; // Clause-22 read
-    const CR_CSR_DIV_26: u32           = 4 << 8;    // CSR/26 — safe default
+    const MAC_MDIO_DATA_OFFSET: u32 = 0x204;
+    const GB: u32 = 1 << 0;
+    const GOC_READ: u32 = 0b11 << 2; // Clause-22 read
+    const CR_CSR_DIV_26: u32 = 4 << 8; // CSR/26 — safe default
 
-    let cmd = GB
-        | GOC_READ
-        | CR_CSR_DIV_26
-        | ((reg & 0x1F) << 16)
-        | ((phy_addr & 0x1F) << 21);
+    let cmd = GB | GOC_READ | CR_CSR_DIV_26 | ((reg & 0x1F) << 16) | ((phy_addr & 0x1F) << 21);
 
     // SAFETY: extern host fn into the kernel's net_mmio surface.
-    let _ = unsafe {
-        wari_net_mmio_write32(gmac_base + MAC_MDIO_ADDRESS_OFFSET, cmd)
-    };
+    let _ = unsafe { wari_net_mmio_write32(gmac_base + MAC_MDIO_ADDRESS_OFFSET, cmd) };
 
     // Poll busy bit. PHY responses settle in ~µs; cap iterations
     // generously so a stuck-busy doesn't hang the boot.
     let mut tries = 0u32;
     loop {
         // SAFETY: same.
-        let s = unsafe {
-            wari_net_mmio_read32(gmac_base + MAC_MDIO_ADDRESS_OFFSET)
-        };
+        let s = unsafe { wari_net_mmio_read32(gmac_base + MAC_MDIO_ADDRESS_OFFSET) };
         if s & GB == 0 {
             break;
         }
@@ -1944,9 +1899,7 @@ fn mdio_read_phy(gmac_base: u32, phy_addr: u32, reg: u32) -> u32 {
         }
     }
     // SAFETY: same.
-    let data = unsafe {
-        wari_net_mmio_read32(gmac_base + MAC_MDIO_DATA_OFFSET)
-    };
+    let data = unsafe { wari_net_mmio_read32(gmac_base + MAC_MDIO_DATA_OFFSET) };
     data & 0xFFFF
 }
 
@@ -1958,32 +1911,22 @@ fn mdio_read_phy(gmac_base: u32, phy_addr: u32, reg: u32) -> u32 {
 #[cfg(feature = "vf2")]
 fn mdio_write_phy(gmac_base: u32, phy_addr: u32, reg: u32, value: u16) -> i32 {
     const MAC_MDIO_ADDRESS_OFFSET: u32 = 0x200;
-    const MAC_MDIO_DATA_OFFSET:    u32 = 0x204;
-    const GB: u32                      = 1 << 0;
-    const GOC_WRITE: u32               = 0b01 << 2; // Clause-22 write
-    const CR_CSR_DIV_26: u32           = 4 << 8;
+    const MAC_MDIO_DATA_OFFSET: u32 = 0x204;
+    const GB: u32 = 1 << 0;
+    const GOC_WRITE: u32 = 0b01 << 2; // Clause-22 write
+    const CR_CSR_DIV_26: u32 = 4 << 8;
 
     // SAFETY: extern host fn.
-    let _ = unsafe {
-        wari_net_mmio_write32(gmac_base + MAC_MDIO_DATA_OFFSET, value as u32)
-    };
+    let _ = unsafe { wari_net_mmio_write32(gmac_base + MAC_MDIO_DATA_OFFSET, value as u32) };
 
-    let cmd = GB
-        | GOC_WRITE
-        | CR_CSR_DIV_26
-        | ((reg & 0x1F) << 16)
-        | ((phy_addr & 0x1F) << 21);
+    let cmd = GB | GOC_WRITE | CR_CSR_DIV_26 | ((reg & 0x1F) << 16) | ((phy_addr & 0x1F) << 21);
     // SAFETY: same.
-    let _ = unsafe {
-        wari_net_mmio_write32(gmac_base + MAC_MDIO_ADDRESS_OFFSET, cmd)
-    };
+    let _ = unsafe { wari_net_mmio_write32(gmac_base + MAC_MDIO_ADDRESS_OFFSET, cmd) };
 
     let mut tries = 0u32;
     loop {
         // SAFETY: same.
-        let s = unsafe {
-            wari_net_mmio_read32(gmac_base + MAC_MDIO_ADDRESS_OFFSET)
-        };
+        let s = unsafe { wari_net_mmio_read32(gmac_base + MAC_MDIO_ADDRESS_OFFSET) };
         if s & GB == 0 {
             return 0;
         }
@@ -2068,22 +2011,17 @@ pub fn driver_start() {
         #[cfg(not(feature = "gmac1"))]
         {
             const AONCRG_BASE: u32 = 0x1700_0000;
-            const AONRST_OFF:  u32 = 0x38;
+            const AONRST_OFF: u32 = 0x38;
             const GMAC0_AXI_AHB_RST_MASK: u32 = 0x3; // bits 0 and 1
 
             // Step 1: enable AHB clock gate.
-            let _ = unsafe {
-                wari_net_mmio_write32(AONCRG_BASE + 0x08, ENABLE_BIT)
-            };
+            let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE + 0x08, ENABLE_BIT) };
             // Step 2: enable AXI clock gate.
-            let _ = unsafe {
-                wari_net_mmio_write32(AONCRG_BASE + 0x0C, ENABLE_BIT)
-            };
+            let _ = unsafe { wari_net_mmio_write32(AONCRG_BASE + 0x0C, ENABLE_BIT) };
             // Step 3: deassert GMAC0 reset (clear bits 0+1).
             let rst_cur = unsafe { wari_net_mmio_read32(AONCRG_BASE + AONRST_OFF) };
             let _ = unsafe {
-                wari_net_mmio_write32(AONCRG_BASE + AONRST_OFF,
-                    rst_cur & !GMAC0_AXI_AHB_RST_MASK)
+                wari_net_mmio_write32(AONCRG_BASE + AONRST_OFF, rst_cur & !GMAC0_AXI_AHB_RST_MASK)
             };
 
             // Verify each write landed. Tags spell 'Aon0' / 'Aon1' /
@@ -2102,24 +2040,19 @@ pub fn driver_start() {
         #[cfg(feature = "gmac1")]
         {
             const SYSCRG_BASE: u32 = 0x1302_0000;
-            const SYSRST_OFF:  u32 = 0x300;
+            const SYSRST_OFF: u32 = 0x300;
             const GMAC1_RST_MASK: u32 = 0xC; // bits 2+3 = axi_rst, ahb_rst
 
             // Step 1: enable GMAC1 AHB clock gate.
-            let _ = unsafe {
-                wari_net_mmio_write32(SYSCRG_BASE + 0x184, ENABLE_BIT)
-            };
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x184, ENABLE_BIT) };
             // Step 2: enable GMAC1 AXI clock gate.
-            let _ = unsafe {
-                wari_net_mmio_write32(SYSCRG_BASE + 0x188, ENABLE_BIT)
-            };
+            let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + 0x188, ENABLE_BIT) };
             // Step 3: deassert GMAC1 resets — RMW only. A blind write
             // here would reset every device whose enum is in [64..96]
             // (DMA / security / USB / PCIe).
             let rst_cur = unsafe { wari_net_mmio_read32(SYSCRG_BASE + SYSRST_OFF) };
             let _ = unsafe {
-                wari_net_mmio_write32(SYSCRG_BASE + SYSRST_OFF,
-                    rst_cur & !GMAC1_RST_MASK)
+                wari_net_mmio_write32(SYSCRG_BASE + SYSRST_OFF, rst_cur & !GMAC1_RST_MASK)
             };
 
             // Verify each write landed. Tags 'G1RG' / 'G1RA' / 'G1Rs'
@@ -2151,9 +2084,7 @@ pub fn driver_start() {
             // tag 'pIeP' (PI early Pre)
             let _ = unsafe { wari_drv_log_u32(0x7049_4570, pi_pre) };
             let pi_new = (pi_pre & !0x1C) | 0x04;
-            let _ = unsafe {
-                wari_net_mmio_write32(SYS_SYSCON_BASE + PHY_INTF_OFFSET, pi_new)
-            };
+            let _ = unsafe { wari_net_mmio_write32(SYS_SYSCON_BASE + PHY_INTF_OFFSET, pi_new) };
             let pi_post = unsafe { wari_net_mmio_read32(SYS_SYSCON_BASE + PHY_INTF_OFFSET) };
             // tag 'pIeN' (PI early New)
             let _ = unsafe { wari_drv_log_u32(0x7049_454E, pi_post) };
@@ -2161,9 +2092,7 @@ pub fn driver_start() {
 
         // Re-read GMAC version — this is the line that matters.
         const GMAC_VERSION_OFFSET: u32 = 0x110;
-        let v_after = unsafe {
-            wari_net_mmio_read32(plat::NIC_BASE + GMAC_VERSION_OFFSET)
-        };
+        let v_after = unsafe { wari_net_mmio_read32(plat::NIC_BASE + GMAC_VERSION_OFFSET) };
         let _ = unsafe { wari_drv_log_u32(0x476D_6143, v_after) }; // 'GmaC'
 
         // Phase-1c-4 — read PHY ID via the GMAC's MDIO subblock.
@@ -2235,17 +2164,21 @@ pub fn driver_start() {
         // Build 130 swaps from 0x0800 (the mainline v1.3b value our
         // builds 124-129 were guessing with) to 0x0850 (BSP-confirmed,
         // for THIS board revision).
-        const YTPHY_PAGE_SELECT:        u32 = 0x1E;
-        const YTPHY_PAGE_DATA:          u32 = 0x1F;
+        const YTPHY_PAGE_SELECT: u32 = 0x1E;
+        const YTPHY_PAGE_DATA: u32 = 0x1F;
         const YT8521_RGMII_CONFIG1_REG: u16 = 0xA003;
         #[cfg(not(feature = "gmac1"))]
-        const YT8531_RC1R_VF2_VALUE:    u16 = 0x680A;
+        const YT8531_RC1R_VF2_VALUE: u16 = 0x680A;
         #[cfg(feature = "gmac1")]
-        const YT8531_RC1R_VF2_VALUE:    u16 = 0x0850;
+        const YT8531_RC1R_VF2_VALUE: u16 = 0x0850;
 
         // Pre-read so we know U-Boot's starting value.
-        let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
-                               YT8521_RGMII_CONFIG1_REG);
+        let _ = mdio_write_phy(
+            plat::NIC_BASE,
+            plat::PHY_ADDR,
+            YTPHY_PAGE_SELECT,
+            YT8521_RGMII_CONFIG1_REG,
+        );
         let rc1r_pre = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3152, rc1r_pre) }; // 'RC1R'
 
@@ -2275,28 +2208,32 @@ pub fn driver_start() {
         // GMAC0 path unchanged (single 0x680A write, proven working).
         #[cfg(not(feature = "gmac1"))]
         {
-            let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
-                                   YT8521_RGMII_CONFIG1_REG);
-            let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA,
-                                   YT8531_RC1R_VF2_VALUE);
+            let _ = mdio_write_phy(
+                plat::NIC_BASE,
+                plat::PHY_ADDR,
+                YTPHY_PAGE_SELECT,
+                YT8521_RGMII_CONFIG1_REG,
+            );
+            let _ = mdio_write_phy(
+                plat::NIC_BASE,
+                plat::PHY_ADDR,
+                YTPHY_PAGE_DATA,
+                YT8531_RC1R_VF2_VALUE,
+            );
         }
         #[cfg(feature = "gmac1")]
         {
             const YT8521_CHIP_CONFIG_REG: u16 = 0xA001;
-            const YT8531_PAD_DRIVE_REG:   u16 = 0xA010;
+            const YT8531_PAD_DRIVE_REG: u16 = 0xA010;
 
             // ext_rmw: page-select, read, modify, page-select, write.
             // Returns the pre-modify value for logging.
             let ext_rmw = |reg: u16, clr: u32, set: u32| -> u32 {
-                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR,
-                                       YTPHY_PAGE_SELECT, reg);
-                let old = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR,
-                                        YTPHY_PAGE_DATA);
+                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT, reg);
+                let old = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
                 let new = (old & !clr) | set;
-                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR,
-                                       YTPHY_PAGE_SELECT, reg);
-                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR,
-                                       YTPHY_PAGE_DATA, new as u16);
+                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT, reg);
+                let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA, new as u16);
                 old
             };
 
@@ -2304,27 +2241,32 @@ pub fn driver_start() {
             // rx delay lives in the low half of the delay LUT; bit 8
             // selects the +1.9 ns high half, which must be OFF.
             let cc_pre = ext_rmw(YT8521_CHIP_CONFIG_REG, 0x0000_0100, 0);
-            let _ = unsafe { wari_drv_log_u32(0x4343_3072, cc_pre) };  // 'CC0r'
+            let _ = unsafe { wari_drv_log_u32(0x4343_3072, cc_pre) }; // 'CC0r'
 
             // Step 2 — 0xA010: pad drive strength. rxc_ds = 6 (bits
             // 15:13), rxd_ds_hi = 0 (bit 12), rxd_ds_low = 3 (bits
             // 5:4). Mask 0xF030, value 0xC030. Per yt8531_set_ds
             // with the BSP LDO table (3970 uA -> 6, 2910 uA -> 3).
-            let pd_pre = ext_rmw(YT8531_PAD_DRIVE_REG,
-                                 0x0000_F030, 0x0000_C030);
-            let _ = unsafe { wari_drv_log_u32(0x5044_5372, pd_pre) };  // 'PDSr'
+            let pd_pre = ext_rmw(YT8531_PAD_DRIVE_REG, 0x0000_F030, 0x0000_C030);
+            let _ = unsafe { wari_drv_log_u32(0x5044_5372, pd_pre) }; // 'PDSr'
 
             // Step 3 — 0xA003: the RGMII delays. RMW only the delay
             // nibbles (13:10, 7:4, 3:0), preserving bits 15:14 and
             // 9:8 whatever the strap set them to.
-            let _ = ext_rmw(YT8521_RGMII_CONFIG1_REG,
-                            0x0000_3CFF,
-                            YT8531_RC1R_VF2_VALUE as u32);
+            let _ = ext_rmw(
+                YT8521_RGMII_CONFIG1_REG,
+                0x0000_3CFF,
+                YT8531_RC1R_VF2_VALUE as u32,
+            );
         }
 
         // Verify-read.
-        let _ = mdio_write_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_SELECT,
-                               YT8521_RGMII_CONFIG1_REG);
+        let _ = mdio_write_phy(
+            plat::NIC_BASE,
+            plat::PHY_ADDR,
+            YTPHY_PAGE_SELECT,
+            YT8521_RGMII_CONFIG1_REG,
+        );
         let rc1r_post = mdio_read_phy(plat::NIC_BASE, plat::PHY_ADDR, YTPHY_PAGE_DATA);
         let _ = unsafe { wari_drv_log_u32(0x5243_3170, rc1r_post) }; // 'RC1p'
 
@@ -2368,13 +2310,12 @@ pub fn driver_start() {
         // the link. Restarting AN drops the link for ~100 ms.
         // Only kick AN if either link is down or AN hasn't
         // completed yet.
-        const BS_LINK_UP:    u32 = 1 << 2;
-        const BS_AN_COMPLETE:u32 = 1 << 5;
+        const BS_LINK_UP: u32 = 1 << 2;
+        const BS_AN_COMPLETE: u32 = 1 << 5;
         // Build 121: if we changed 0xA003 (RGMII delays), force a
         // fresh AN cycle — the new delays only latch at link-up.
-        let already_linked = !needs_relink
-                          && (bs_pre & BS_LINK_UP) != 0
-                          && (bs_pre & BS_AN_COMPLETE) != 0;
+        let already_linked =
+            !needs_relink && (bs_pre & BS_LINK_UP) != 0 && (bs_pre & BS_AN_COMPLETE) != 0;
         if already_linked {
             // Tag 0x12 retains its position in the trace so the
             // boot-line layout doesn't shift; value 0xA17EAD11 =
@@ -2426,21 +2367,21 @@ pub fn driver_start() {
         //   - DMA bus mode = current DMA engine state
         // We need these numbers to size descriptor rings in
         // Phase-1c-6 without guessing.
-        const MAC_CONFIG_OFFSET:      u32 = 0x000;
+        const MAC_CONFIG_OFFSET: u32 = 0x000;
         const MAC_HW_FEATURE0_OFFSET: u32 = 0x11C;
         const MAC_HW_FEATURE1_OFFSET: u32 = 0x120;
         const MAC_HW_FEATURE2_OFFSET: u32 = 0x124;
         const MAC_HW_FEATURE3_OFFSET: u32 = 0x128;
-        const DMA_BUS_MODE_OFFSET:    u32 = 0x1000;
-        const DMA_SYS_BUS_MODE_OFF:   u32 = 0x1004;
+        const DMA_BUS_MODE_OFFSET: u32 = 0x1000;
+        const DMA_SYS_BUS_MODE_OFF: u32 = 0x1004;
         for (off, tag_low) in [
-            (MAC_CONFIG_OFFSET,      0x00u32),
+            (MAC_CONFIG_OFFSET, 0x00u32),
             (MAC_HW_FEATURE0_OFFSET, 0xF0),
             (MAC_HW_FEATURE1_OFFSET, 0xF1),
             (MAC_HW_FEATURE2_OFFSET, 0xF2),
             (MAC_HW_FEATURE3_OFFSET, 0xF3),
-            (DMA_BUS_MODE_OFFSET,    0xD0),
-            (DMA_SYS_BUS_MODE_OFF,   0xD1),
+            (DMA_BUS_MODE_OFFSET, 0xD0),
+            (DMA_SYS_BUS_MODE_OFF, 0xD1),
         ] {
             // SAFETY: extern host fn; addr is inside GMAC0 window
             // mapped + cap-validated.
@@ -2460,20 +2401,20 @@ pub fn driver_start() {
         // starts allocating + writing.
         for (off, tag_low) in [
             (0x1100u32, 0x00u32), // DMA_CH0_CONTROL
-            (0x1104,    0x04),    // DMA_CH0_TX_CONTROL
-            (0x1108,    0x08),    // DMA_CH0_RX_CONTROL
-            (0x1110,    0x10),    // DMA_CH0_TXDESC_LIST_ADDR_HI
-            (0x1114,    0x14),    // DMA_CH0_TXDESC_LIST_ADDR
-            (0x1118,    0x18),    // DMA_CH0_RXDESC_LIST_ADDR_HI
-            (0x111C,    0x1C),    // DMA_CH0_RXDESC_LIST_ADDR
-            (0x1120,    0x20),    // DMA_CH0_TXDESC_TAIL_POINTER
-            (0x1128,    0x28),    // DMA_CH0_RXDESC_TAIL_POINTER
-            (0x112C,    0x2C),    // DMA_CH0_TXDESC_RING_LENGTH
-            (0x1130,    0x30),    // DMA_CH0_RXDESC_RING_LENGTH
-            (0x1134,    0x34),    // DMA_CH0_INTERRUPT_ENABLE
-            (0x1144,    0x44),    // DMA_CH0_CURRENT_APP_TXDESC
-            (0x114C,    0x4C),    // DMA_CH0_CURRENT_APP_RXDESC
-            (0x1160,    0x60),    // DMA_CH0_STATUS
+            (0x1104, 0x04),       // DMA_CH0_TX_CONTROL
+            (0x1108, 0x08),       // DMA_CH0_RX_CONTROL
+            (0x1110, 0x10),       // DMA_CH0_TXDESC_LIST_ADDR_HI
+            (0x1114, 0x14),       // DMA_CH0_TXDESC_LIST_ADDR
+            (0x1118, 0x18),       // DMA_CH0_RXDESC_LIST_ADDR_HI
+            (0x111C, 0x1C),       // DMA_CH0_RXDESC_LIST_ADDR
+            (0x1120, 0x20),       // DMA_CH0_TXDESC_TAIL_POINTER
+            (0x1128, 0x28),       // DMA_CH0_RXDESC_TAIL_POINTER
+            (0x112C, 0x2C),       // DMA_CH0_TXDESC_RING_LENGTH
+            (0x1130, 0x30),       // DMA_CH0_RXDESC_RING_LENGTH
+            (0x1134, 0x34),       // DMA_CH0_INTERRUPT_ENABLE
+            (0x1144, 0x44),       // DMA_CH0_CURRENT_APP_TXDESC
+            (0x114C, 0x4C),       // DMA_CH0_CURRENT_APP_RXDESC
+            (0x1160, 0x60),       // DMA_CH0_STATUS
         ] {
             // SAFETY: same.
             let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + off) };
@@ -2512,7 +2453,7 @@ pub fn driver_start() {
             wait_iters += 1;
         }
         let _ = unsafe { wari_drv_log_u32(0x4253_5701, wait_iters) }; // 'BSW\1' = poll iters
-        let _ = unsafe { wari_drv_log_u32(0x4253_5702, bm) };          // 'BSW\2' = bus_mode after poll
+        let _ = unsafe { wari_drv_log_u32(0x4253_5702, bm) }; // 'BSW\2' = bus_mode after poll
 
         if bm & SWR_BIT != 0 {
             // Force-clear by writing without bit 0.
@@ -2520,7 +2461,7 @@ pub fn driver_start() {
                 wari_net_mmio_write32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL, bm & !SWR_BIT)
             };
             let bm2 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
-            let _ = unsafe { wari_drv_log_u32(0x4253_5703, bm2) };     // 'BSW\3' = post-force-clear
+            let _ = unsafe { wari_drv_log_u32(0x4253_5703, bm2) }; // 'BSW\3' = post-force-clear
         }
 
         // PR Phase-1c-6c — enable SYSCRG upstream clocks.
@@ -2542,16 +2483,14 @@ pub fn driver_start() {
 
         for (off, tag_low) in [
             (0x024u32, 0x24u32), // AHB0
-            (0x180,    0x80),    // NOC_BUS_STG_AXI
+            (0x180, 0x80),       // NOC_BUS_STG_AXI
         ] {
             let pre = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
             let tag_pre = 0x5550_0000 | tag_low; // 'UP\0\0' + low
             let _ = unsafe { wari_drv_log_u32(tag_pre, pre) };
 
             if pre & ENABLE_BIT == 0 {
-                let _ = unsafe {
-                    wari_net_mmio_write32(SYSCRG_BASE + off, pre | ENABLE_BIT)
-                };
+                let _ = unsafe { wari_net_mmio_write32(SYSCRG_BASE + off, pre | ENABLE_BIT) };
                 let post = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
                 let tag_post = 0x5570_0000 | tag_low; // 'Up\0\0' + low
                 let _ = unsafe { wari_drv_log_u32(tag_post, post) };
@@ -2573,9 +2512,7 @@ pub fn driver_start() {
             let pi_pre = unsafe { wari_net_mmio_read32(AON_SYSCON_BASE + PHY_INTF_OFFSET) };
             let _ = unsafe { wari_drv_log_u32(0x5049_5F50, pi_pre) }; // 'PI_P' pre
             let pi_new = (pi_pre & !(0x7 << 18)) | (0x1 << 18);
-            let _ = unsafe {
-                wari_net_mmio_write32(AON_SYSCON_BASE + PHY_INTF_OFFSET, pi_new)
-            };
+            let _ = unsafe { wari_net_mmio_write32(AON_SYSCON_BASE + PHY_INTF_OFFSET, pi_new) };
             let pi_post = unsafe { wari_net_mmio_read32(AON_SYSCON_BASE + PHY_INTF_OFFSET) };
             let _ = unsafe { wari_drv_log_u32(0x5049_5F4E, pi_post) }; // 'PI_N' new
         }
@@ -2585,11 +2522,9 @@ pub fn driver_start() {
             const PHY_INTF_OFFSET: u32 = 0x90;
             let pi_pre = unsafe { wari_net_mmio_read32(SYS_SYSCON_BASE + PHY_INTF_OFFSET) };
             let _ = unsafe { wari_drv_log_u32(0x5049_5F50, pi_pre) }; // 'PI_P' pre
-            // Bits[4:2] = mode; mask 0x1C, RGMII = 0b001 << 2 = 0x04.
+                                                                      // Bits[4:2] = mode; mask 0x1C, RGMII = 0b001 << 2 = 0x04.
             let pi_new = (pi_pre & !0x1C) | 0x04;
-            let _ = unsafe {
-                wari_net_mmio_write32(SYS_SYSCON_BASE + PHY_INTF_OFFSET, pi_new)
-            };
+            let _ = unsafe { wari_net_mmio_write32(SYS_SYSCON_BASE + PHY_INTF_OFFSET, pi_new) };
             let pi_post = unsafe { wari_net_mmio_read32(SYS_SYSCON_BASE + PHY_INTF_OFFSET) };
             let _ = unsafe { wari_drv_log_u32(0x4731_5070, pi_post) }; // 'G1Pp'
         }
@@ -2703,8 +2638,10 @@ pub fn driver_start() {
             // unlogged 0x18C (gmac_src, U-Boot-owned, golden = 2)
             // and the newly written 0x194 / 0x1A8.
             // Tags 'Sy1\0' + low byte.
-            for off in [0x184u32, 0x188, 0x18C, 0x190, 0x194, 0x198,
-                        0x19C, 0x1A0, 0x1A4, 0x1A8, 0x1AC, 0x1B8] {
+            for off in [
+                0x184u32, 0x188, 0x18C, 0x190, 0x194, 0x198, 0x19C, 0x1A0, 0x1A4, 0x1A8, 0x1AC,
+                0x1B8,
+            ] {
                 let v = unsafe { wari_net_mmio_read32(SYSCRG_BASE + off) };
                 let tag = 0x5379_3100 | (off & 0xFF); // 'Sy1\0' + low
                 let _ = unsafe { wari_drv_log_u32(tag, v) };
@@ -2719,7 +2656,7 @@ pub fn driver_start() {
             wait_iters_2 += 1;
         }
         let _ = unsafe { wari_drv_log_u32(0x5257_5201, wait_iters_2) }; // 'RWR\1' = retry iters
-        let _ = unsafe { wari_drv_log_u32(0x5257_5202, bm_2) };          // 'RWR\2' = bus_mode after retry
+        let _ = unsafe { wari_drv_log_u32(0x5257_5202, bm_2) }; // 'RWR\2' = bus_mode after retry
 
         // If still set even after upstream clocks: trigger a
         // fresh SWR cycle (write 1) so the engine restarts the
@@ -2729,7 +2666,8 @@ pub fn driver_start() {
                 wari_net_mmio_write32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL, SWR_BIT)
             };
             let mut tries_3 = 0u32;
-            let mut bm_3 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
+            let mut bm_3 =
+                unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
             while bm_3 & SWR_BIT != 0 && tries_3 < 100_000 {
                 bm_3 = unsafe { wari_net_mmio_read32(plat::NIC_BASE + DMA_BUS_MODE_OFFSET_FULL) };
                 tries_3 += 1;
@@ -2742,9 +2680,9 @@ pub fn driver_start() {
         // confirm the engine is alive.
         for (off, tag_low) in [
             (0x1100u32, 0x80u32), // CONTROL
-            (0x1104,    0x84),    // TX_CONTROL
-            (0x1108,    0x88),    // RX_CONTROL
-            (0x1160,    0xE0),    // STATUS
+            (0x1104, 0x84),       // TX_CONTROL
+            (0x1108, 0x88),       // RX_CONTROL
+            (0x1160, 0xE0),       // STATUS
         ] {
             let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + off) };
             let tag = 0x4332_0000 | tag_low; // 'C2\0' + low
@@ -2766,37 +2704,25 @@ pub fn driver_start() {
         // offset (driver is wasm32, 32-bit ptrs).
         let lin_base = unsafe { wari_lin_mem_base() };
 
-        let tx_ring_off = unsafe {
-            core::ptr::addr_of!(VF2_TX_RING.descs) as u32
-        };
-        let rx_ring_off = unsafe {
-            core::ptr::addr_of!(VF2_RX_RING.descs) as u32
-        };
+        let tx_ring_off = unsafe { core::ptr::addr_of!(VF2_TX_RING.descs) as u32 };
+        let rx_ring_off = unsafe { core::ptr::addr_of!(VF2_RX_RING.descs) as u32 };
         let tx_pa: u64 = lin_base + tx_ring_off as u64;
         let rx_pa: u64 = lin_base + rx_ring_off as u64;
 
         // Tags: 'TXp' / 'RXp' carry the ring physical address
         // for visibility before we hand them to the DMA engine.
         let _ = unsafe { wari_drv_log_u32(0x5458_7048, (tx_pa >> 32) as u32) }; // TXpH
-        let _ = unsafe { wari_drv_log_u32(0x5458_704C, tx_pa as u32) };          // TXpL
+        let _ = unsafe { wari_drv_log_u32(0x5458_704C, tx_pa as u32) }; // TXpL
         let _ = unsafe { wari_drv_log_u32(0x5258_7048, (rx_pa >> 32) as u32) }; // RXpH
-        let _ = unsafe { wari_drv_log_u32(0x5258_704C, rx_pa as u32) };          // RXpL
+        let _ = unsafe { wari_drv_log_u32(0x5258_704C, rx_pa as u32) }; // RXpL
 
         // Write TX ring base (high then low; per DWMAC databook
         // the engine latches LOW writes once HIGH is set).
-        let _ = unsafe {
-            wari_net_mmio_write32(plat::NIC_BASE + 0x1110, (tx_pa >> 32) as u32)
-        };
-        let _ = unsafe {
-            wari_net_mmio_write32(plat::NIC_BASE + 0x1114, tx_pa as u32)
-        };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1110, (tx_pa >> 32) as u32) };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1114, tx_pa as u32) };
         // Write RX ring base.
-        let _ = unsafe {
-            wari_net_mmio_write32(plat::NIC_BASE + 0x1118, (rx_pa >> 32) as u32)
-        };
-        let _ = unsafe {
-            wari_net_mmio_write32(plat::NIC_BASE + 0x111C, rx_pa as u32)
-        };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1118, (rx_pa >> 32) as u32) };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x111C, rx_pa as u32) };
         // Ring lengths — 16 entries each (DMA expects N-1).
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x112C, 15) };
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1130, 15) };
@@ -2804,11 +2730,11 @@ pub fn driver_start() {
         // Verify-read all 6 slots.
         for (off, tag_low) in [
             (0x1110u32, 0xA0u32), // TX_BASE_HI
-            (0x1114,    0xA4),    // TX_BASE_LO
-            (0x1118,    0xA8),    // RX_BASE_HI
-            (0x111C,    0xAC),    // RX_BASE_LO
-            (0x112C,    0xBC),    // TX_RING_LEN
-            (0x1130,    0xC0),    // RX_RING_LEN
+            (0x1114, 0xA4),       // TX_BASE_LO
+            (0x1118, 0xA8),       // RX_BASE_HI
+            (0x111C, 0xAC),       // RX_BASE_LO
+            (0x112C, 0xBC),       // TX_RING_LEN
+            (0x1130, 0xC0),       // RX_RING_LEN
         ] {
             let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + off) };
             let tag = 0x4456_0000 | tag_low; // 'DV\0\0' + low
@@ -2833,19 +2759,19 @@ pub fn driver_start() {
         let pkt_off = core::ptr::addr_of!(VF2_FIRST_PKT) as u32;
         let pkt_pa: u64 = lin_base + pkt_off as u64;
         let _ = unsafe { wari_drv_log_u32(0x504B_5448, (pkt_pa >> 32) as u32) }; // 'PKTH'
-        let _ = unsafe { wari_drv_log_u32(0x504B_544C, pkt_pa as u32) };          // 'PKTL'
+        let _ = unsafe { wari_drv_log_u32(0x504B_544C, pkt_pa as u32) }; // 'PKTL'
 
         // SAFETY: VF2_TX_RING is module-static; this is the only
         // writer and runs once at boot before DMA reads it.
         unsafe {
             let d = &mut VF2_TX_RING.descs[0];
-            d[0] = pkt_pa as u32;             // TDES0 PA low
-            d[1] = (pkt_pa >> 32) as u32;     // TDES1 PA high
-            d[2] = 64;                        // TDES2 buf len = 64
+            d[0] = pkt_pa as u32; // TDES0 PA low
+            d[1] = (pkt_pa >> 32) as u32; // TDES1 PA high
+            d[2] = 64; // TDES2 buf len = 64
             d[3] = 0x8000_0000                // OWN
                  | 0x2000_0000                // LD
                  | 0x1000_0000                // FD
-                 | 64;                        // total length 64
+                 | 64; // total length 64
         }
 
         // Build 134 — MAC_RXQ_CTRL0 (0x00A0) bits[1:0] = RXQ0EN.
@@ -2872,30 +2798,24 @@ pub fn driver_start() {
         // DMA_CH0_TX_CONTROL: set ST (bit 0) — start transmit.
         // Default TXPBL = 1 (lower bits 21:16). Use 0x0010_0001
         // (TXPBL=1, ST=1).
-        let _ = unsafe {
-            wari_net_mmio_write32(plat::NIC_BASE + 0x1104, 0x0010_0001)
-        };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1104, 0x0010_0001) };
         // DMA_CH0_RX_CONTROL: set SR (bit 0). RXPBL=1, RBSZ field
         // bits 14:1 left at 0 for now (Phase-1c-6g sets 1536).
-        let _ = unsafe {
-            wari_net_mmio_write32(plat::NIC_BASE + 0x1108, 0x0010_0001)
-        };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1108, 0x0010_0001) };
 
         // Tail pointer: write address of descriptor[1] (one past
         // the last ready descriptor). DWMAC starts processing
         // when current head < tail.
         let tx_tail_pa: u32 = (lin_base + tx_ring_off as u64 + 16) as u32;
-        let _ = unsafe {
-            wari_net_mmio_write32(plat::NIC_BASE + 0x1120, tx_tail_pa)
-        };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1120, tx_tail_pa) };
 
         // Verify-read post-write state.
         for (off, tag_low) in [
-            (0x000u32,  0xC0u32), // MAC_CONFIG
-            (0x1104,    0xC4),    // TX_CONTROL
-            (0x1108,    0xC8),    // RX_CONTROL
-            (0x1120,    0xCC),    // TX_TAIL
-            (0x1160,    0xD0),    // DMA_CH0_STATUS
+            (0x000u32, 0xC0u32), // MAC_CONFIG
+            (0x1104, 0xC4),      // TX_CONTROL
+            (0x1108, 0xC8),      // RX_CONTROL
+            (0x1120, 0xCC),      // TX_TAIL
+            (0x1160, 0xD0),      // DMA_CH0_STATUS
         ] {
             let v = unsafe { wari_net_mmio_read32(plat::NIC_BASE + off) };
             let tag = 0x4754_0000 | tag_low; // 'GT\0\0' + low
@@ -2929,7 +2849,7 @@ pub fn driver_start() {
         let bufs_off = unsafe { core::ptr::addr_of!(VF2_RX_BUFS.bufs) as u32 };
         let bufs_pa: u64 = lin_base + bufs_off as u64;
         let _ = unsafe { wari_drv_log_u32(0x5258_4248, (bufs_pa >> 32) as u32) }; // 'RXBH'
-        let _ = unsafe { wari_drv_log_u32(0x5258_424C, bufs_pa as u32) };          // 'RXBL'
+        let _ = unsafe { wari_drv_log_u32(0x5258_424C, bufs_pa as u32) }; // 'RXBL'
 
         // Fill all 16 RX descriptors. Each buffer is 1536 B
         // apart. SAFETY: module static, single writer at boot.
@@ -2937,28 +2857,24 @@ pub fn driver_start() {
             for i in 0..16 {
                 let bp: u64 = bufs_pa + (i as u64) * 1536;
                 let d = &mut VF2_RX_RING.descs[i];
-                d[0] = bp as u32;             // RDES0 PA low
-                d[1] = (bp >> 32) as u32;     // RDES1 PA high
-                d[2] = 0;                     // RDES2 unused
+                d[0] = bp as u32; // RDES0 PA low
+                d[1] = (bp >> 32) as u32; // RDES1 PA high
+                d[2] = 0; // RDES2 unused
                 d[3] = 0x8000_0000            // OWN
                      | 0x4000_0000            // IOC
-                     | 0x0100_0000;           // BUF1V
+                     | 0x0100_0000; // BUF1V
             }
         }
 
         // Re-write DMA_CH0_RX_CONTROL with the buffer size.
         // (1 << 0)=SR | (1536 << 1)=RBSZ | (1 << 16)=RXPBL
         let rx_ctrl = 0x0001_0000u32 | (1536u32 << 1) | 0x1;
-        let _ = unsafe {
-            wari_net_mmio_write32(plat::NIC_BASE + 0x1108, rx_ctrl)
-        };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1108, rx_ctrl) };
 
         // RX tail pointer = ring base + 16 descriptors × 16 B
         // = "all 16 descs are armed".
         let rx_tail_pa: u32 = (lin_base + rx_ring_off as u64 + 16 * 16) as u32;
-        let _ = unsafe {
-            wari_net_mmio_write32(plat::NIC_BASE + 0x1128, rx_tail_pa)
-        };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1128, rx_tail_pa) };
 
         // Verify reads.
         let rx_ctrl_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1108) };
@@ -2987,9 +2903,7 @@ pub fn driver_start() {
         // re-read STATUS, the RX descriptor, and the
         // DMA_CH0_CURRENT_APP_RXDESC pointer to see what the
         // engine is doing.
-        let _ = unsafe {
-            wari_net_mmio_write32(plat::NIC_BASE + 0x1160, 0x0000_FFFF)
-        };
+        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1160, 0x0000_FFFF) };
 
         // Crude busy-wait — ~10 million NIC-base reads ≈ tens of
         // ms wall-clock. Plenty of time for a few RX frames in
@@ -3081,12 +2995,12 @@ pub fn driver_start() {
         // Verify-read.
         let mac_hi_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x300) };
         let mac_lo_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x304) };
-        let pf_rb     = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x008) };
-        let rxq_rb    = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x0A0) };
+        let pf_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x008) };
+        let rxq_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x0A0) };
         let _ = unsafe { wari_drv_log_u32(0x4D41_4348, mac_hi_rb) }; // 'MACH'
         let _ = unsafe { wari_drv_log_u32(0x4D41_434C, mac_lo_rb) }; // 'MACL'
-        let _ = unsafe { wari_drv_log_u32(0x4D41_4346, pf_rb) };     // 'MACF'
-        let _ = unsafe { wari_drv_log_u32(0x5258_5130, rxq_rb) };    // 'RXQ0'
+        let _ = unsafe { wari_drv_log_u32(0x4D41_4346, pf_rb) }; // 'MACF'
+        let _ = unsafe { wari_drv_log_u32(0x5258_5130, rxq_rb) }; // 'RXQ0'
 
         // Clear status sticky bits again, longer wait.
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1160, 0x0000_FFFF) };
@@ -3107,9 +3021,7 @@ pub fn driver_start() {
         }
 
         // Also dump first 4 bytes of buffer 0 again.
-        let w2 = unsafe {
-            (VF2_RX_BUFS.bufs[0].as_ptr() as *const u32).read_unaligned()
-        };
+        let w2 = unsafe { (VF2_RX_BUFS.bufs[0].as_ptr() as *const u32).read_unaligned() };
         let _ = unsafe { wari_drv_log_u32(0x5774_3204, w2) };
 
         // PR Phase-1c-6j — configure MTL RX queue 0.

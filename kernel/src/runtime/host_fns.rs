@@ -72,11 +72,9 @@ pub fn register_host_fns(linker: &mut Linker<Tier2HostState>) -> Result<(), Kern
     // `proc_id = PROC_ID_TIER2_UART` baked in. The implementations
     // live in `cap::syscall`; we just bind them to the linker here.
     use crate::cap::{
-        cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-        cap_register_impl, cap_revoke_impl, cap_unregister_impl,
-        notification_ack_impl, notification_wait_impl,
-        ring_setup_impl, ring_submit_impl,
-        PROC_ID_TIER2_UART,
+        cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl, cap_register_impl,
+        cap_revoke_impl, cap_unregister_impl, notification_ack_impl, notification_wait_impl,
+        ring_setup_impl, ring_submit_impl, PROC_ID_TIER2_UART,
     };
     linker
         .func_wrap(
@@ -198,9 +196,7 @@ pub fn register_host_fns(linker: &mut Linker<Tier2HostState>) -> Result<(), Kern
 /// expressed as "holds the receive side of the UART IPC endpoint".
 /// See `cap::syscall::check_cap` for the predicate.
 fn host_mmio_write8(_caller: Caller<'_, Tier2HostState>, addr: u32, val: u32) -> i32 {
-    use crate::cap::{
-        check_cap, ObjectKind, CAP_RIGHT_READ, PROC_ID_TIER2_UART,
-    };
+    use crate::cap::{check_cap, ObjectKind, CAP_RIGHT_READ, PROC_ID_TIER2_UART};
     // INV-3 + cap gate: Tier-2 driver holds an Endpoint cap with
     // READ rights at slot 0 (the receive side of uart_ipc_ep).
     // Without this cap the driver cannot perform MMIO operations.
@@ -234,9 +230,7 @@ fn host_mmio_write8(_caller: Caller<'_, Tier2HostState>, addr: u32, val: u32) ->
 /// A richer error encoding lands when the ABI gains result-tuple
 /// shapes (Phase 2+).
 fn host_mmio_read8(_caller: Caller<'_, Tier2HostState>, addr: u32) -> u32 {
-    use crate::cap::{
-        check_cap, ObjectKind, CAP_RIGHT_READ, PROC_ID_TIER2_UART,
-    };
+    use crate::cap::{check_cap, ObjectKind, CAP_RIGHT_READ, PROC_ID_TIER2_UART};
     // Cap gate (PR 3b): Tier-2 driver holds the UART endpoint cap.
     if check_cap(PROC_ID_TIER2_UART, 0, ObjectKind::Endpoint, CAP_RIGHT_READ).is_err() {
         return u32::MAX;
@@ -376,12 +370,10 @@ pub fn register_net_host_fns(
     // Shared cap-management + notification surface, with the net
     // driver's proc_id baked into each closure.
     use crate::cap::{
-        cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-        cap_register_impl, cap_revoke_impl, cap_unregister_impl,
+        cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl, cap_register_impl,
+        cap_revoke_impl, cap_unregister_impl, lin_mem_base_impl, nic_attach_queue_impl,
+        nic_queue_notify_impl, nic_set_mac_impl, notification_ack_impl, notification_wait_impl,
         ring_setup_impl, ring_submit_impl,
-        lin_mem_base_impl, nic_attach_queue_impl,
-        nic_queue_notify_impl, nic_set_mac_impl, notification_ack_impl,
-        notification_wait_impl,
     };
     linker
         .func_wrap(
@@ -405,18 +397,14 @@ pub fn register_net_host_fns(
         .func_wrap(
             "wari",
             "cap_revoke",
-            move |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 {
-                cap_revoke_impl(pid, slot)
-            },
+            move |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 { cap_revoke_impl(pid, slot) },
         )
         .map_err(|_| KernelError::BadWasm)?;
     linker
         .func_wrap(
             "wari",
             "cap_delete",
-            move |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 {
-                cap_delete_impl(pid, slot)
-            },
+            move |_: Caller<'_, Tier2HostState>, slot: u32| -> i32 { cap_delete_impl(pid, slot) },
         )
         .map_err(|_| KernelError::BadWasm)?;
     linker
@@ -513,8 +501,13 @@ pub fn register_net_host_fns(
                   queue_size: u32|
                   -> i32 {
                 nic_attach_queue_impl(
-                    &mut caller, pid, queue_idx, desc_off, avail_off,
-                    used_off, queue_size,
+                    &mut caller,
+                    pid,
+                    queue_idx,
+                    desc_off,
+                    avail_off,
+                    used_off,
+                    queue_size,
                 )
             },
         )

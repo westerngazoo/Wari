@@ -24,9 +24,7 @@
 //! kernel-compile time).
 
 #[cfg(feature = "qemu")]
-pub static NET_DRIVER_SIGNED: &[u8] =
-    include_bytes!("../../../build/drivers/net-qemu.signed.wasm");
+pub static NET_DRIVER_SIGNED: &[u8] = include_bytes!("../../../build/drivers/net-qemu.signed.wasm");
 
 #[cfg(feature = "vf2")]
-pub static NET_DRIVER_SIGNED: &[u8] =
-    include_bytes!("../../../build/drivers/net-vf2.signed.wasm");
+pub static NET_DRIVER_SIGNED: &[u8] = include_bytes!("../../../build/drivers/net-vf2.signed.wasm");

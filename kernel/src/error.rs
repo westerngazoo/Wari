@@ -60,10 +60,9 @@ impl From<wari_driver_iface::DriverManifestError> for KernelError {
     fn from(e: wari_driver_iface::DriverManifestError) -> Self {
         use wari_driver_iface::DriverManifestError as M;
         match e {
-            M::Missing
-            | M::Truncated
-            | M::BadMagic
-            | M::UnknownSig => KernelError::DriverManifestMalformed,
+            M::Missing | M::Truncated | M::BadMagic | M::UnknownSig => {
+                KernelError::DriverManifestMalformed
+            }
             M::UnsupportedAbiVersion => KernelError::DriverAbiVersion,
             M::UnknownKind | M::WrongKind => KernelError::DriverWrongKind,
             M::ExportMismatch => KernelError::DriverBadExport,
@@ -81,15 +80,15 @@ impl KernelError {
     pub const fn into_syscall(self) -> wari_abi::SyscallError {
         use wari_abi::SyscallError as E;
         match self {
-            KernelError::InvalidArgument  => E::InvalidArgument,
-            KernelError::NoSuchProcess    => E::NoSuchProcess,
+            KernelError::InvalidArgument => E::InvalidArgument,
+            KernelError::NoSuchProcess => E::NoSuchProcess,
             KernelError::PermissionDenied => E::PermissionDenied,
-            KernelError::WouldBlock       => E::WouldBlock,
-            KernelError::OutOfPages       => E::OutOfResources,
-            KernelError::OutOfHandles     => E::OutOfResources,
-            KernelError::NotMapped        => E::NotMapped,
-            KernelError::BadWasm          => E::BadWasm,
-            KernelError::DriverError      => E::Generic,
+            KernelError::WouldBlock => E::WouldBlock,
+            KernelError::OutOfPages => E::OutOfResources,
+            KernelError::OutOfHandles => E::OutOfResources,
+            KernelError::NotMapped => E::NotMapped,
+            KernelError::BadWasm => E::BadWasm,
+            KernelError::DriverError => E::Generic,
             KernelError::DriverManifestMalformed
             | KernelError::DriverAbiVersion
             | KernelError::DriverWrongKind

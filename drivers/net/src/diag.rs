@@ -55,34 +55,34 @@ extern "C" {
 // (0x16030000) or GMAC1_BASE (0x16040000); the caller passes the
 // right base in `gmac_base`.
 
-const MAC_CONFIGURATION:    u32 = 0x0000;
-const MAC_PACKET_FILTER:    u32 = 0x0008;
-const MAC_VERSION:          u32 = 0x0110;
-const MAC_DEBUG:            u32 = 0x0114;
+const MAC_CONFIGURATION: u32 = 0x0000;
+const MAC_PACKET_FILTER: u32 = 0x0008;
+const MAC_VERSION: u32 = 0x0110;
+const MAC_DEBUG: u32 = 0x0114;
 const MAC_PHYIF_CTRL_STATUS: u32 = 0x00F8;
 
 // MMC RX counters (DWMAC v5.20 databook table 11-3, MMC block).
 // Confirmed against Linux mainline drivers/net/ethernet/stmicro/stmmac/
 // dwmac4_descs.h + dwmac4_lib.c readback paths.
-const MMC_RX_FRAMECOUNT_GB:  u32 = 0x0780; // good + bad
-const MMC_RX_OCTETCOUNT_GB:  u32 = 0x0784;
-const MMC_RX_FRAMECOUNT_G:   u32 = 0x0788; // good only
-const MMC_RX_OCTETCOUNT_G:   u32 = 0x078C;
-const MMC_RX_CRC_ERROR:      u32 = 0x0794;
-const MMC_RX_ALIGN_ERROR:    u32 = 0x0798;
-const MMC_RX_LENGTH_ERROR:   u32 = 0x07A0;
-const MMC_RX_FIFO_OVERFLOW:  u32 = 0x07D4;
+const MMC_RX_FRAMECOUNT_GB: u32 = 0x0780; // good + bad
+const MMC_RX_OCTETCOUNT_GB: u32 = 0x0784;
+const MMC_RX_FRAMECOUNT_G: u32 = 0x0788; // good only
+const MMC_RX_OCTETCOUNT_G: u32 = 0x078C;
+const MMC_RX_CRC_ERROR: u32 = 0x0794;
+const MMC_RX_ALIGN_ERROR: u32 = 0x0798;
+const MMC_RX_LENGTH_ERROR: u32 = 0x07A0;
+const MMC_RX_FIFO_OVERFLOW: u32 = 0x07D4;
 
 // MTL RXQ0
-const MTL_RXQ0_OP_MODE:      u32 = 0x0D30;
-const MTL_RXQ0_MISSED:       u32 = 0x0D34;
-const MTL_RXQ0_DEBUG:        u32 = 0x0D38;
+const MTL_RXQ0_OP_MODE: u32 = 0x0D30;
+const MTL_RXQ0_MISSED: u32 = 0x0D34;
+const MTL_RXQ0_DEBUG: u32 = 0x0D38;
 
 // DMA channel 0
-const DMA_CH0_RX_CONTROL:    u32 = 0x1108;
-const DMA_CH0_CUR_RXDESC:    u32 = 0x114C;
-const DMA_CH0_CUR_RXBUF:     u32 = 0x1154;
-const DMA_CH0_STATUS:        u32 = 0x1160;
+const DMA_CH0_RX_CONTROL: u32 = 0x1108;
+const DMA_CH0_CUR_RXDESC: u32 = 0x114C;
+const DMA_CH0_CUR_RXBUF: u32 = 0x1154;
+const DMA_CH0_STATUS: u32 = 0x1160;
 
 // ── Tag namespace (ASCII 4-char mnemonics) ─────────────────────
 //
@@ -165,24 +165,24 @@ fn read_log(gmac_base: u32, offset: u32, tag: u32) {
 pub fn boot_dump(gmac_base: u32) {
     // SAFETY: extern host fn, no preconditions.
     let _ = unsafe { wari_drv_log_u32(T_BOOT, 0xB007_0000) };
-    read_log(gmac_base, MAC_VERSION,        T_NM_V);
-    read_log(gmac_base, MAC_CONFIGURATION,  T_NM_C);
-    read_log(gmac_base, MAC_PACKET_FILTER,  T_NM_F);
-    read_log(gmac_base, MAC_DEBUG,          T_NM_D);
+    read_log(gmac_base, MAC_VERSION, T_NM_V);
+    read_log(gmac_base, MAC_CONFIGURATION, T_NM_C);
+    read_log(gmac_base, MAC_PACKET_FILTER, T_NM_F);
+    read_log(gmac_base, MAC_DEBUG, T_NM_D);
     read_log(gmac_base, MAC_PHYIF_CTRL_STATUS, T_NM_P);
     read_log(gmac_base, MMC_RX_FRAMECOUNT_GB, T_NM_RGB);
-    read_log(gmac_base, MMC_RX_FRAMECOUNT_G,  T_NM_RG_);
-    read_log(gmac_base, MMC_RX_CRC_ERROR,     T_NM_CRC);
-    read_log(gmac_base, MMC_RX_ALIGN_ERROR,   T_NM_ALG);
-    read_log(gmac_base, MMC_RX_LENGTH_ERROR,  T_NM_LEN);
+    read_log(gmac_base, MMC_RX_FRAMECOUNT_G, T_NM_RG_);
+    read_log(gmac_base, MMC_RX_CRC_ERROR, T_NM_CRC);
+    read_log(gmac_base, MMC_RX_ALIGN_ERROR, T_NM_ALG);
+    read_log(gmac_base, MMC_RX_LENGTH_ERROR, T_NM_LEN);
     read_log(gmac_base, MMC_RX_FIFO_OVERFLOW, T_NM_FOV);
-    read_log(gmac_base, MTL_RXQ0_OP_MODE,     T_NT_OP);
-    read_log(gmac_base, MTL_RXQ0_MISSED,      T_NT_MS);
-    read_log(gmac_base, MTL_RXQ0_DEBUG,       T_NT_DB);
-    read_log(gmac_base, DMA_CH0_RX_CONTROL,   T_ND_RC);
-    read_log(gmac_base, DMA_CH0_CUR_RXDESC,   T_ND_CD);
-    read_log(gmac_base, DMA_CH0_CUR_RXBUF,    T_ND_CB);
-    read_log(gmac_base, DMA_CH0_STATUS,       T_ND_ST);
+    read_log(gmac_base, MTL_RXQ0_OP_MODE, T_NT_OP);
+    read_log(gmac_base, MTL_RXQ0_MISSED, T_NT_MS);
+    read_log(gmac_base, MTL_RXQ0_DEBUG, T_NT_DB);
+    read_log(gmac_base, DMA_CH0_RX_CONTROL, T_ND_RC);
+    read_log(gmac_base, DMA_CH0_CUR_RXDESC, T_ND_CD);
+    read_log(gmac_base, DMA_CH0_CUR_RXBUF, T_ND_CB);
+    read_log(gmac_base, DMA_CH0_STATUS, T_ND_ST);
     // Sentinel matching the header — easier to grep "Ndg.B" pair.
     let _ = unsafe { wari_drv_log_u32(T_BOOT, 0xB007_FFFF) };
 }
@@ -207,26 +207,26 @@ pub fn maybe_snapshot(gmac_base: u32) {
     // SAFETY: extern host fn.
     let _ = unsafe { wari_drv_log_u32(T_SNAP, snap_no) };
 
-    read_log(gmac_base, MAC_CONFIGURATION,    T_NM_C);
-    read_log(gmac_base, MAC_PACKET_FILTER,    T_NM_F);
-    read_log(gmac_base, MAC_DEBUG,            T_NM_D);
+    read_log(gmac_base, MAC_CONFIGURATION, T_NM_C);
+    read_log(gmac_base, MAC_PACKET_FILTER, T_NM_F);
+    read_log(gmac_base, MAC_DEBUG, T_NM_D);
     read_log(gmac_base, MAC_PHYIF_CTRL_STATUS, T_NM_P);
 
     read_log(gmac_base, MMC_RX_FRAMECOUNT_GB, T_NM_RGB);
-    read_log(gmac_base, MMC_RX_FRAMECOUNT_G,  T_NM_RG_);
-    read_log(gmac_base, MMC_RX_CRC_ERROR,     T_NM_CRC);
-    read_log(gmac_base, MMC_RX_ALIGN_ERROR,   T_NM_ALG);
-    read_log(gmac_base, MMC_RX_LENGTH_ERROR,  T_NM_LEN);
+    read_log(gmac_base, MMC_RX_FRAMECOUNT_G, T_NM_RG_);
+    read_log(gmac_base, MMC_RX_CRC_ERROR, T_NM_CRC);
+    read_log(gmac_base, MMC_RX_ALIGN_ERROR, T_NM_ALG);
+    read_log(gmac_base, MMC_RX_LENGTH_ERROR, T_NM_LEN);
     read_log(gmac_base, MMC_RX_FIFO_OVERFLOW, T_NM_FOV);
 
-    read_log(gmac_base, MTL_RXQ0_OP_MODE,     T_NT_OP);
-    read_log(gmac_base, MTL_RXQ0_MISSED,      T_NT_MS);
-    read_log(gmac_base, MTL_RXQ0_DEBUG,       T_NT_DB);
+    read_log(gmac_base, MTL_RXQ0_OP_MODE, T_NT_OP);
+    read_log(gmac_base, MTL_RXQ0_MISSED, T_NT_MS);
+    read_log(gmac_base, MTL_RXQ0_DEBUG, T_NT_DB);
 
-    read_log(gmac_base, DMA_CH0_RX_CONTROL,   T_ND_RC);
-    read_log(gmac_base, DMA_CH0_CUR_RXDESC,   T_ND_CD);
-    read_log(gmac_base, DMA_CH0_CUR_RXBUF,    T_ND_CB);
-    read_log(gmac_base, DMA_CH0_STATUS,       T_ND_ST);
+    read_log(gmac_base, DMA_CH0_RX_CONTROL, T_ND_RC);
+    read_log(gmac_base, DMA_CH0_CUR_RXDESC, T_ND_CD);
+    read_log(gmac_base, DMA_CH0_CUR_RXBUF, T_ND_CB);
+    read_log(gmac_base, DMA_CH0_STATUS, T_ND_ST);
 }
 
 /// Called from `receive()` the moment we first find OWN=0 on any
@@ -237,8 +237,12 @@ pub fn maybe_snapshot(gmac_base: u32) {
 pub fn note_first_frame(gmac_base: u32, slot: u32) {
     // SAFETY: INV-1 single-hart.
     let already = unsafe { FIRST_FRAME_SEEN };
-    if already { return; }
-    unsafe { FIRST_FRAME_SEEN = true; }
+    if already {
+        return;
+    }
+    unsafe {
+        FIRST_FRAME_SEEN = true;
+    }
     let _ = unsafe { wari_drv_log_u32(T_FRST, slot) };
     boot_dump(gmac_base);
 }

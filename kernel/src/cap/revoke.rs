@@ -336,10 +336,7 @@ mod tests {
         s.add(0, 0);
         s.add((MAX_PROCS - 1) as u8, (CSPACE_SLOTS - 1) as u8);
         assert!(s.contains(0, 0));
-        assert!(s.contains(
-            (MAX_PROCS - 1) as u8,
-            (CSPACE_SLOTS - 1) as u8
-        ));
+        assert!(s.contains((MAX_PROCS - 1) as u8, (CSPACE_SLOTS - 1) as u8));
     }
 
     #[test]

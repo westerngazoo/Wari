@@ -100,7 +100,8 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
     // `wari::nic_set_mac` (which sets Net.initialized = true). A
     // panic or trap inside _start gets converted to BadWasm.
     {
-        let start = net_inst.instance
+        let start = net_inst
+            .instance
             .get_typed_func::<(), ()>(&net_inst.store, "_start")
             .map_err(|_| KernelError::BadWasm)?;
         let _ = start.call(&mut net_inst.store, ());
@@ -113,7 +114,12 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
             let m = net.mac;
             kprintln!(
                 "[net] virtio-net up, mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                m[0], m[1], m[2], m[3], m[4], m[5]
+                m[0],
+                m[1],
+                m[2],
+                m[3],
+                m[4],
+                m[5]
             );
         }
 
@@ -121,7 +127,9 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
         // install the Tier2NetHandle singleton. The kmain idle
         // loop calls `tier2_net::poll(tick)` periodically to
         // drive smoltcp's Interface::poll.
-        let loader::Tier2Instance { instance, store, .. } = net_inst;
+        let loader::Tier2Instance {
+            instance, store, ..
+        } = net_inst;
         let poll_fn = instance
             .get_typed_func::<u64, i32>(&store, "poll")
             .map_err(|_| KernelError::DriverError)?;
@@ -177,8 +185,7 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
                 let h = handle as u32;
                 kprintln!("[net] socket self-test: create=tcp -> handle={}", handle);
                 // PR Net-6c — bind to port 7000, listen.
-                let bind_rc = unsafe { tier2_net::socket_bind(h, 0, 7000) }
-                    .unwrap_or(-99);
+                let bind_rc = unsafe { tier2_net::socket_bind(h, 0, 7000) }.unwrap_or(-99);
                 let listen_rc = if bind_rc == 0 {
                     unsafe { tier2_net::socket_listen(h, 1) }.unwrap_or(-99)
                 } else {
@@ -186,7 +193,8 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
                 };
                 kprintln!(
                     "[net] socket self-test: bind=port7000 rc={}, listen rc={}",
-                    bind_rc, listen_rc
+                    bind_rc,
+                    listen_rc
                 );
                 // SAFETY: same.
                 match unsafe { tier2_net::socket_close(h) } {
@@ -208,14 +216,15 @@ pub fn run_tier2_net() -> Result<(), KernelError> {
 }
 
 pub fn run_tier2_uart() -> Result<(), KernelError> {
-    let tier2 =
-        loader::load_tier2(uart_blob::UART_DRIVER_SIGNED, ModuleId::Tier2Uart)?;
+    let tier2 = loader::load_tier2(uart_blob::UART_DRIVER_SIGNED, ModuleId::Tier2Uart)?;
 
     // Decompose and resolve the typed `write` export. The
     // `get_typed_func` immutable borrow of `store` is released at the
     // end of the let-statement, freeing `store` to move into the
     // handle below.
-    let loader::Tier2Instance { instance, store, .. } = tier2;
+    let loader::Tier2Instance {
+        instance, store, ..
+    } = tier2;
     let write_fn = instance
         .get_typed_func::<(u32, u32), i32>(&store, "write")
         .map_err(|_| KernelError::DriverError)?;
@@ -257,13 +266,13 @@ pub fn run_tier2_uart() -> Result<(), KernelError> {
 /// - On clean exit returns `Ok(code)` and prints
 ///   `[t1:proc_id] exit(code)` for boot-trace observability.
 /// - On other wasmi error returns `Err(KernelError::BadWasm)`.
-pub fn run_tier1(
-    proc_id: u8,
-    wasm_bytes: &[u8],
-    module_id: ModuleId,
-) -> Result<i32, KernelError> {
+pub fn run_tier1(proc_id: u8, wasm_bytes: &[u8], module_id: ModuleId) -> Result<i32, KernelError> {
     let tier1 = loader::load_tier1(wasm_bytes, module_id, proc_id)?;
-    let loader::Tier1Instance { instance, mut store, .. } = tier1;
+    let loader::Tier1Instance {
+        instance,
+        mut store,
+        ..
+    } = tier1;
 
     // Resolve `_start` — the Phase-1b Tier-1 modules export it as a
     // typed `() -> ()` WASI entry. (It never *returns* —

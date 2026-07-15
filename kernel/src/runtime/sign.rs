@@ -77,10 +77,8 @@ pub const HEADER_LEN: usize = PUBKEY_LEN + SIGNATURE_LEN;
 /// Replacing only this constant without re-signing the drivers is
 /// itself safe: every signed envelope will be rejected.
 pub const ACCEPTED_PUBKEY: [u8; PUBKEY_LEN] = [
-    0xf6, 0x09, 0xfc, 0x9a, 0xe4, 0x6f, 0xd9, 0x09,
-    0xbe, 0x0f, 0x6d, 0xf9, 0x78, 0x9d, 0xc4, 0x32,
-    0xa1, 0xb8, 0x2c, 0x70, 0xf1, 0x56, 0x44, 0xbf,
-    0xf7, 0x94, 0x9d, 0xac, 0x12, 0x05, 0x70, 0x1a,
+    0xf6, 0x09, 0xfc, 0x9a, 0xe4, 0x6f, 0xd9, 0x09, 0xbe, 0x0f, 0x6d, 0xf9, 0x78, 0x9d, 0xc4, 0x32,
+    0xa1, 0xb8, 0x2c, 0x70, 0xf1, 0x56, 0x44, 0xbf, 0xf7, 0x94, 0x9d, 0xac, 0x12, 0x05, 0x70, 0x1a,
 ];
 
 /// Verify a signed Tier-2 envelope.
@@ -119,12 +117,9 @@ pub fn verify(envelope: &[u8]) -> Result<&[u8], KernelError> {
     }
 
     // Reconstruct typed key + signature from the raw bytes.
-    let pubkey_array: [u8; PUBKEY_LEN] = pubkey_bytes
-        .try_into()
-        .map_err(|_| KernelError::BadWasm)?;
-    let sig_array: [u8; SIGNATURE_LEN] = sig_bytes
-        .try_into()
-        .map_err(|_| KernelError::BadWasm)?;
+    let pubkey_array: [u8; PUBKEY_LEN] =
+        pubkey_bytes.try_into().map_err(|_| KernelError::BadWasm)?;
+    let sig_array: [u8; SIGNATURE_LEN] = sig_bytes.try_into().map_err(|_| KernelError::BadWasm)?;
 
     let verifying_key =
         VerifyingKey::from_bytes(&pubkey_array).map_err(|_| KernelError::BadWasm)?;

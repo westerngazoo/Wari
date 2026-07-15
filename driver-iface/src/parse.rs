@@ -17,8 +17,8 @@
 use core::mem::size_of;
 
 use crate::{
-    DriverKind, DriverManifestError, ExportDecl, FuncSig, ImportDecl,
-    ManifestHeader, MAGIC, MANIFEST_ABI_VERSION, SECTION_NAME,
+    DriverKind, DriverManifestError, ExportDecl, FuncSig, ImportDecl, ManifestHeader, MAGIC,
+    MANIFEST_ABI_VERSION, SECTION_NAME,
 };
 
 /// Borrowed view over a parsed manifest. Zero-copy — every field
@@ -75,11 +75,8 @@ const SECTION_ID_CUSTOM: u8 = 0;
 ///
 /// Does **not** verify the kind matches what the caller expects —
 /// that is the loader's / sign-tool's job.
-pub fn parse_from_wasm(
-    wasm: &[u8],
-) -> Result<DriverManifestView<'_>, DriverManifestError> {
-    let payload =
-        find_section_payload(wasm, SECTION_NAME)?.ok_or(DriverManifestError::Missing)?;
+pub fn parse_from_wasm(wasm: &[u8]) -> Result<DriverManifestView<'_>, DriverManifestError> {
+    let payload = find_section_payload(wasm, SECTION_NAME)?.ok_or(DriverManifestError::Missing)?;
     parse_payload(payload)
 }
 
@@ -101,8 +98,9 @@ fn find_section_payload<'a>(
         let (sec_size, after_size) = read_leb128_u32(wasm, i)?;
         i = after_size;
         let sec_size = sec_size as usize;
-        let sec_end =
-            i.checked_add(sec_size).ok_or(DriverManifestError::Truncated)?;
+        let sec_end = i
+            .checked_add(sec_size)
+            .ok_or(DriverManifestError::Truncated)?;
         if sec_end > wasm.len() {
             return Err(DriverManifestError::Truncated);
         }
@@ -152,13 +150,9 @@ fn parse_payload(payload: &[u8]) -> Result<DriverManifestView<'_>, DriverManifes
     }
 
     // SAFETY: same.
-    let export_count = unsafe {
-        unaligned_u16(core::ptr::addr_of!(header.export_count))
-    } as usize;
+    let export_count = unsafe { unaligned_u16(core::ptr::addr_of!(header.export_count)) } as usize;
     // SAFETY: same.
-    let import_count = unsafe {
-        unaligned_u16(core::ptr::addr_of!(header.import_count))
-    } as usize;
+    let import_count = unsafe { unaligned_u16(core::ptr::addr_of!(header.import_count)) } as usize;
 
     let exports_off = size_of::<ManifestHeader>();
     let exports_size = export_count
@@ -206,7 +200,11 @@ fn parse_payload(payload: &[u8]) -> Result<DriverManifestView<'_>, DriverManifes
         }
     }
 
-    Ok(DriverManifestView { header, exports, imports })
+    Ok(DriverManifestView {
+        header,
+        exports,
+        imports,
+    })
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -227,10 +225,7 @@ pub unsafe fn unaligned_u16(p: *const u16) -> u16 {
 /// Read a single LEB128-encoded u32 starting at `wasm[off]`. WASM
 /// spec §5.2.2. Caps at 5 bytes (max for u32) to refuse hostile
 /// overlong encodings.
-pub fn read_leb128_u32(
-    wasm: &[u8],
-    off: usize,
-) -> Result<(u32, usize), DriverManifestError> {
+pub fn read_leb128_u32(wasm: &[u8], off: usize) -> Result<(u32, usize), DriverManifestError> {
     let mut result: u32 = 0;
     let mut shift: u32 = 0;
     let mut i = off;
@@ -272,9 +267,9 @@ pub fn trim_nul(buf: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use alloc::vec::Vec;
     use super::*;
     use crate::{build_manifest, DriverKind, FuncSig};
+    use alloc::vec::Vec;
 
     /// Build a minimal valid WASM that wraps a driver manifest in
     /// the `wari_driver_manifest` custom section. All adversarial
@@ -316,7 +311,7 @@ mod tests {
             ],
             &[
                 (b"wari", b"mmio_write8", FuncSig::U32xU32I32),
-                (b"wari", b"mmio_read8",  FuncSig::U32U32),
+                (b"wari", b"mmio_read8", FuncSig::U32U32),
             ],
         )
     }
@@ -326,9 +321,7 @@ mod tests {
     /// tests to corrupt a specific byte without re-encoding the
     /// whole wasm.
     fn manifest_start_offset(wasm: &[u8]) -> usize {
-        let payload = find_section_payload(wasm, SECTION_NAME)
-            .unwrap()
-            .unwrap();
+        let payload = find_section_payload(wasm, SECTION_NAME).unwrap().unwrap();
         (payload.as_ptr() as usize) - (wasm.as_ptr() as usize)
     }
 
@@ -354,7 +347,10 @@ mod tests {
         let mut wasm = synth_wasm(&uart_manifest_bytes());
         let off = manifest_start_offset(&wasm);
         wasm[off] = b'X';
-        assert!(matches!(parse_from_wasm(&wasm), Err(DriverManifestError::BadMagic)));
+        assert!(matches!(
+            parse_from_wasm(&wasm),
+            Err(DriverManifestError::BadMagic)
+        ));
     }
 
     #[test]
@@ -375,7 +371,10 @@ mod tests {
         let off = manifest_start_offset(&wasm);
         // First ExportDecl at off + 16, sig byte at +NAME_MAX = +32.
         wasm[off + 16 + crate::NAME_MAX] = 0xff;
-        assert!(matches!(parse_from_wasm(&wasm), Err(DriverManifestError::UnknownSig)));
+        assert!(matches!(
+            parse_from_wasm(&wasm),
+            Err(DriverManifestError::UnknownSig)
+        ));
     }
 
     #[test]
@@ -385,7 +384,10 @@ mod tests {
         // First ImportDecl at off + 16 + 2*36 = off + 88.
         // Sig byte at +MODULE_MAX + NAME_MAX = +16+32 = +48.
         wasm[off + 88 + crate::MODULE_MAX + crate::NAME_MAX] = 0xff;
-        assert!(matches!(parse_from_wasm(&wasm), Err(DriverManifestError::UnknownSig)));
+        assert!(matches!(
+            parse_from_wasm(&wasm),
+            Err(DriverManifestError::UnknownSig)
+        ));
     }
 
     #[test]
@@ -394,7 +396,10 @@ mod tests {
         let mut bytes = [0u8; 8];
         bytes[0..4].copy_from_slice(&MAGIC);
         let wasm = synth_wasm(&bytes);
-        assert!(matches!(parse_from_wasm(&wasm), Err(DriverManifestError::Truncated)));
+        assert!(matches!(
+            parse_from_wasm(&wasm),
+            Err(DriverManifestError::Truncated)
+        ));
     }
 
     #[test]
@@ -408,7 +413,10 @@ mod tests {
         bytes[6] = DriverKind::Uart as u8;
         bytes[8] = 99; // export_count low byte
         let wasm = synth_wasm(&bytes);
-        assert!(matches!(parse_from_wasm(&wasm), Err(DriverManifestError::Truncated)));
+        assert!(matches!(
+            parse_from_wasm(&wasm),
+            Err(DriverManifestError::Truncated)
+        ));
     }
 
     #[test]
@@ -432,7 +440,10 @@ mod tests {
         let mut wasm = Vec::new();
         wasm.extend_from_slice(&WASM_MAGIC);
         wasm.extend_from_slice(&WASM_VERSION);
-        assert!(matches!(parse_from_wasm(&wasm), Err(DriverManifestError::Missing)));
+        assert!(matches!(
+            parse_from_wasm(&wasm),
+            Err(DriverManifestError::Missing)
+        ));
     }
 
     #[test]

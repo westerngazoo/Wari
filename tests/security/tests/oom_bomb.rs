@@ -44,8 +44,7 @@ fn oom_bomb_is_contained() {
     // path or "memory.grow returns -1; module continues normally" →
     // `[hello] exit(...)`. Both are observed terminal states, not a
     // hung kernel.
-    let terminal =
-        text.contains(markers::HELLO_EXIT_0) || text.contains("tier-1 hello failed");
+    let terminal = text.contains(markers::HELLO_EXIT_0) || text.contains("tier-1 hello failed");
     assert!(
         terminal,
         "kernel did not reach a terminal Tier-1 state — possible \

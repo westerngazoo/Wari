@@ -42,39 +42,39 @@
 // kernel's trap handler (see kernel/src/trap.rs::handle_ecall).
 
 /// Write a single byte to the kernel UART.
-pub const SYS_PUTCHAR:      usize = 0;
+pub const SYS_PUTCHAR: usize = 0;
 /// Terminate the current process with an exit code.
-pub const SYS_EXIT:         usize = 1;
+pub const SYS_EXIT: usize = 1;
 /// Non-blocking send on a capability/port (seL4-style).
-pub const SYS_SEND:         usize = 2;
+pub const SYS_SEND: usize = 2;
 /// Blocking receive on a capability/port.
-pub const SYS_RECEIVE:      usize = 3;
+pub const SYS_RECEIVE: usize = 3;
 /// Synchronous call: send + receive-reply on one endpoint.
-pub const SYS_CALL:         usize = 4;
+pub const SYS_CALL: usize = 4;
 /// Reply to the last `SYS_CALL` that targeted this server.
-pub const SYS_REPLY:        usize = 5;
+pub const SYS_REPLY: usize = 5;
 /// Map physical pages into the caller's address space.
-pub const SYS_MAP:          usize = 6;
+pub const SYS_MAP: usize = 6;
 /// Unmap a range from the caller's address space.
-pub const SYS_UNMAP:        usize = 7;
+pub const SYS_UNMAP: usize = 7;
 /// Allocate physical pages owned by the caller.
-pub const SYS_ALLOC_PAGES:  usize = 8;
+pub const SYS_ALLOC_PAGES: usize = 8;
 /// Free physical pages previously allocated by the caller.
-pub const SYS_FREE_PAGES:   usize = 9;
+pub const SYS_FREE_PAGES: usize = 9;
 // 10: retired — formerly SYS_SPAWN_ELF, see Wari R7 / docs/prior-art.md.
 //     A future SYS_WASM_LOAD will get a fresh number, not this slot.
 /// Wait for a child process to exit and reap it.
-pub const SYS_WAIT:         usize = 11;
+pub const SYS_WAIT: usize = 11;
 /// Return the caller's PID.
-pub const SYS_GETPID:       usize = 12;
+pub const SYS_GETPID: usize = 12;
 /// Cooperatively yield the CPU.
-pub const SYS_YIELD:        usize = 13;
+pub const SYS_YIELD: usize = 13;
 /// Register an IRQ handler (capability-gated in Phase 1).
 pub const SYS_IRQ_REGISTER: usize = 14;
 /// Acknowledge a pending IRQ.
-pub const SYS_IRQ_ACK:      usize = 15;
+pub const SYS_IRQ_ACK: usize = 15;
 /// Request a system reboot (capability-gated in Phase 1).
-pub const SYS_REBOOT:       usize = 16;
+pub const SYS_REBOOT: usize = 16;
 
 // ── Capability-management syscalls (Phase 1b) ─────────────────────
 //
@@ -88,24 +88,24 @@ pub const SYS_REBOOT:       usize = 16;
 // the contract pins the numbering).
 
 /// Derive a child capability from a parent slot.
-pub const SYS_CAP_MINT:     usize = 17;
+pub const SYS_CAP_MINT: usize = 17;
 /// Same-rights duplicate of a capability into another slot.
-pub const SYS_CAP_COPY:     usize = 18;
+pub const SYS_CAP_COPY: usize = 18;
 /// Revoke a capability and every descendant in the derivation tree.
-pub const SYS_CAP_REVOKE:   usize = 19;
+pub const SYS_CAP_REVOKE: usize = 19;
 /// Delete a single capability without cascading.
-pub const SYS_CAP_DELETE:   usize = 20;
+pub const SYS_CAP_DELETE: usize = 20;
 /// Read metadata for a capability (kind, rights, badge).
-pub const SYS_CAP_LOOKUP:   usize = 21;
+pub const SYS_CAP_LOOKUP: usize = 21;
 /// Register a capability into the per-process fast-path table; returns a
 /// registered-handle index. See `docs/cap-registered-fastpath-design.md`.
-pub const SYS_CAP_REGISTER:   usize = 22;
+pub const SYS_CAP_REGISTER: usize = 22;
 /// Drop a registered fast-path handle (does not affect the capability).
 pub const SYS_CAP_UNREGISTER: usize = 23;
 /// Configure the caller's SQ/CQ submission ring (sq_ptr, cq_ptr, entries).
-pub const SYS_RING_SETUP:     usize = 24;
+pub const SYS_RING_SETUP: usize = 24;
 /// Drain up to N submission entries from the caller's ring.
-pub const SYS_RING_SUBMIT:    usize = 25;
+pub const SYS_RING_SUBMIT: usize = 25;
 
 /// Highest syscall number currently defined. Used for bounds checks
 /// in the dispatch path and for the size of any dispatch table.
@@ -138,34 +138,34 @@ pub enum SyscallError {
     /// Unspecified error. Used by pre-typed-error handlers for backward
     /// compatibility with callers that only check `a0 == usize::MAX`.
     /// New handlers should use a specific variant.
-    Generic           = 1,
+    Generic = 1,
 
     /// An argument was malformed or out of range (e.g., unaligned VA,
     /// PID out of bounds, flag bit set that the handler doesn't know).
-    InvalidArgument   = 2,
+    InvalidArgument = 2,
 
     /// Target process does not exist or is in the Free state.
-    NoSuchProcess     = 3,
+    NoSuchProcess = 3,
 
     /// Caller lacks the capability/permission for this operation.
     /// Placeholder until the capability system lands.
-    PermissionDenied  = 4,
+    PermissionDenied = 4,
 
     /// The kernel cannot satisfy the request right now (would block,
     /// resource exhausted, etc.). Distinct from `PermissionDenied`,
     /// which is a final "no."
-    WouldBlock        = 5,
+    WouldBlock = 5,
 
     /// Out of physical pages, out of socket handles, etc.
-    OutOfResources    = 6,
+    OutOfResources = 6,
 
     /// The requested page, handle, or capability is not mapped/owned.
-    NotMapped         = 7,
+    NotMapped = 7,
 
     /// WASM module failed validation at load time (malformed bytecode,
     /// unsupported section, type mismatch, etc.). Emitted by the kernel's
     /// wasmi-loader path.
-    BadWasm           = 8,
+    BadWasm = 8,
 }
 
 impl SyscallError {
@@ -201,25 +201,25 @@ pub mod net {
     pub const NET_SERVER_PID: usize = 3;
 
     /// Query "is the network up?" — returns 1 or 0.
-    pub const NET_STATUS:     usize = 0;
+    pub const NET_STATUS: usize = 0;
     /// Allocate a TCP socket handle.
     pub const NET_SOCKET_TCP: usize = 1;
     /// Allocate a UDP socket handle.
     pub const NET_SOCKET_UDP: usize = 2;
     /// Bind a socket to a local port: `(handle, port)`.
-    pub const NET_BIND:       usize = 3;
+    pub const NET_BIND: usize = 3;
     /// Blocking connect: `(handle, packed_ip, port)`.
-    pub const NET_CONNECT:    usize = 4;
+    pub const NET_CONNECT: usize = 4;
     /// Listen on a bound socket: `(handle, port)`.
-    pub const NET_LISTEN:     usize = 5;
+    pub const NET_LISTEN: usize = 5;
     /// Accept an incoming connection: `(handle)` — reserved, unimplemented.
-    pub const NET_ACCEPT:     usize = 6;
+    pub const NET_ACCEPT: usize = 6;
     /// Send on a socket: `(handle, buf_va, len, packed_ip?, port?)`.
-    pub const NET_SEND:       usize = 7;
+    pub const NET_SEND: usize = 7;
     /// Blocking receive: `(handle, buf_va, max_len)`.
-    pub const NET_RECV:       usize = 8;
+    pub const NET_RECV: usize = 8;
     /// Close a socket handle: `(handle)`.
-    pub const NET_CLOSE:      usize = 9;
+    pub const NET_CLOSE: usize = 9;
 
     /// Largest opcode currently defined. Dispatch tables size off this.
     pub const NET_OP_MAX: usize = NET_CLOSE;
@@ -377,17 +377,29 @@ pub mod reg {
         #[test]
         fn ok_when_all_clauses_hold() {
             assert_eq!(validate_handle(0, true, 0, 0, true), RegCheck::Ok);
-            assert_eq!(validate_handle(REG_SLOTS - 1, true, 42, 42, true), RegCheck::Ok);
+            assert_eq!(
+                validate_handle(REG_SLOTS - 1, true, 42, 42, true),
+                RegCheck::Ok
+            );
         }
 
         #[test]
         fn out_of_range_is_first_and_short_circuits() {
             // At and beyond the bound → OutOfRange.
-            assert_eq!(validate_handle(REG_SLOTS, true, 1, 1, true), RegCheck::OutOfRange);
-            assert_eq!(validate_handle(u32::MAX, true, 1, 1, true), RegCheck::OutOfRange);
+            assert_eq!(
+                validate_handle(REG_SLOTS, true, 1, 1, true),
+                RegCheck::OutOfRange
+            );
+            assert_eq!(
+                validate_handle(u32::MAX, true, 1, 1, true),
+                RegCheck::OutOfRange
+            );
             // OutOfRange wins even when every later clause would also fail
             // (proves ordering: a hostile index never reaches slot reads).
-            assert_eq!(validate_handle(REG_SLOTS, false, 1, 2, false), RegCheck::OutOfRange);
+            assert_eq!(
+                validate_handle(REG_SLOTS, false, 1, 2, false),
+                RegCheck::OutOfRange
+            );
         }
 
         #[test]
@@ -408,7 +420,10 @@ pub mod reg {
 
         #[test]
         fn not_permitted_is_last_clause() {
-            assert_eq!(validate_handle(5, true, 3, 3, false), RegCheck::NotPermitted);
+            assert_eq!(
+                validate_handle(5, true, 3, 3, false),
+                RegCheck::NotPermitted
+            );
         }
 
         #[test]
@@ -488,8 +503,14 @@ pub mod ring {
     #[inline]
     fn rd_u64(b: &[u8], at: usize) -> u64 {
         u64::from_le_bytes([
-            b[at], b[at + 1], b[at + 2], b[at + 3],
-            b[at + 4], b[at + 5], b[at + 6], b[at + 7],
+            b[at],
+            b[at + 1],
+            b[at + 2],
+            b[at + 3],
+            b[at + 4],
+            b[at + 5],
+            b[at + 6],
+            b[at + 7],
         ])
     }
 
@@ -814,18 +835,18 @@ mod tests {
         // the previous SYS_REBOOT (16). Nothing in this range should
         // collide; the contiguous block makes the dispatch table
         // simpler downstream.
-        assert_eq!(SYS_CAP_MINT,       17);
-        assert_eq!(SYS_CAP_COPY,       18);
-        assert_eq!(SYS_CAP_REVOKE,     19);
-        assert_eq!(SYS_CAP_DELETE,     20);
-        assert_eq!(SYS_CAP_LOOKUP,     21);
+        assert_eq!(SYS_CAP_MINT, 17);
+        assert_eq!(SYS_CAP_COPY, 18);
+        assert_eq!(SYS_CAP_REVOKE, 19);
+        assert_eq!(SYS_CAP_DELETE, 20);
+        assert_eq!(SYS_CAP_LOOKUP, 21);
         // cap-fastpath register/unregister + ring setup/submit extend the
         // contiguous block.
-        assert_eq!(SYS_CAP_REGISTER,   22);
+        assert_eq!(SYS_CAP_REGISTER, 22);
         assert_eq!(SYS_CAP_UNREGISTER, 23);
-        assert_eq!(SYS_RING_SETUP,     24);
-        assert_eq!(SYS_RING_SUBMIT,    25);
-        assert_eq!(SYS_MAX,            SYS_RING_SUBMIT);
+        assert_eq!(SYS_RING_SETUP, 24);
+        assert_eq!(SYS_RING_SUBMIT, 25);
+        assert_eq!(SYS_MAX, SYS_RING_SUBMIT);
         // And not stepping on SYS_REBOOT.
         assert_ne!(SYS_CAP_MINT, SYS_REBOOT);
     }
@@ -834,9 +855,16 @@ mod tests {
     fn net_opcodes_are_distinct() {
         use super::net::*;
         let codes = [
-            NET_STATUS, NET_SOCKET_TCP, NET_SOCKET_UDP, NET_BIND,
-            NET_CONNECT, NET_LISTEN, NET_ACCEPT, NET_SEND,
-            NET_RECV, NET_CLOSE,
+            NET_STATUS,
+            NET_SOCKET_TCP,
+            NET_SOCKET_UDP,
+            NET_BIND,
+            NET_CONNECT,
+            NET_LISTEN,
+            NET_ACCEPT,
+            NET_SEND,
+            NET_RECV,
+            NET_CLOSE,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -869,7 +897,7 @@ mod tests {
         // syscalls around the hole stay where they are, so slot 10 is
         // observably unused.
         assert_eq!(SYS_FREE_PAGES, 9);
-        assert_eq!(SYS_WAIT,       11);
+        assert_eq!(SYS_WAIT, 11);
         // If a future patch re-introduces `pub const SYS_SPAWN: usize
         // = 10;`, the next line will fail to compile (name collision
         // with a local binding). Cheap belt-and-braces check.

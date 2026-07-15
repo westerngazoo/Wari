@@ -157,7 +157,9 @@ pub fn start(proc_id: u8, wasm_bytes: &[u8], module_id: ModuleId) -> StepOutcome
         Ok(t) => t,
         Err(_) => return StepOutcome::Faulted,
     };
-    let loader::Tier1Instance { instance, store, .. } = tier1;
+    let loader::Tier1Instance {
+        instance, store, ..
+    } = tier1;
     pool()[proc_id as usize] = Some(Tier1Slot {
         store,
         instance,
@@ -214,10 +216,7 @@ pub fn resume(proc_id: u8) -> StepOutcome {
 
 /// Common tail for [`start`]/[`resume`]: classify the wasmi result,
 /// park or release the slot, and translate to a [`StepOutcome`].
-fn settle(
-    proc_id: u8,
-    call: Result<ResumableCall, wasmi::Error>,
-) -> StepOutcome {
+fn settle(proc_id: u8, call: Result<ResumableCall, wasmi::Error>) -> StepOutcome {
     match call {
         Ok(ResumableCall::Finished) => {
             // Returned without proc_exit — protocol violation but
