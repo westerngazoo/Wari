@@ -18,17 +18,29 @@
 //!   enforcement lives here, next to the types).
 //! - [`pool`] — `Pool<T, N>` slab and `BoundedQueue<T, N>` FIFO, the
 //!   two allocation-free containers backing kernel objects.
+//! - [`cspace`] — the per-process capability table (`CSpace`,
+//!   `CSPACE_SLOTS`, `MAX_PROCS`); INV-17/INV-18 mechanics.
+//! - [`objects`] — the kernel object kinds (`Endpoint`,
+//!   `Notification`, `Frame`, `Untyped`, `Net`, `Socket`) and the
+//!   `ObjectPools` aggregate.
 //!
-//! Still kernel-side, migrating in the remaining B-3 slices:
-//! `cspace`, `objects`, `revoke`, and the `#[cfg(kani)]` proof
-//! harnesses.
+//! Still kernel-side, migrating in the final B-3 slice: `revoke` and
+//! the `#[cfg(kani)]` proof harnesses.
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod cspace;
+pub mod objects;
 pub mod pool;
 pub mod static_caps;
 pub mod types;
 
+pub use cspace::{CSpace, CSPACE_SLOTS, MAX_PROCS};
+pub use objects::{
+    Endpoint, Frame, Net, Notification, ObjectPools, Socket, TcbRef, Untyped,
+    ENDPOINT_POOL_CAPACITY, FRAME_POOL_CAPACITY, NET_POOL_CAPACITY, NOTIFICATION_POOL_CAPACITY,
+    SOCKET_POOL_CAPACITY, UNTYPED_POOL_CAPACITY,
+};
 pub use pool::{BoundedQueue, Pool};
 pub use static_caps::{caps_for, Caps, ModuleId, Tier};
 pub use types::{
