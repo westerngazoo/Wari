@@ -10,9 +10,12 @@ authors.workspace = true
 [lints]
 workspace = true
 
-# Pure logic — no dependencies. `#![cfg_attr(not(test), no_std)]` keeps it
-# no_std for the kernel build; the test profile links std so
-# `cargo test -p wari-cap` runs on host.
+# Pure logic. `#![cfg_attr(not(test), no_std)]` keeps it no_std for
+# the kernel build; the test profile links std so
+# `cargo test -p wari-cap` runs on host. `wari-error` supplies the
+# kernel-wide `KernelError` taxonomy the cap operations return — one
+# taxonomy, not a parallel CapError (see the B-3 slice-1 PR).
 [dependencies]
+wari-error = { path = "../wari-error" }
 
 [dev-dependencies]

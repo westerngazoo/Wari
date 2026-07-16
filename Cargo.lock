@@ -374,6 +374,9 @@ version = "0.0.1"
 [[package]]
 name = "wari-cap"
 version = "0.0.1"
+dependencies = [
+ "wari-error",
+]
 
 [[package]]
 name = "wari-driver-iface"
@@ -391,6 +394,14 @@ dependencies = [
 name = "wari-driver-uart"
 version = "0.0.1"
 dependencies = [
+ "wari-driver-iface",
+]
+
+[[package]]
+name = "wari-error"
+version = "0.0.1"
+dependencies = [
+ "wari-abi",
  "wari-driver-iface",
 ]
 
@@ -414,6 +425,7 @@ dependencies = [
  "wari-abi",
  "wari-cap",
  "wari-driver-iface",
+ "wari-error",
  "wari-ipc",
  "wari-mem",
  "wari-sched",

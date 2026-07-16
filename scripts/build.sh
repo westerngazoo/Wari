@@ -126,7 +126,7 @@ echo "--- [1/7] Host unit tests (pure-logic crates)"
 cargo test --quiet \
     -p wari-abi -p wari-driver-iface -p wari-mem -p wari-wnm \
     -p wari-policy -p wari-ipc -p wari-wasi -p wari-cap -p wari-sched \
-    -p wari-validate
+    -p wari-validate -p wari-error
 
 # ── 2. Tier-1 programs ──────────────────────────────────────────
 STEP="tier1-programs"

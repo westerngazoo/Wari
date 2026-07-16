@@ -192,7 +192,7 @@ objdump: build
 # exists for boxes without it).
 HOST_CRATES := -p wari-abi -p wari-driver-iface -p wari-mem \
                -p wari-wnm -p wari-policy -p wari-ipc -p wari-wasi \
-               -p wari-cap -p wari-sched -p wari-validate
+               -p wari-cap -p wari-sched -p wari-validate -p wari-error
 
 test-unit:
 	cargo test $(HOST_CRATES)

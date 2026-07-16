@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "wari-error"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# Pure logic. `#![cfg_attr(not(test), no_std)]` keeps it no_std for
+# the kernel build; the test profile links std so
+# `cargo test -p wari-error` runs on host. Both dependencies are pure
+# no_std crates: `wari-abi` supplies the userspace-visible
+# `SyscallError` that `KernelError::into_syscall` maps onto,
+# `wari-driver-iface` supplies `DriverManifestError` for the `From`
+# conversion at the driver-load boundary.
+[dependencies]
+wari-abi = { path = "../abi-shared" }
+wari-driver-iface = { path = "../driver-iface" }
+
+[dev-dependencies]
