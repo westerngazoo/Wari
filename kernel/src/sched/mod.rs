@@ -98,11 +98,7 @@ pub fn processes() -> &'static mut [Option<Process>; MAX_PROCS] {
 ///
 /// `KernelError::InvalidArgument` if `proc_id >= MAX_PROCS` or the
 /// slot is already occupied.
-pub fn register_library(
-    proc_id: u8,
-    tier: Tier,
-    module_id: ModuleId,
-) -> Result<(), KernelError> {
+pub fn register_library(proc_id: u8, tier: Tier, module_id: ModuleId) -> Result<(), KernelError> {
     if (proc_id as usize) >= MAX_PROCS {
         return Err(KernelError::InvalidArgument);
     }
@@ -116,11 +112,7 @@ pub fn register_library(
 
 /// Register a Tier-1 tenant in the `Ready` state. The actual WASM
 /// load + execution happens later in `run_tier1`.
-pub fn register_tenant(
-    proc_id: u8,
-    tier: Tier,
-    module_id: ModuleId,
-) -> Result<(), KernelError> {
+pub fn register_tenant(proc_id: u8, tier: Tier, module_id: ModuleId) -> Result<(), KernelError> {
     if (proc_id as usize) >= MAX_PROCS {
         return Err(KernelError::InvalidArgument);
     }
@@ -225,15 +217,13 @@ pub fn run() -> Result<(), KernelError> {
             StepOutcome::Exited(code) => {
                 kprintln!(
                     "[sched] Tier-1 instance proc_id={} exited (code={})",
-                    proc_id, code
+                    proc_id,
+                    code
                 );
                 Some(ProcessState::Exited(code))
             }
             StepOutcome::Faulted => {
-                kprintln!(
-                    "[sched] Tier-1 instance proc_id={} faulted",
-                    proc_id
-                );
+                kprintln!("[sched] Tier-1 instance proc_id={} faulted", proc_id);
                 Some(ProcessState::Faulted)
             }
             StepOutcome::Blocked => {

@@ -22,8 +22,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const KERNEL_ELF_REL: &str =
-    "target/riscv64gc-unknown-none-elf/release/wari";
+const KERNEL_ELF_REL: &str = "target/riscv64gc-unknown-none-elf/release/wari";
 
 /// Deadline for the marker to appear. Wasmi instantiation is allowed
 /// more headroom than MMU init because module parse/validate runs
@@ -52,9 +51,11 @@ fn kernel_runs_wasmi_noop() {
 
     let mut child = Command::new("qemu-system-riscv64")
         .args([
-            "-machine", "virt",
+            "-machine",
+            "virt",
             "-nographic",
-            "-bios", "default",
+            "-bios",
+            "default",
             "-kernel",
         ])
         .arg(&kernel)

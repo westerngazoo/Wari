@@ -35,41 +35,41 @@ global_asm!(include_str!("trap.S"));
 #[derive(Clone, Copy)]
 pub struct TrapFrame {
     pub zero: usize,    // x0   offset 0x00 (always 0, kept for index symmetry)
-    pub ra:   usize,    // x1   offset 0x08
-    pub sp:   usize,    // x2   offset 0x10
-    pub gp:   usize,    // x3   offset 0x18
-    pub tp:   usize,    // x4   offset 0x20
-    pub t0:   usize,    // x5   offset 0x28
-    pub t1:   usize,    // x6   offset 0x30
-    pub t2:   usize,    // x7   offset 0x38
-    pub s0:   usize,    // x8   offset 0x40
-    pub s1:   usize,    // x9   offset 0x48
-    pub a0:   usize,    // x10  offset 0x50
-    pub a1:   usize,    // x11  offset 0x58
-    pub a2:   usize,    // x12  offset 0x60
-    pub a3:   usize,    // x13  offset 0x68
-    pub a4:   usize,    // x14  offset 0x70
-    pub a5:   usize,    // x15  offset 0x78
-    pub a6:   usize,    // x16  offset 0x80
-    pub a7:   usize,    // x17  offset 0x88
-    pub s2:   usize,    // x18  offset 0x90
-    pub s3:   usize,    // x19  offset 0x98
-    pub s4:   usize,    // x20  offset 0xA0
-    pub s5:   usize,    // x21  offset 0xA8
-    pub s6:   usize,    // x22  offset 0xB0
-    pub s7:   usize,    // x23  offset 0xB8
-    pub s8:   usize,    // x24  offset 0xC0
-    pub s9:   usize,    // x25  offset 0xC8
-    pub s10:  usize,    // x26  offset 0xD0
-    pub s11:  usize,    // x27  offset 0xD8
-    pub t3:   usize,    // x28  offset 0xE0
-    pub t4:   usize,    // x29  offset 0xE8
-    pub t5:   usize,    // x30  offset 0xF0
-    pub t6:   usize,    // x31  offset 0xF8
-    pub sepc:    usize, //      offset 0x100
+    pub ra: usize,      // x1   offset 0x08
+    pub sp: usize,      // x2   offset 0x10
+    pub gp: usize,      // x3   offset 0x18
+    pub tp: usize,      // x4   offset 0x20
+    pub t0: usize,      // x5   offset 0x28
+    pub t1: usize,      // x6   offset 0x30
+    pub t2: usize,      // x7   offset 0x38
+    pub s0: usize,      // x8   offset 0x40
+    pub s1: usize,      // x9   offset 0x48
+    pub a0: usize,      // x10  offset 0x50
+    pub a1: usize,      // x11  offset 0x58
+    pub a2: usize,      // x12  offset 0x60
+    pub a3: usize,      // x13  offset 0x68
+    pub a4: usize,      // x14  offset 0x70
+    pub a5: usize,      // x15  offset 0x78
+    pub a6: usize,      // x16  offset 0x80
+    pub a7: usize,      // x17  offset 0x88
+    pub s2: usize,      // x18  offset 0x90
+    pub s3: usize,      // x19  offset 0x98
+    pub s4: usize,      // x20  offset 0xA0
+    pub s5: usize,      // x21  offset 0xA8
+    pub s6: usize,      // x22  offset 0xB0
+    pub s7: usize,      // x23  offset 0xB8
+    pub s8: usize,      // x24  offset 0xC0
+    pub s9: usize,      // x25  offset 0xC8
+    pub s10: usize,     // x26  offset 0xD0
+    pub s11: usize,     // x27  offset 0xD8
+    pub t3: usize,      // x28  offset 0xE0
+    pub t4: usize,      // x29  offset 0xE8
+    pub t5: usize,      // x30  offset 0xF0
+    pub t6: usize,      // x31  offset 0xF8
+    pub sepc: usize,    //      offset 0x100
     pub sstatus: usize, //      offset 0x108
-    pub scause:  usize, //      offset 0x110
-    pub stval:   usize, //      offset 0x118
+    pub scause: usize,  //      offset 0x110
+    pub stval: usize,   //      offset 0x118
 }
 
 // `TrapFrame::zero()` constructor intentionally not implemented in PR 3.
@@ -140,7 +140,8 @@ pub extern "C" fn handle_trap(frame: &mut TrapFrame) {
             _ => {
                 kprintln!(
                     "[trap] unhandled interrupt code={} sepc={:#x}",
-                    code, frame.sepc,
+                    code,
+                    frame.sepc,
                 );
                 halt();
             }
@@ -150,7 +151,9 @@ pub extern "C" fn handle_trap(frame: &mut TrapFrame) {
         // kernel bug; print and halt.
         kprintln!(
             "[trap] exception code={} sepc={:#x} stval={:#x}",
-            code, frame.sepc, frame.stval,
+            code,
+            frame.sepc,
+            frame.stval,
         );
         halt();
     }
@@ -171,6 +174,8 @@ fn ack_timer() {
 fn halt() -> ! {
     loop {
         // SAFETY: INV-7. `wfi` is permitted in S-mode.
-        unsafe { asm!("wfi"); }
+        unsafe {
+            asm!("wfi");
+        }
     }
 }

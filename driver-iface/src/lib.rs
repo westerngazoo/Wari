@@ -229,14 +229,38 @@ impl FuncSig {
         const I32_5: &[WasmValType] = &[I32, I32, I32, I32, I32];
         const I64_1: &[WasmValType] = &[I64];
         match self {
-            FuncSig::UnitUnit   => WasmSigShape { params: E,     results: E      },
-            FuncSig::U32xU32I32 => WasmSigShape { params: I32_2, results: I32_1  },
-            FuncSig::U32I32     => WasmSigShape { params: I32_1, results: I32_1  },
-            FuncSig::U32U32     => WasmSigShape { params: I32_1, results: I32_1  },
-            FuncSig::U64I32     => WasmSigShape { params: I64_1, results: I32_1  },
-            FuncSig::UnitU64    => WasmSigShape { params: E,     results: I64_1  },
-            FuncSig::U32x5I32   => WasmSigShape { params: I32_5, results: I32_1  },
-            FuncSig::U32x3I32   => WasmSigShape { params: I32_3, results: I32_1  },
+            FuncSig::UnitUnit => WasmSigShape {
+                params: E,
+                results: E,
+            },
+            FuncSig::U32xU32I32 => WasmSigShape {
+                params: I32_2,
+                results: I32_1,
+            },
+            FuncSig::U32I32 => WasmSigShape {
+                params: I32_1,
+                results: I32_1,
+            },
+            FuncSig::U32U32 => WasmSigShape {
+                params: I32_1,
+                results: I32_1,
+            },
+            FuncSig::U64I32 => WasmSigShape {
+                params: I64_1,
+                results: I32_1,
+            },
+            FuncSig::UnitU64 => WasmSigShape {
+                params: E,
+                results: I64_1,
+            },
+            FuncSig::U32x5I32 => WasmSigShape {
+                params: I32_5,
+                results: I32_1,
+            },
+            FuncSig::U32x3I32 => WasmSigShape {
+                params: I32_3,
+                results: I32_1,
+            },
         }
     }
 }
@@ -324,9 +348,7 @@ pub struct ImportDecl {
     pub _pad: [u8; 3],
 }
 
-const _: () = assert!(
-    core::mem::size_of::<ImportDecl>() == MODULE_MAX + NAME_MAX + 4
-);
+const _: () = assert!(core::mem::size_of::<ImportDecl>() == MODULE_MAX + NAME_MAX + 4);
 
 // ── Errors ───────────────────────────────────────────────────────
 
@@ -697,12 +719,7 @@ macro_rules! wari_uart_driver {
             // fits in u32 by ABI; the kernel's host-fn surface is
             // the only path by which this is invoked, so the
             // pointer is in-bounds for the driver's linmem.
-            let slice = unsafe {
-                core::slice::from_raw_parts(
-                    buf_ptr as *const u8,
-                    len as usize,
-                )
-            };
+            let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len as usize) };
             <$t as $crate::UartDriver>::write(slice)
         }
 
@@ -715,22 +732,21 @@ macro_rules! wari_uart_driver {
         #[link_section = "wari_driver_manifest"]
         #[used]
         #[no_mangle]
-        pub static WARI_DRIVER_MANIFEST: [u8; 192] =
-            $crate::build_manifest::<192>(
-                $crate::DriverKind::Uart,
-                &[
-                    (b"write",  $crate::FuncSig::U32xU32I32),
-                    (b"_start", $crate::FuncSig::UnitUnit),
-                ],
-                &[
-                    // Names match the driver's #[link_name = "..."]
-                    // attributes — those become the actual WASM
-                    // import names. The `wari_` prefix is the Rust
-                    // symbol, not the WASM-level name.
-                    (b"wari", b"mmio_write8", $crate::FuncSig::U32xU32I32),
-                    (b"wari", b"mmio_read8",  $crate::FuncSig::U32U32),
-                ],
-            );
+        pub static WARI_DRIVER_MANIFEST: [u8; 192] = $crate::build_manifest::<192>(
+            $crate::DriverKind::Uart,
+            &[
+                (b"write", $crate::FuncSig::U32xU32I32),
+                (b"_start", $crate::FuncSig::UnitUnit),
+            ],
+            &[
+                // Names match the driver's #[link_name = "..."]
+                // attributes — those become the actual WASM
+                // import names. The `wari_` prefix is the Rust
+                // symbol, not the WASM-level name.
+                (b"wari", b"mmio_write8", $crate::FuncSig::U32xU32I32),
+                (b"wari", b"mmio_read8", $crate::FuncSig::U32U32),
+            ],
+        );
     };
 }
 
@@ -808,12 +824,7 @@ macro_rules! wari_net_driver {
         pub extern "C" fn tx_send(buf_off: u32, len: u32) -> i32 {
             // SAFETY: kernel-validated linmem slice (same shape as
             // the UART shim).
-            let slice = unsafe {
-                core::slice::from_raw_parts(
-                    buf_off as *const u8,
-                    len as usize,
-                )
-            };
+            let slice = unsafe { core::slice::from_raw_parts(buf_off as *const u8, len as usize) };
             <$t as $crate::NetDriver>::tx_send(slice)
         }
 
@@ -873,17 +884,17 @@ macro_rules! wari_net_driver {
             $crate::build_manifest::<{ $crate::NET_MANIFEST_SIZE }>(
                 $crate::DriverKind::Net,
                 &[
-                    (b"_start",            $crate::FuncSig::UnitUnit),
-                    (b"poll",              $crate::FuncSig::U64I32),
-                    (b"tx_send",           $crate::FuncSig::U32xU32I32),
-                    (b"rx_pop",            $crate::FuncSig::UnitU64),
-                    (b"rx_recycle",        $crate::FuncSig::U32I32),
-                    (b"socket_create",     $crate::FuncSig::U32I32),
-                    (b"socket_close",      $crate::FuncSig::U32I32),
-                    (b"socket_bind",       $crate::FuncSig::U32x3I32),
-                    (b"socket_listen",     $crate::FuncSig::U32xU32I32),
-                    (b"socket_accept",     $crate::FuncSig::U32I32),
-                    (b"socket_send_canned",$crate::FuncSig::U32I32),
+                    (b"_start", $crate::FuncSig::UnitUnit),
+                    (b"poll", $crate::FuncSig::U64I32),
+                    (b"tx_send", $crate::FuncSig::U32xU32I32),
+                    (b"rx_pop", $crate::FuncSig::UnitU64),
+                    (b"rx_recycle", $crate::FuncSig::U32I32),
+                    (b"socket_create", $crate::FuncSig::U32I32),
+                    (b"socket_close", $crate::FuncSig::U32I32),
+                    (b"socket_bind", $crate::FuncSig::U32x3I32),
+                    (b"socket_listen", $crate::FuncSig::U32xU32I32),
+                    (b"socket_accept", $crate::FuncSig::U32I32),
+                    (b"socket_send_canned", $crate::FuncSig::U32I32),
                 ],
                 &[
                     // Names match the driver's #[link_name = "..."]
@@ -893,13 +904,13 @@ macro_rules! wari_net_driver {
                     // sign-tool's bidirectional check passes. See
                     // NET_MANIFEST_SIZE doc.
                     (b"wari", b"net_mmio_write32", $crate::FuncSig::U32xU32I32),
-                    (b"wari", b"net_mmio_read32",  $crate::FuncSig::U32U32),
-                    (b"wari", b"nic_set_mac",      $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"net_mmio_read32", $crate::FuncSig::U32U32),
+                    (b"wari", b"nic_set_mac", $crate::FuncSig::U32xU32I32),
                     (b"wari", b"nic_attach_queue", $crate::FuncSig::U32x5I32),
                     (b"wari", b"nic_queue_notify", $crate::FuncSig::U32I32),
-                    (b"wari", b"lin_mem_base",     $crate::FuncSig::UnitU64),
-                    (b"wari", b"drv_log_u32",      $crate::FuncSig::U32xU32I32),
-                    (b"wari", b"drv_trace_u32",    $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"lin_mem_base", $crate::FuncSig::UnitU64),
+                    (b"wari", b"drv_log_u32", $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"drv_trace_u32", $crate::FuncSig::U32xU32I32),
                 ],
             );
     };
@@ -972,12 +983,12 @@ mod tests {
         const M: [u8; 192] = build_manifest::<192>(
             DriverKind::Uart,
             &[
-                (b"write",  FuncSig::U32xU32I32),
+                (b"write", FuncSig::U32xU32I32),
                 (b"_start", FuncSig::UnitUnit),
             ],
             &[
                 (b"wari", b"wari_mmio_write8", FuncSig::U32xU32I32),
-                (b"wari", b"wari_mmio_read8",  FuncSig::U32U32),
+                (b"wari", b"wari_mmio_read8", FuncSig::U32U32),
             ],
         );
         // Header
@@ -999,7 +1010,10 @@ mod tests {
         let off = 16 + 2 * 36;
         assert_eq!(&M[off..off + 4], b"wari");
         assert_eq!(M[off + 4], 0);
-        assert_eq!(&M[off + MODULE_MAX..off + MODULE_MAX + 16], b"wari_mmio_write8");
+        assert_eq!(
+            &M[off + MODULE_MAX..off + MODULE_MAX + 16],
+            b"wari_mmio_write8"
+        );
         assert_eq!(M[off + MODULE_MAX + NAME_MAX], FuncSig::U32xU32I32 as u8);
     }
 

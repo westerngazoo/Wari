@@ -181,10 +181,7 @@ pub unsafe fn write(bytes: &[u8]) -> Result<usize, KernelError> {
     // checked the iovec length fits a u32.
     let r = handle
         .write_fn
-        .call(
-            &mut handle.store,
-            (SCRATCH_OFFSET, bytes.len() as u32),
-        )
+        .call(&mut handle.store, (SCRATCH_OFFSET, bytes.len() as u32))
         .map_err(|_| KernelError::DriverError)?;
 
     if r < 0 {

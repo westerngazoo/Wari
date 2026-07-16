@@ -49,12 +49,7 @@ mod wasi {
     ///   and the kernel observes the exit code.
     #[link(wasm_import_module = "wasi_snapshot_preview1")]
     extern "C" {
-        pub fn fd_write(
-            fd: u32,
-            iovs: *const Iovec,
-            iovs_len: u32,
-            nwritten: *mut u32,
-        ) -> u32;
+        pub fn fd_write(fd: u32, iovs: *const Iovec, iovs_len: u32, nwritten: *mut u32) -> u32;
         pub fn proc_exit(code: u32) -> !;
     }
 
@@ -195,7 +190,10 @@ pub extern "C" fn _start() -> ! {
 
     fn print(s: &[u8]) {
         let mut nw: u32 = 0;
-        let iov = wasi::Iovec { buf: s.as_ptr(), buf_len: s.len() as u32 };
+        let iov = wasi::Iovec {
+            buf: s.as_ptr(),
+            buf_len: s.len() as u32,
+        };
         // SAFETY: host fn does its own validation.
         let _ = unsafe { wasi::fd_write(1, &iov, 1, &mut nw) };
     }

@@ -13,8 +13,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const KERNEL_ELF_REL: &str =
-    "target/riscv64gc-unknown-none-elf/release/wari";
+const KERNEL_ELF_REL: &str = "target/riscv64gc-unknown-none-elf/release/wari";
 
 /// Deadline for the marker to appear.
 const MARKER_DEADLINE: Duration = Duration::from_secs(5);
@@ -41,9 +40,11 @@ fn kernel_enables_mmu_and_installs_traps() {
 
     let mut child = Command::new("qemu-system-riscv64")
         .args([
-            "-machine", "virt",
+            "-machine",
+            "virt",
             "-nographic",
-            "-bios", "default",
+            "-bios",
+            "default",
             "-kernel",
         ])
         .arg(&kernel)

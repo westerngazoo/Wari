@@ -43,8 +43,8 @@ use wasmi::Caller;
 
 use crate::cap::syscall::{check_cap, E_AGAIN, E_INVAL, E_NOMEM, E_PERM};
 use crate::cap::{
-    cspaces, object_pools, ObjectKind, TcbRef, CAP_RIGHT_READ, CAP_RIGHT_WRITE,
-    CSPACE_SLOTS, MAX_PROCS,
+    cspaces, object_pools, ObjectKind, TcbRef, CAP_RIGHT_READ, CAP_RIGHT_WRITE, CSPACE_SLOTS,
+    MAX_PROCS,
 };
 use crate::runtime::tier1_pool::IpcBlock;
 use crate::runtime::wasi::Tier1HostState;
@@ -64,8 +64,14 @@ fn decode_msg(buf: &[u8; MSG_BYTES]) -> MsgRegs {
     while i < 4 {
         let o = 8 + i * 8;
         words[i] = u64::from_le_bytes([
-            buf[o], buf[o + 1], buf[o + 2], buf[o + 3],
-            buf[o + 4], buf[o + 5], buf[o + 6], buf[o + 7],
+            buf[o],
+            buf[o + 1],
+            buf[o + 2],
+            buf[o + 3],
+            buf[o + 4],
+            buf[o + 5],
+            buf[o + 6],
+            buf[o + 7],
         ]);
         i += 1;
     }
@@ -99,10 +105,7 @@ fn resolve_endpoint(proc_id: u8, slot: u32, required_rights: u8) -> Result<u16, 
 }
 
 /// Read the caller's 40-byte message from its own linear memory.
-fn read_msg(
-    caller: &mut Caller<'_, Tier1HostState>,
-    msg_ptr: u32,
-) -> Result<MsgRegs, i32> {
+fn read_msg(caller: &mut Caller<'_, Tier1HostState>, msg_ptr: u32) -> Result<MsgRegs, i32> {
     let memory = caller
         .get_export("memory")
         .and_then(|e| e.into_memory())
@@ -133,12 +136,7 @@ fn write_msg(
 /// Records `msg_ptr` so the resume-time flush knows where to deliver
 /// an incoming message (recv/call) — harmless for send (nothing is
 /// flushed unless a message was transferred in).
-fn block_and_yield(
-    proc_id: u8,
-    reason: BlockReason,
-    ep_idx: u16,
-    msg_ptr: u32,
-) -> wasmi::Error {
+fn block_and_yield(proc_id: u8, reason: BlockReason, ep_idx: u16, msg_ptr: u32) -> wasmi::Error {
     let table = sched::processes();
     if let Some(p) = table[proc_id as usize].as_mut() {
         p.msg_buf = msg_ptr;

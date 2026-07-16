@@ -131,9 +131,7 @@ impl CapId {
     /// before calling. This constructor itself is total — invalid
     /// inputs simply produce a `CapId` that no real cap will match.
     pub const fn new(proc_id: u8, slot: u8, generation: u16) -> Self {
-        let val: u32 = ((generation as u32) << 16)
-            | ((proc_id as u32) << 8)
-            | (slot as u32);
+        let val: u32 = ((generation as u32) << 16) | ((proc_id as u32) << 8) | (slot as u32);
         // ROOT collides if every component is max. No real (proc,
         // slot, gen) hits this because gen is incremented per slot
         // reuse and saturates well below u16::MAX in practice — but
@@ -292,7 +290,7 @@ impl Cap {
             parent: parent_id,
             generation: 0, // overwritten by the mint syscall before placement
             pool_index: parent.pool_index, // INV-16
-            kind: parent.kind,             // INV-16
+            kind: parent.kind, // INV-16
             rights: requested_rights,
         })
     }
@@ -387,8 +385,7 @@ mod tests {
             CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_GRANT,
         );
         let parent_id = CapId::new(0, 1, 1);
-        let child =
-            Cap::derive(&parent, parent_id, CAP_RIGHT_READ | CAP_RIGHT_WRITE, 0).unwrap();
+        let child = Cap::derive(&parent, parent_id, CAP_RIGHT_READ | CAP_RIGHT_WRITE, 0).unwrap();
         assert_eq!(child.rights, CAP_RIGHT_READ | CAP_RIGHT_WRITE);
         assert_eq!(child.kind, ObjectKind::Endpoint);
         assert_eq!(child.pool_index, parent.pool_index);
@@ -399,8 +396,7 @@ mod tests {
     fn derive_with_equal_rights_succeeds() {
         let parent = parent_with(ObjectKind::Endpoint, CAP_RIGHT_READ | CAP_RIGHT_WRITE);
         let parent_id = CapId::new(0, 1, 1);
-        let child =
-            Cap::derive(&parent, parent_id, CAP_RIGHT_READ | CAP_RIGHT_WRITE, 0).unwrap();
+        let child = Cap::derive(&parent, parent_id, CAP_RIGHT_READ | CAP_RIGHT_WRITE, 0).unwrap();
         assert_eq!(child.rights, parent.rights);
     }
 
@@ -409,12 +405,7 @@ mod tests {
         // Parent has READ only; child requests READ+WRITE.
         let parent = parent_with(ObjectKind::Endpoint, CAP_RIGHT_READ);
         let parent_id = CapId::new(0, 1, 1);
-        let result = Cap::derive(
-            &parent,
-            parent_id,
-            CAP_RIGHT_READ | CAP_RIGHT_WRITE,
-            0,
-        );
+        let result = Cap::derive(&parent, parent_id, CAP_RIGHT_READ | CAP_RIGHT_WRITE, 0);
         assert_eq!(result, Err(KernelError::PermissionDenied));
     }
 

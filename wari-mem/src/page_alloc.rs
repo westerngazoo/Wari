@@ -331,7 +331,10 @@ mod tests {
     fn test_free_invalid_address() {
         let mut a = make_alloc();
         assert_eq!(a.free(0), Err(AllocError::InvalidAddress));
-        assert_eq!(a.free(TEST_BASE - PAGE_SIZE), Err(AllocError::InvalidAddress));
+        assert_eq!(
+            a.free(TEST_BASE - PAGE_SIZE),
+            Err(AllocError::InvalidAddress)
+        );
     }
 
     #[test]

@@ -54,9 +54,7 @@ use super::cspace::CSpace;
 use super::objects::Endpoint;
 use super::static_caps::{caps_for, ModuleId, Tier};
 use super::storage::{cspaces, object_pools};
-use super::types::{
-    Cap, CapId, ObjectKind, CAP_RIGHT_READ, CAP_RIGHT_WRITE,
-};
+use super::types::{Cap, CapId, ObjectKind, CAP_RIGHT_READ, CAP_RIGHT_WRITE};
 
 // ─────────────────────────────────────────────────────────────────
 // Phase-1b proc-id assignments
@@ -228,7 +226,7 @@ pub fn init_root_caps() -> Result<(), KernelError> {
             rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
         };
         // PR Net-6b: install Net cap into both Tier-1 hello CSpaces.
-        install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO,   net_pool_idx);
+        install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO, net_pool_idx);
         install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO_B, net_pool_idx);
     }
 
@@ -261,7 +259,9 @@ pub fn init_root_caps() -> Result<(), KernelError> {
     //     dispatch + bind machinery; PR Net-4c wires it up with
     //     real allocations now that the net driver actually wants
     //     to wait on them.
-    let nic_notif_idx = pools.notifications.alloc(super::objects::Notification::new())?;
+    let nic_notif_idx = pools
+        .notifications
+        .alloc(super::objects::Notification::new())?;
     if let Some(notif) = pools.notifications.get_mut(nic_notif_idx) {
         notif.refcount = 1; // the driver's cap on this notification
     }
@@ -292,10 +292,7 @@ pub fn init_root_caps() -> Result<(), KernelError> {
     let nic_irq: u32 = 0; // sentinel; not used because vf2 driver is stub
     #[cfg(feature = "qemu")]
     {
-        crate::mmio::plic::bind_irq_to_notification(
-            nic_irq,
-            nic_notif_idx,
-        )?;
+        crate::mmio::plic::bind_irq_to_notification(nic_irq, nic_notif_idx)?;
         crate::mmio::plic::enable_irq(nic_irq, 1)?;
     }
     #[cfg(feature = "vf2")]
@@ -307,8 +304,7 @@ pub fn init_root_caps() -> Result<(), KernelError> {
 
     // UART ep refs: 1 for Tier-2 (if mmio_uart), plus 1 per Tier-1
     // instance (if stdout).
-    let uart_refs = (tier2_caps.mmio_uart as u16)
-        + 2 * (tier1_caps.stdout as u16);
+    let uart_refs = (tier2_caps.mmio_uart as u16) + 2 * (tier1_caps.stdout as u16);
     // Exit ep refs: 1 per Tier-1 instance (if exit).
     let exit_refs = 2 * (tier1_caps.exit as u16);
     if let Some(ep) = pools.endpoints.get_mut(uart_ipc_ep) {
@@ -381,13 +377,7 @@ pub(super) fn install_tier1_net_cap(
 ///   - have `badge = 0` (Phase-1b does not badge the boot-time caps;
 ///     PR 3 mints badged children when Tier-1 sends on the
 ///     endpoint).
-fn install_root_cap(
-    cs: &mut CSpace,
-    slot: u8,
-    kind: ObjectKind,
-    pool_index: u16,
-    rights: u8,
-) {
+fn install_root_cap(cs: &mut CSpace, slot: u8, kind: ObjectKind, pool_index: u16, rights: u8) {
     cs.slots[slot as usize] = Cap {
         badge: 0,
         parent: CapId::ROOT,

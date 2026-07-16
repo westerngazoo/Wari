@@ -31,8 +31,7 @@ where
 
     for export in view.exports {
         let name = wari_driver_iface::parse::trim_nul(&export.name);
-        let sig = FuncSig::from_raw(export.sig)
-            .ok_or(KernelError::DriverManifestMalformed)?;
+        let sig = FuncSig::from_raw(export.sig).ok_or(KernelError::DriverManifestMalformed)?;
         if !export_matches(instance, store, name, sig) {
             return Err(KernelError::DriverBadExport);
         }
@@ -40,12 +39,7 @@ where
     Ok(())
 }
 
-fn export_matches<S>(
-    instance: &wasmi::Instance,
-    store: &S,
-    name: &[u8],
-    sig: FuncSig,
-) -> bool
+fn export_matches<S>(instance: &wasmi::Instance, store: &S, name: &[u8], sig: FuncSig) -> bool
 where
     S: wasmi::AsContext,
 {
@@ -53,28 +47,16 @@ where
         return false;
     };
     match sig {
-        FuncSig::UnitUnit => instance
-            .get_typed_func::<(), ()>(store, name_str)
-            .is_ok(),
+        FuncSig::UnitUnit => instance.get_typed_func::<(), ()>(store, name_str).is_ok(),
         FuncSig::U32xU32I32 => instance
             .get_typed_func::<(u32, u32), i32>(store, name_str)
             .is_ok(),
-        FuncSig::U32I32 => instance
-            .get_typed_func::<u32, i32>(store, name_str)
-            .is_ok(),
-        FuncSig::U32U32 => instance
-            .get_typed_func::<u32, u32>(store, name_str)
-            .is_ok(),
-        FuncSig::U64I32 => instance
-            .get_typed_func::<u64, i32>(store, name_str)
-            .is_ok(),
-        FuncSig::UnitU64 => instance
-            .get_typed_func::<(), u64>(store, name_str)
-            .is_ok(),
+        FuncSig::U32I32 => instance.get_typed_func::<u32, i32>(store, name_str).is_ok(),
+        FuncSig::U32U32 => instance.get_typed_func::<u32, u32>(store, name_str).is_ok(),
+        FuncSig::U64I32 => instance.get_typed_func::<u64, i32>(store, name_str).is_ok(),
+        FuncSig::UnitU64 => instance.get_typed_func::<(), u64>(store, name_str).is_ok(),
         FuncSig::U32x5I32 => instance
-            .get_typed_func::<(u32, u32, u32, u32, u32), i32>(
-                store, name_str,
-            )
+            .get_typed_func::<(u32, u32, u32, u32, u32), i32>(store, name_str)
             .is_ok(),
         FuncSig::U32x3I32 => instance
             .get_typed_func::<(u32, u32, u32), i32>(store, name_str)

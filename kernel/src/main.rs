@@ -106,7 +106,9 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
         kprintln!("MMU init failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
-            unsafe { core::arch::asm!("wfi"); }
+            unsafe {
+                core::arch::asm!("wfi");
+            }
         }
     }
     trap::install();
@@ -117,7 +119,9 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
         kprintln!("cap pools init failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
-            unsafe { core::arch::asm!("wfi"); }
+            unsafe {
+                core::arch::asm!("wfi");
+            }
         }
     }
     kprintln!("cap pools initialized");
@@ -126,7 +130,9 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
         kprintln!("wari runtime: tier-2 uart load failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
-            unsafe { core::arch::asm!("wfi"); }
+            unsafe {
+                core::arch::asm!("wfi");
+            }
         }
     }
     kprintln!("tier-2 uart driver loaded");
@@ -135,7 +141,9 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
         kprintln!("wari runtime: tier-2 net load failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
-            unsafe { core::arch::asm!("wfi"); }
+            unsafe {
+                core::arch::asm!("wfi");
+            }
         }
     }
     kprintln!("tier-2 net driver loaded");
@@ -153,7 +161,9 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
         kprintln!("wari sched: tier-2 uart register failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is S-mode.
-            unsafe { core::arch::asm!("wfi"); }
+            unsafe {
+                core::arch::asm!("wfi");
+            }
         }
     }
     if let Err(e) = sched::register_library(
@@ -164,7 +174,9 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
         kprintln!("wari sched: tier-2 net register failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is S-mode.
-            unsafe { core::arch::asm!("wfi"); }
+            unsafe {
+                core::arch::asm!("wfi");
+            }
         }
     }
     if let Err(e) = sched::register_tenant(
@@ -175,7 +187,9 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
         kprintln!("wari sched: tier-1 A register failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is S-mode.
-            unsafe { core::arch::asm!("wfi"); }
+            unsafe {
+                core::arch::asm!("wfi");
+            }
         }
     }
     if let Err(e) = sched::register_tenant(
@@ -186,14 +200,18 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
         kprintln!("wari sched: tier-1 B register failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is S-mode.
-            unsafe { core::arch::asm!("wfi"); }
+            unsafe {
+                core::arch::asm!("wfi");
+            }
         }
     }
     if let Err(e) = sched::run() {
         kprintln!("wari sched: run failed: {:?}", e);
         loop {
             // SAFETY: INV-7 — wfi is S-mode.
-            unsafe { core::arch::asm!("wfi"); }
+            unsafe {
+                core::arch::asm!("wfi");
+            }
         }
     }
     kprintln!("[sched] all tenants exited, idling (Ctrl-R = reboot)");
@@ -230,7 +248,13 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
         if now >= next_beat {
             next_beat = now + HEARTBEAT_MS;
             let (_l8, _l32) = mmio::uart_ns16550::debug_lsr_snapshot();
-            kdebug!(uart, "[idle] t={}ms lsr8={:#04x} lsr32={:#010x}", now, _l8, _l32);
+            kdebug!(
+                uart,
+                "[idle] t={}ms lsr8={:#04x} lsr32={:#010x}",
+                now,
+                _l8,
+                _l32
+            );
         }
         if let Some(b) = mmio::uart_ns16550::try_read_byte() {
             if b == 0x12 {
@@ -255,6 +279,8 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
 fn panic(_info: &PanicInfo) -> ! {
     loop {
         // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
-        unsafe { core::arch::asm!("wfi"); }
+        unsafe {
+            core::arch::asm!("wfi");
+        }
     }
 }

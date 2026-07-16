@@ -55,9 +55,11 @@ fn kernel_loads_tier2_uart_driver() {
 
     let mut child = Command::new("qemu-system-riscv64")
         .args([
-            "-machine", "virt",
+            "-machine",
+            "virt",
             "-nographic",
-            "-bios", "default",
+            "-bios",
+            "default",
             "-kernel",
         ])
         .arg(&kernel)

@@ -323,14 +323,16 @@ pub unsafe fn socket_accept(handle: u32, tick_ms: u64) -> Result<i32, KernelErro
                     crate::abi::net::ACCEPT_DEADLINE_MS,
                 ) {
                     // SAFETY: INV-1, same access rules as `first`.
-                    let logged = unsafe {
-                        &mut (*addr_of_mut!(ACCEPT_EXPIRED_LOGGED))[handle as usize]
-                    };
+                    let logged =
+                        unsafe { &mut (*addr_of_mut!(ACCEPT_EXPIRED_LOGGED))[handle as usize] };
                     if !*logged {
                         *logged = true;
                         crate::kprintln!(
                             "[accept] window expired h={} t={}ms (open {}ms, budget {}ms)",
-                            handle, tick_ms, t0, crate::abi::net::ACCEPT_DEADLINE_MS,
+                            handle,
+                            tick_ms,
+                            t0,
+                            crate::abi::net::ACCEPT_DEADLINE_MS,
                         );
                     }
                     return Ok(crate::cap::syscall::E_TIMEDOUT);
@@ -339,8 +341,8 @@ pub unsafe fn socket_accept(handle: u32, tick_ms: u64) -> Result<i32, KernelErro
         }
     }
     // SAFETY: INV-1 + INV-8.
-    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
-        .expect("TIER2_NET ref always valid (static)");
+    let slot =
+        unsafe { addr_of_mut!(TIER2_NET).as_mut() }.expect("TIER2_NET ref always valid (static)");
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     // Drive one smoltcp poll first so any pending SYN is processed
     // into the listening socket's state before we inspect it.
@@ -381,8 +383,8 @@ pub unsafe fn socket_accept(handle: u32, tick_ms: u64) -> Result<i32, KernelErro
 /// Same as [`socket_create`].
 pub unsafe fn socket_send_canned(handle: u32, tick_ms: u64) -> Result<i32, KernelError> {
     // SAFETY: INV-1 + INV-8.
-    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
-        .expect("TIER2_NET ref always valid (static)");
+    let slot =
+        unsafe { addr_of_mut!(TIER2_NET).as_mut() }.expect("TIER2_NET ref always valid (static)");
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     let queued = h
         .socket_send_canned_fn
