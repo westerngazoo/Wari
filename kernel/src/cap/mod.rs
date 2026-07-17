@@ -59,8 +59,9 @@ pub mod storage;
 pub mod syscall;
 pub mod types;
 
-#[cfg(kani)]
-pub mod proofs;
+// The Kani proof harnesses moved to `wari_cap::proofs` with the
+// types they verify (B-3 slice 3) — run them with
+// `cargo kani -p wari-cap`.
 
 pub use static_caps::{caps_for, Caps, ModuleId, Tier};
 // `TIER1_DEFAULT_CAPS` / `TIER2_UART_DRIVER_CAPS` are referenced only

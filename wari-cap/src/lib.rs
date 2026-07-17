@@ -23,15 +23,25 @@
 //! - [`objects`] — the kernel object kinds (`Endpoint`,
 //!   `Notification`, `Frame`, `Untyped`, `Net`, `Socket`) and the
 //!   `ObjectPools` aggregate.
+//! - [`revoke`] — the revocation cascade and refcount primitives,
+//!   parameterized over the CSpace array + pools so the walk is
+//!   host-testable (the kernel binding passes its statics).
+//! - `proofs` (`#[cfg(kani)]`) — the Kani harnesses for INV-10 /
+//!   INV-15 / INV-16 / INV-17, now runnable against a plain lib
+//!   crate instead of the kernel bin.
 //!
-//! Still kernel-side, migrating in the final B-3 slice: `revoke` and
-//! the `#[cfg(kani)]` proof harnesses.
+//! Permanently kernel-side (the imperative shell): `cap/storage.rs`
+//! (the statics + accessors), `cap/boot.rs`, `cap/reg.rs`,
+//! `cap/ring_drain.rs`, and `cap/syscall.rs` glue.
 
 #![cfg_attr(not(test), no_std)]
 
 pub mod cspace;
 pub mod objects;
 pub mod pool;
+#[cfg(kani)]
+pub mod proofs;
+pub mod revoke;
 pub mod static_caps;
 pub mod types;
 
