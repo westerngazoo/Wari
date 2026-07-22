@@ -24,8 +24,8 @@ use wasmi::Caller;
 
 use wari_abi::reg::{validate_handle, RegCheck, REG_SLOTS};
 use wari_abi::ring::{
-    decode_sqe, encode_cqe, is_known_op, Sqe, CQE_SIZE, RING_OP_NOTIFY_ACK,
-    RING_OP_NOTIFY_WAIT, SQE_SIZE,
+    decode_sqe, encode_cqe, is_known_op, Sqe, CQE_SIZE, RING_OP_NOTIFY_ACK, RING_OP_NOTIFY_WAIT,
+    SQE_SIZE,
 };
 
 use super::cspace::MAX_PROCS;

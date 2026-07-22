@@ -101,6 +101,15 @@ const ACCEPT_TRACK_SLOTS: usize = 8;
 /// able to starve the kmain idle loop and its Ctrl-R reboot check.
 static mut ACCEPT_FIRST_MS: [Option<u64>; ACCEPT_TRACK_SLOTS] = [None; ACCEPT_TRACK_SLOTS];
 
+/// One-shot guard for the `[accept] window expired` console line:
+/// `socket_accept` returns `E_TIMEDOUT` persistently after expiry,
+/// so without this flag the print would fire on every subsequent
+/// busy-poll iteration (potentially millions). Set when the expiry
+/// line is printed; cleared wherever the window itself is cleared
+/// (successful accept, close). Same INV-1 single-hart access rules
+/// as `ACCEPT_FIRST_MS`.
+static mut ACCEPT_EXPIRED_LOGGED: [bool; ACCEPT_TRACK_SLOTS] = [false; ACCEPT_TRACK_SLOTS];
+
 /// RISC-V `time` CSR frequency. JH7110's CLINT timebase runs at
 /// 4 MHz (Linux dts `timebase-frequency = <4000000>`); QEMU virt
 /// uses 10 MHz.
@@ -233,7 +242,10 @@ pub unsafe fn socket_close(handle: u32) -> Result<i32, KernelError> {
     if (handle as usize) < ACCEPT_TRACK_SLOTS {
         // SAFETY: INV-1 (single-hart host-fn path), as in
         // socket_accept.
-        unsafe { (*addr_of_mut!(ACCEPT_FIRST_MS))[handle as usize] = None };
+        unsafe {
+            (*addr_of_mut!(ACCEPT_FIRST_MS))[handle as usize] = None;
+            (*addr_of_mut!(ACCEPT_EXPIRED_LOGGED))[handle as usize] = false;
+        }
     }
     // SAFETY: INV-1 + INV-8.
     // SAFETY: helper docstring + per-fn SAFETY block above.
@@ -295,21 +307,42 @@ pub unsafe fn socket_accept(handle: u32, tick_ms: u64) -> Result<i32, KernelErro
         // INV-8 install-then-read ordering as for TIER2_NET.
         let first = unsafe { &mut (*addr_of_mut!(ACCEPT_FIRST_MS))[handle as usize] };
         match *first {
-            None => *first = Some(tick_ms),
+            None => {
+                *first = Some(tick_ms);
+                // Timing trace: stopwatch this line against the
+                // matching "expired" line below — the real gap must
+                // be ~ACCEPT_DEADLINE_MS (60 s). A gap far off that
+                // means the rdtime-derived clock (TIMEBASE_HZ) is
+                // wrong on this platform.
+                crate::kprintln!("[accept] window open h={} t0={}ms", handle, tick_ms);
+            }
             Some(t0) => {
                 if crate::abi::net::deadline_exceeded(
                     t0,
                     tick_ms,
                     crate::abi::net::ACCEPT_DEADLINE_MS,
                 ) {
+                    // SAFETY: INV-1, same access rules as `first`.
+                    let logged =
+                        unsafe { &mut (*addr_of_mut!(ACCEPT_EXPIRED_LOGGED))[handle as usize] };
+                    if !*logged {
+                        *logged = true;
+                        crate::kprintln!(
+                            "[accept] window expired h={} t={}ms (open {}ms, budget {}ms)",
+                            handle,
+                            tick_ms,
+                            t0,
+                            crate::abi::net::ACCEPT_DEADLINE_MS,
+                        );
+                    }
                     return Ok(crate::cap::syscall::E_TIMEDOUT);
                 }
             }
         }
     }
     // SAFETY: INV-1 + INV-8.
-    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
-        .expect("TIER2_NET ref always valid (static)");
+    let slot =
+        unsafe { addr_of_mut!(TIER2_NET).as_mut() }.expect("TIER2_NET ref always valid (static)");
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     // Drive one smoltcp poll first so any pending SYN is processed
     // into the listening socket's state before we inspect it.
@@ -324,7 +357,11 @@ pub unsafe fn socket_accept(handle: u32, tick_ms: u64) -> Result<i32, KernelErro
     if rc == 1 && (handle as usize) < ACCEPT_TRACK_SLOTS {
         // Connection accepted — the window served its purpose.
         // SAFETY: INV-1, as above.
-        unsafe { (*addr_of_mut!(ACCEPT_FIRST_MS))[handle as usize] = None };
+        unsafe {
+            (*addr_of_mut!(ACCEPT_FIRST_MS))[handle as usize] = None;
+            (*addr_of_mut!(ACCEPT_EXPIRED_LOGGED))[handle as usize] = false;
+        }
+        crate::kprintln!("[accept] accepted h={}", handle);
     }
     Ok(rc)
 }
@@ -346,8 +383,8 @@ pub unsafe fn socket_accept(handle: u32, tick_ms: u64) -> Result<i32, KernelErro
 /// Same as [`socket_create`].
 pub unsafe fn socket_send_canned(handle: u32, tick_ms: u64) -> Result<i32, KernelError> {
     // SAFETY: INV-1 + INV-8.
-    let slot = unsafe { addr_of_mut!(TIER2_NET).as_mut() }
-        .expect("TIER2_NET ref always valid (static)");
+    let slot =
+        unsafe { addr_of_mut!(TIER2_NET).as_mut() }.expect("TIER2_NET ref always valid (static)");
     let h = slot.as_mut().ok_or(KernelError::DriverError)?;
     let queued = h
         .socket_send_canned_fn

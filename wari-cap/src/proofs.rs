@@ -34,9 +34,7 @@
 #![cfg(kani)]
 #![allow(dead_code)]
 
-use super::types::{
-    Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK,
-};
+use crate::types::{Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK};
 
 // ─────────────────────────────────────────────────────────────────
 // Helpers

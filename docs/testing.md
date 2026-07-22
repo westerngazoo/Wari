@@ -33,14 +33,23 @@ graph TB
   - `wari-abi` — syscall numbers, error encoding, opcode tables
   - `kernel/src/mem/page_alloc.rs` — bitmap invariants, conservation
   - `kernel/src/mem/page_table.rs` — Sv39 walk against fake memory
-  - `kernel/src/validate.rs` — argument validators
-  - `kernel/src/sched/process.rs` — PCB state-machine transitions
+  - `wari-validate` — argument validators + both platforms' MMIO
+    window tables (extracted; the kernel shim binds the platform)
+  - `wari-sched` — PCB state machine + pick-next policy (extracted
+    from `kernel/src/sched/`; the kernel keeps a re-export shim)
+  - `wari-cap` — static caps table + Tier/ModuleId (first extracted
+    slice; the dynamic cap modules follow per the extraction RFC)
   - `kernel/src/ipc.rs` — rendezvous state machine (mostly pure)
 
 **Rule**: if a pure module grows `unsafe` or MMIO, split — pure stays
 host-testable; impure moves to a `_glue` file.
 
-**Run**: `cargo test --workspace`. Must pass on every PR.
+**Run**: `make test-unit` — an explicit host-crate `-p` list
+(`Makefile::HOST_CRATES`), not `--workspace`: the kernel and the
+wasm32 crates define their own `#[panic_handler]` and cannot build
+under the host test harness (see `kernel-host-testing-design.md` §2).
+`scripts/build.sh` runs the same gate as its step [1/7]. Must pass
+on every PR.
 
 ### Integration tests — slow, meaningful
 

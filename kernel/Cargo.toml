@@ -16,6 +16,25 @@ path = "src/main.rs"
 [dependencies]
 wari-abi = { path = "../abi-shared" }
 wari-mem = { path = "../wari-mem" }
+# Synchronous-IPC rendezvous core (Lane B / B2): the pure decision
+# logic (`resolve`) plus the shared `BlockReason` vocabulary the
+# scheduler's `ProcessState::Blocked` embeds. One source of truth —
+# the kernel must not mirror these enums.
+wari-ipc = { path = "../wari-ipc" }
+# The kernel-wide KernelError taxonomy (R5), extracted so the pure
+# crates below can return it; kernel/src/error.rs shims it.
+wari-error = { path = "../wari-error" }
+# Pure cap-system core (B-3 slices: Tier/ModuleId identity enums +
+# static caps table, then Cap/CapId/ObjectKind + Pool/BoundedQueue)
+# and pure scheduler core (B-1: Process state machine + pick-next
+# policy). Kernel-side shims in cap/*.rs and sched/process.rs
+# re-export them — see docs/kernel-host-testing-design.md.
+wari-cap = { path = "../wari-cap" }
+wari-sched = { path = "../wari-sched" }
+# Pure syscall-boundary validators (B-2), incl. both platforms' NIC
+# MMIO window tables as data; kernel/src/validate.rs shims them and
+# binds the platform choice.
+wari-validate = { path = "../wari-validate" }
 # Driver contract: manifest types + DriverKind/FuncSig enums +
 # DriverManifestError. Pure no_std types — same crate every
 # Tier-2 driver depends on, so the kernel parser and the macro

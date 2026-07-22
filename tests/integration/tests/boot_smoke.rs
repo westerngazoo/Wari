@@ -24,8 +24,7 @@ use std::time::{Duration, Instant};
 /// Wari is a Cargo workspace, so `target/` sits at the root (not
 /// under `kernel/`). The kernel's `.cargo/config.toml` pins the RV64
 /// target, so the ELF lands under this subdir.
-const KERNEL_ELF_REL: &str =
-    "target/riscv64gc-unknown-none-elf/release/wari";
+const KERNEL_ELF_REL: &str = "target/riscv64gc-unknown-none-elf/release/wari";
 
 /// Deadline for the banner to appear.
 const BANNER_DEADLINE: Duration = Duration::from_secs(3);
@@ -53,9 +52,11 @@ fn kernel_boots_and_prints_banner() {
 
     let mut child = Command::new("qemu-system-riscv64")
         .args([
-            "-machine", "virt",
+            "-machine",
+            "virt",
             "-nographic",
-            "-bios", "default",
+            "-bios",
+            "default",
             "-kernel",
         ])
         .arg(&kernel)

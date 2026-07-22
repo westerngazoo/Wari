@@ -145,6 +145,34 @@ pub fn putc(byte: u8) {
 /// Bit 0 of LSR: data ready (one or more bytes in the RX FIFO).
 const LSR_DR: u8 = 1 << 0;
 
+/// Debug aid (UART-RX trace, Phase-1c Ctrl-R troubleshooting): read
+/// LSR through BOTH access widths and return `(as_u8, as_u32)`.
+///
+/// Why: the JH7110 DW8250 is integrated with `reg-io-width = 4` —
+/// U-Boot and Linux drive it with 32-bit register accesses, while
+/// this file uses 8-bit accesses. TX (8-bit THR writes) and THRE
+/// polling (8-bit LSR reads) demonstrably work on silicon, but if
+/// the RX-side bits misread under sub-word access, the two values
+/// returned here will disagree in bit 0 (DR) while a key is held.
+/// On QEMU (1-byte stride) a 32-bit read at LSR would be unaligned
+/// and meaningless, so the u32 lane mirrors the u8 there.
+///
+/// Contract: read-only diagnostic; LSR reads clear error bits
+/// (OE/PE/FE/BI) as a side effect, which is acceptable in the idle
+/// loop this is called from. Never called on hot paths.
+pub fn debug_lsr_snapshot() -> (u8, u32) {
+    // SAFETY: INV-3 — LSR is a fixed NS16550/DW8250 register.
+    let l8 = unsafe { reg(LSR_REG).read() };
+    #[cfg(feature = "vf2")]
+    // SAFETY: INV-3; vf2 stride is 4 so LSR sits at base + 0x14,
+    // 4-byte aligned — a u32 volatile read is a legal single APB
+    // access (the width U-Boot/Linux use on this SoC).
+    let l32 = unsafe { VolatilePtr::<u32>::new(reg_addr(LSR_REG) as *mut u32).read() };
+    #[cfg(not(feature = "vf2"))]
+    let l32 = l8 as u32;
+    (l8, l32)
+}
+
 /// Non-blocking RX poll. Returns `Some(byte)` if a byte is waiting
 /// in the RX FIFO, `None` otherwise.
 ///

@@ -361,7 +361,10 @@ mod tests {
     #[test]
     fn truncated_buffer() {
         assert_eq!(validate_header(&[]), WnmCheck::Truncated);
-        assert_eq!(validate_header(&[0u8; WNM_HEADER_LEN - 1]), WnmCheck::Truncated);
+        assert_eq!(
+            validate_header(&[0u8; WNM_HEADER_LEN - 1]),
+            WnmCheck::Truncated
+        );
     }
 
     #[test]

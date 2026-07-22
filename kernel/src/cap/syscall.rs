@@ -45,11 +45,10 @@ use super::cspace::{CSPACE_SLOTS, MAX_PROCS};
 use super::reg::RegEntry;
 use super::revoke::{dec_refcount, inc_refcount, revoke};
 use super::storage::{cspaces, object_pools, reg_tables};
-use wari_abi::reg::REG_SLOTS;
 use super::types::{
-    Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_READ,
-    CAP_RIGHT_WRITE,
+    Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_READ, CAP_RIGHT_WRITE,
 };
+use wari_abi::reg::REG_SLOTS;
 
 // ─────────────────────────────────────────────────────────────────
 // Errno values — match runtime::host_fns convention
@@ -403,16 +402,16 @@ use crate::validate::is_net_mmio_addr;
 /// VirtIO MMIO transport register offsets used by the queue-attach
 /// host fn. Must match the driver's view of the register set
 /// (`drivers/net/src/lib.rs::VIRTIO_MMIO_*`).
-const VIRTIO_MMIO_QUEUE_SEL:        u32 = 0x030;
-const VIRTIO_MMIO_QUEUE_NUM_MAX:    u32 = 0x034;
-const VIRTIO_MMIO_QUEUE_NUM:        u32 = 0x038;
-const VIRTIO_MMIO_QUEUE_READY:      u32 = 0x044;
-const VIRTIO_MMIO_QUEUE_DESC_LOW:   u32 = 0x080;
-const VIRTIO_MMIO_QUEUE_DESC_HIGH:  u32 = 0x084;
+const VIRTIO_MMIO_QUEUE_SEL: u32 = 0x030;
+const VIRTIO_MMIO_QUEUE_NUM_MAX: u32 = 0x034;
+const VIRTIO_MMIO_QUEUE_NUM: u32 = 0x038;
+const VIRTIO_MMIO_QUEUE_READY: u32 = 0x044;
+const VIRTIO_MMIO_QUEUE_DESC_LOW: u32 = 0x080;
+const VIRTIO_MMIO_QUEUE_DESC_HIGH: u32 = 0x084;
 const VIRTIO_MMIO_QUEUE_DRIVER_LOW: u32 = 0x090;
-const VIRTIO_MMIO_QUEUE_DRIVER_HIGH:u32 = 0x094;
+const VIRTIO_MMIO_QUEUE_DRIVER_HIGH: u32 = 0x094;
 const VIRTIO_MMIO_QUEUE_DEVICE_LOW: u32 = 0x0a0;
-const VIRTIO_MMIO_QUEUE_DEVICE_HIGH:u32 = 0x0a4;
+const VIRTIO_MMIO_QUEUE_DEVICE_HIGH: u32 = 0x0a4;
 
 /// QEMU virt VirtIO-net MMIO base (lockstep with `validate.rs` and
 /// `drivers/net/src/lib.rs`). For Phase 1b VF2 builds, the host
@@ -466,10 +465,7 @@ pub fn nic_attach_queue_impl<T>(
         let cs = cspaces();
         cs[proc_id as usize].slots[0]
     };
-    if cap.is_empty()
-        || !matches!(cap.kind, ObjectKind::Net)
-        || cap.rights & CAP_RIGHT_WRITE == 0
-    {
+    if cap.is_empty() || !matches!(cap.kind, ObjectKind::Net) || cap.rights & CAP_RIGHT_WRITE == 0 {
         return E_PERM;
     }
 
@@ -480,10 +476,7 @@ pub fn nic_attach_queue_impl<T>(
     if queue_idx > 1 {
         return E_INVAL;
     }
-    if queue_size == 0
-        || queue_size > 256
-        || !queue_size.is_power_of_two()
-    {
+    if queue_size == 0 || queue_size > 256 || !queue_size.is_power_of_two() {
         return E_INVAL;
     }
     // VirtIO 1.2 §2.6 alignment: descriptor table 16-byte, available
@@ -499,10 +492,7 @@ pub fn nic_attach_queue_impl<T>(
     }
 
     // Resolve the caller's linear memory + compute physical addresses.
-    let memory = match caller
-        .get_export("memory")
-        .and_then(|e| e.into_memory())
-    {
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
         None => return E_NOMEM,
     };
@@ -570,7 +560,10 @@ pub fn nic_attach_queue_impl<T>(
         write32(base + VIRTIO_MMIO_QUEUE_DESC_LOW, desc_pa as u32);
         write32(base + VIRTIO_MMIO_QUEUE_DESC_HIGH, (desc_pa >> 32) as u32);
         write32(base + VIRTIO_MMIO_QUEUE_DRIVER_LOW, avail_pa as u32);
-        write32(base + VIRTIO_MMIO_QUEUE_DRIVER_HIGH, (avail_pa >> 32) as u32);
+        write32(
+            base + VIRTIO_MMIO_QUEUE_DRIVER_HIGH,
+            (avail_pa >> 32) as u32,
+        );
         write32(base + VIRTIO_MMIO_QUEUE_DEVICE_LOW, used_pa as u32);
         write32(base + VIRTIO_MMIO_QUEUE_DEVICE_HIGH, (used_pa >> 32) as u32);
 
@@ -635,10 +628,7 @@ pub fn nic_queue_notify_impl(proc_id: u8, queue_idx: u32) -> i32 {
         let cs = cspaces();
         cs[proc_id as usize].slots[0]
     };
-    if cap.is_empty()
-        || !matches!(cap.kind, ObjectKind::Net)
-        || cap.rights & CAP_RIGHT_WRITE == 0
-    {
+    if cap.is_empty() || !matches!(cap.kind, ObjectKind::Net) || cap.rights & CAP_RIGHT_WRITE == 0 {
         return E_PERM;
     }
     if queue_idx > 1 {
@@ -646,7 +636,10 @@ pub fn nic_queue_notify_impl(proc_id: u8, queue_idx: u32) -> i32 {
     }
     #[cfg(feature = "qemu")]
     {
-        write32(NIC_BASE_FOR_QUEUE_ATTACH + VIRTIO_MMIO_QUEUE_NOTIFY, queue_idx);
+        write32(
+            NIC_BASE_FOR_QUEUE_ATTACH + VIRTIO_MMIO_QUEUE_NOTIFY,
+            queue_idx,
+        );
         0
     }
     #[cfg(feature = "vf2")]
@@ -698,10 +691,7 @@ pub fn lin_mem_base_impl<T>(caller: &mut wasmi::Caller<'_, T>, proc_id: u8) -> u
     if cap.rights & CAP_RIGHT_READ == 0 {
         return 0;
     }
-    let memory = match caller
-        .get_export("memory")
-        .and_then(|e| e.into_memory())
-    {
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
         None => return 0,
     };
@@ -888,12 +878,7 @@ const CAP_INFO_SIZE: usize = 8;
 /// success even if the slot is empty (the written `CapInfo` will
 /// have `kind = Empty = 0`); errors are reserved for OOB slot,
 /// missing memory export, and OOB linear-memory write.
-pub fn cap_lookup_impl<T>(
-    caller: &mut Caller<'_, T>,
-    proc_id: u8,
-    slot: u32,
-    out_buf: u32,
-) -> i32 {
+pub fn cap_lookup_impl<T>(caller: &mut Caller<'_, T>, proc_id: u8, slot: u32, out_buf: u32) -> i32 {
     if (proc_id as usize) >= MAX_PROCS {
         return E_INVAL;
     }
@@ -916,17 +901,11 @@ pub fn cap_lookup_impl<T>(
     buf[4..8].copy_from_slice(&badge.to_le_bytes());
 
     // Resolve the caller's linear memory and write the buffer.
-    let memory = match caller
-        .get_export("memory")
-        .and_then(|e| e.into_memory())
-    {
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
         None => return E_NOMEM,
     };
-    if memory
-        .write(&mut *caller, out_buf as usize, &buf)
-        .is_err()
-    {
+    if memory.write(&mut *caller, out_buf as usize, &buf).is_err() {
         return E_NOMEM;
     }
     0
@@ -956,14 +935,16 @@ pub fn cap_lookup_impl<T>(
 ///               at `crate::cap::boot::SLOT_NET`, OR target slot
 ///               is already occupied
 /// - `E_NOMEM` — Socket pool exhausted, or driver returned errno
-pub fn net_socket_create_impl(
-    proc_id: u8,
-    proto: u32,
-    slot_for_cap: u32,
-) -> i32 {
+pub fn net_socket_create_impl(proc_id: u8, proto: u32, slot_for_cap: u32) -> i32 {
     use crate::cap::boot::SLOT_NET;
 
-    crate::kdebug!(net, "socket_create pid={} proto={} slot={}", proc_id, proto, slot_for_cap);
+    crate::kdebug!(
+        net,
+        "socket_create pid={} proto={} slot={}",
+        proc_id,
+        proto,
+        slot_for_cap
+    );
     if (proc_id as usize) >= MAX_PROCS {
         crate::kdebug!(net, "-> E_INVAL (proc_id OOB)");
         return E_INVAL;
@@ -978,8 +959,13 @@ pub fn net_socket_create_impl(
     let (net_cap, parent_id) = {
         let cs = cspaces();
         let cap = cs[proc_id as usize].slots[SLOT_NET as usize];
-        crate::kdebug!(net, "cap@SLOT_NET kind={:?} rights={:#x} empty={}",
-            cap.kind, cap.rights, cap.is_empty());
+        crate::kdebug!(
+            net,
+            "cap@SLOT_NET kind={:?} rights={:#x} empty={}",
+            cap.kind,
+            cap.rights,
+            cap.is_empty()
+        );
         if cap.is_empty() || !matches!(cap.kind, ObjectKind::Net) {
             crate::kdebug!(net, "-> E_PERM (no Net cap)");
             return E_PERM;
@@ -1020,18 +1006,16 @@ pub fn net_socket_create_impl(
     //    index + driver's smoltcp handle for later close.
     let socket_pool_idx = {
         let pools = object_pools();
-        match pools
-            .sockets
-            .alloc(super::objects::Socket::new(net_cap.pool_index, smoltcp_handle))
-        {
+        match pools.sockets.alloc(super::objects::Socket::new(
+            net_cap.pool_index,
+            smoltcp_handle,
+        )) {
             Ok(idx) => idx,
             Err(_) => {
                 // Could not allocate — roll back the driver-side
                 // socket so we don't leak smoltcp state.
                 // SAFETY: same as create above.
-                let _ = unsafe {
-                    crate::runtime::tier2_net::socket_close(smoltcp_handle)
-                };
+                let _ = unsafe { crate::runtime::tier2_net::socket_close(smoltcp_handle) };
                 return E_NOMEM;
             }
         }
@@ -1096,8 +1080,8 @@ pub fn net_socket_close_impl(proc_id: u8, slot: u32) -> i32 {
     //    here are surfaced but we proceed with cap cleanup so the
     //    Tier-1 cannot wedge on a stuck socket.
     // SAFETY: same as create above.
-    let driver_ret = unsafe { crate::runtime::tier2_net::socket_close(smoltcp_handle) }
-        .unwrap_or(-1);
+    let driver_ret =
+        unsafe { crate::runtime::tier2_net::socket_close(smoltcp_handle) }.unwrap_or(-1);
 
     // 3. Drop the cap, dec refcount (free pool entry on 0).
     {
@@ -1121,12 +1105,7 @@ pub fn net_socket_close_impl(proc_id: u8, slot: u32) -> i32 {
 /// Caller must hold a Socket cap with WRITE rights at `slot`.
 /// Dispatches into the driver's `socket_bind`. Returns 0 on
 /// success, negative errno otherwise.
-pub fn net_socket_bind_impl(
-    proc_id: u8,
-    slot: u32,
-    ip_be: u32,
-    port: u32,
-) -> i32 {
+pub fn net_socket_bind_impl(proc_id: u8, slot: u32, ip_be: u32, port: u32) -> i32 {
     if (proc_id as usize) >= MAX_PROCS {
         return E_INVAL;
     }

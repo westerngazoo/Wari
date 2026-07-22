@@ -54,9 +54,7 @@ use super::cspace::CSpace;
 use super::objects::Endpoint;
 use super::static_caps::{caps_for, ModuleId, Tier};
 use super::storage::{cspaces, object_pools};
-use super::types::{
-    Cap, CapId, ObjectKind, CAP_RIGHT_READ, CAP_RIGHT_WRITE,
-};
+use super::types::{Cap, CapId, ObjectKind, CAP_RIGHT_READ, CAP_RIGHT_WRITE};
 
 // ─────────────────────────────────────────────────────────────────
 // Phase-1b proc-id assignments
@@ -87,6 +85,15 @@ pub const PROC_ID_TIER2_NET: u8 = 4;
 /// validates the Net cap at SLOT_NET, then mints a derived
 /// Socket cap into the caller's `slot_for_cap`.
 pub const SLOT_NET: u8 = 2;
+
+/// Conventional cap-slot index for the Tier-1 demo IPC endpoint
+/// (Option B brick 3b). Both hello instances hold READ+WRITE caps
+/// to ONE shared endpoint here, so instance A can `ipc_call` and
+/// instance B can `ipc_recv`/`ipc_reply` across their isolation
+/// boundary. Phase-2 proper mints per-channel endpoints with
+/// asymmetric rights (caller WRITE-only, servicer READ+WRITE); the
+/// symmetric demo grant is called out in the PR's security notes.
+pub const SLOT_IPC: u8 = 3;
 
 const SLOT_PRIMARY: u8 = 0;
 /// Slot index for the exit cap (Tier-1 only).
@@ -219,8 +226,31 @@ pub fn init_root_caps() -> Result<(), KernelError> {
             rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
         };
         // PR Net-6b: install Net cap into both Tier-1 hello CSpaces.
-        install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO,   net_pool_idx);
+        install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO, net_pool_idx);
         install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO_B, net_pool_idx);
+    }
+
+    // 5b-ipc (Option B brick 3b). One shared demo IPC endpoint,
+    // READ+WRITE cap at SLOT_IPC in both Tier-1 hello CSpaces —
+    // the channel for the cross-tenant call/recv/reply demo.
+    {
+        let pools = object_pools();
+        let demo_ep_idx = pools.endpoints.alloc(Endpoint::new())?;
+        if let Some(ep) = pools.endpoints.get_mut(demo_ep_idx) {
+            ep.refcount = 2; // one cap in each hello CSpace
+        }
+        let _ = pools;
+        let cs = cspaces();
+        for pid in [PROC_ID_TIER1_HELLO, PROC_ID_TIER1_HELLO_B] {
+            cs[pid as usize].slots[SLOT_IPC as usize] = Cap {
+                badge: 0,
+                parent: CapId::ROOT,
+                generation: 0,
+                pool_index: demo_ep_idx,
+                kind: ObjectKind::Endpoint,
+                rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
+            };
+        }
     }
     let pools = object_pools();
 
@@ -229,7 +259,9 @@ pub fn init_root_caps() -> Result<(), KernelError> {
     //     dispatch + bind machinery; PR Net-4c wires it up with
     //     real allocations now that the net driver actually wants
     //     to wait on them.
-    let nic_notif_idx = pools.notifications.alloc(super::objects::Notification::new())?;
+    let nic_notif_idx = pools
+        .notifications
+        .alloc(super::objects::Notification::new())?;
     if let Some(notif) = pools.notifications.get_mut(nic_notif_idx) {
         notif.refcount = 1; // the driver's cap on this notification
     }
@@ -260,10 +292,7 @@ pub fn init_root_caps() -> Result<(), KernelError> {
     let nic_irq: u32 = 0; // sentinel; not used because vf2 driver is stub
     #[cfg(feature = "qemu")]
     {
-        crate::mmio::plic::bind_irq_to_notification(
-            nic_irq,
-            nic_notif_idx,
-        )?;
+        crate::mmio::plic::bind_irq_to_notification(nic_irq, nic_notif_idx)?;
         crate::mmio::plic::enable_irq(nic_irq, 1)?;
     }
     #[cfg(feature = "vf2")]
@@ -275,8 +304,7 @@ pub fn init_root_caps() -> Result<(), KernelError> {
 
     // UART ep refs: 1 for Tier-2 (if mmio_uart), plus 1 per Tier-1
     // instance (if stdout).
-    let uart_refs = (tier2_caps.mmio_uart as u16)
-        + 2 * (tier1_caps.stdout as u16);
+    let uart_refs = (tier2_caps.mmio_uart as u16) + 2 * (tier1_caps.stdout as u16);
     // Exit ep refs: 1 per Tier-1 instance (if exit).
     let exit_refs = 2 * (tier1_caps.exit as u16);
     if let Some(ep) = pools.endpoints.get_mut(uart_ipc_ep) {
@@ -349,13 +377,7 @@ pub(super) fn install_tier1_net_cap(
 ///   - have `badge = 0` (Phase-1b does not badge the boot-time caps;
 ///     PR 3 mints badged children when Tier-1 sends on the
 ///     endpoint).
-fn install_root_cap(
-    cs: &mut CSpace,
-    slot: u8,
-    kind: ObjectKind,
-    pool_index: u16,
-    rights: u8,
-) {
+fn install_root_cap(cs: &mut CSpace, slot: u8, kind: ObjectKind, pool_index: u16, rights: u8) {
     cs.slots[slot as usize] = Cap {
         badge: 0,
         parent: CapId::ROOT,

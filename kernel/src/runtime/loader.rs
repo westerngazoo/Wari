@@ -117,15 +117,8 @@ pub struct Tier1Instance {
 ///
 /// INV-13 — signature verification is the **first** step. wasmi never
 /// sees the bytes until `sign::verify` returns `Ok`.
-pub fn load_tier2(
-    envelope: &[u8],
-    module_id: ModuleId,
-) -> Result<Tier2Instance, KernelError> {
-    load_tier2_with_kind(
-        envelope,
-        module_id,
-        wari_driver_iface::DriverKind::Uart,
-    )
+pub fn load_tier2(envelope: &[u8], module_id: ModuleId) -> Result<Tier2Instance, KernelError> {
+    load_tier2_with_kind(envelope, module_id, wari_driver_iface::DriverKind::Uart)
 }
 
 /// Internal helper — same as [`load_tier2`] but with the manifest
@@ -152,8 +145,7 @@ fn load_tier2_with_kind(
     // ignored by wasmi; only the function/export/import sections
     // shape the instance.
     let engine = Engine::default();
-    let module =
-        Module::new(&engine, wasm_bytes).map_err(|_| KernelError::BadWasm)?;
+    let module = Module::new(&engine, wasm_bytes).map_err(|_| KernelError::BadWasm)?;
 
     // Step 4 — assign caps and build the per-instance store.
     let caps = caps_for(Tier::Two, module_id);
@@ -222,9 +214,7 @@ pub fn load_tier2_net(
             let _ = view;
         }
         Err(wari_driver_iface::DriverManifestError::Missing) => {
-            crate::kprintln!(
-                "[net] driver loaded without manifest (pre-DI-4 binary, soft-allow)"
-            );
+            crate::kprintln!("[net] driver loaded without manifest (pre-DI-4 binary, soft-allow)");
         }
         Err(e) => return Err(e.into()),
     }

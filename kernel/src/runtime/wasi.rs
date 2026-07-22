@@ -120,8 +120,7 @@ pub fn register_wasi_host_fns(
         .func_wrap(
             "wasi_snapshot_preview1",
             "proc_exit",
-            move |caller: Caller<'_, Tier1HostState>, code: u32|
-                  -> Result<(), Error> {
+            move |caller: Caller<'_, Tier1HostState>, code: u32| -> Result<(), Error> {
                 host_proc_exit(caller, pid, code)
             },
         )
@@ -130,9 +129,8 @@ pub fn register_wasi_host_fns(
     // Phase-1b cap-management host fns. proc_id is captured by each
     // closure so each Tier-1 instance touches its own CSpace.
     use crate::cap::{
-        cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-        cap_register_impl, cap_revoke_impl, cap_unregister_impl,
-        ring_setup_impl, ring_submit_impl,
+        cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl, cap_register_impl,
+        cap_revoke_impl, cap_unregister_impl, ring_setup_impl, ring_submit_impl,
     };
     linker
         .func_wrap(
@@ -156,18 +154,14 @@ pub fn register_wasi_host_fns(
         .func_wrap(
             "wari",
             "cap_revoke",
-            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
-                cap_revoke_impl(pid, slot)
-            },
+            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 { cap_revoke_impl(pid, slot) },
         )
         .map_err(|_| KernelError::BadWasm)?;
     linker
         .func_wrap(
             "wari",
             "cap_delete",
-            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 {
-                cap_delete_impl(pid, slot)
-            },
+            move |_: Caller<'_, Tier1HostState>, slot: u32| -> i32 { cap_delete_impl(pid, slot) },
         )
         .map_err(|_| KernelError::BadWasm)?;
     linker
@@ -299,6 +293,72 @@ pub fn register_wasi_host_fns(
         )
         .map_err(|_| KernelError::BadWasm)?;
 
+    // Option B brick 3b — synchronous IPC over Endpoint caps.
+    // Each fn takes (endpoint cap slot, linmem offset of a 40-byte
+    // message buffer — wari_abi::net::IPC_MSG_BYTES) and returns 0
+    // or a negative errno. `recv`/`call` (and a queued `send`) may
+    // suspend the tenant via the tier1_pool yield protocol
+    // (Err(IpcBlock)); the closures' fallible signatures are what
+    // carry that yield out to wasmi's resumable machinery.
+    linker
+        .func_wrap(
+            "wari",
+            "ipc_send",
+            move |mut caller: Caller<'_, Tier1HostState>,
+                  slot: u32,
+                  msg_ptr: u32|
+                  -> Result<i32, Error> {
+                crate::ipc::ipc_send_impl(&mut caller, pid, slot, msg_ptr)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "ipc_recv",
+            move |mut caller: Caller<'_, Tier1HostState>,
+                  slot: u32,
+                  msg_ptr: u32|
+                  -> Result<i32, Error> {
+                crate::ipc::ipc_recv_impl(&mut caller, pid, slot, msg_ptr)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "ipc_call",
+            move |mut caller: Caller<'_, Tier1HostState>,
+                  slot: u32,
+                  msg_ptr: u32|
+                  -> Result<i32, Error> {
+                crate::ipc::ipc_call_impl(&mut caller, pid, slot, msg_ptr)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "ipc_reply",
+            move |mut caller: Caller<'_, Tier1HostState>,
+                  slot: u32,
+                  msg_ptr: u32|
+                  -> Result<i32, Error> {
+                crate::ipc::ipc_reply_impl(&mut caller, pid, slot, msg_ptr)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    // Identity probe for role-splitting demos: which proc am I?
+    // Deliberately minimal — returns the proc_id the kernel already
+    // baked into this instance's host-fn closures; no new authority.
+    linker
+        .func_wrap(
+            "wari",
+            "proc_self",
+            move |_: Caller<'_, Tier1HostState>| -> i32 { pid as i32 },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
     Ok(())
 }
 
@@ -356,10 +416,7 @@ fn host_fd_write(
     }
 
     // Resolve the caller's linear memory.
-    let memory = match caller
-        .get_export("memory")
-        .and_then(|e| e.into_memory())
-    {
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
         None => return WASI_EFAULT,
     };
@@ -373,10 +430,8 @@ fn host_fd_write(
     {
         return WASI_EFAULT;
     }
-    let buf_offset =
-        u32::from_le_bytes([iov_buf[0], iov_buf[1], iov_buf[2], iov_buf[3]]);
-    let buf_len =
-        u32::from_le_bytes([iov_buf[4], iov_buf[5], iov_buf[6], iov_buf[7]]);
+    let buf_offset = u32::from_le_bytes([iov_buf[0], iov_buf[1], iov_buf[2], iov_buf[3]]);
+    let buf_len = u32::from_le_bytes([iov_buf[4], iov_buf[5], iov_buf[6], iov_buf[7]]);
 
     // Bound the byte count by the on-stack scratch (R2: no alloc in
     // host-fn dispatch). Truncate silently if the caller asked for
@@ -408,15 +463,8 @@ fn host_fd_write(
 /// Helper: write `count` to caller's linear memory at `nwritten_ptr`
 /// (4 bytes, little-endian). Returns `WASI_ESUCCESS` on a clean write,
 /// `WASI_EFAULT` if the address is OOB.
-fn write_nwritten(
-    caller: &mut Caller<'_, Tier1HostState>,
-    nwritten_ptr: u32,
-    count: u32,
-) -> u32 {
-    let memory = match caller
-        .get_export("memory")
-        .and_then(|e| e.into_memory())
-    {
+fn write_nwritten(caller: &mut Caller<'_, Tier1HostState>, nwritten_ptr: u32, count: u32) -> u32 {
+    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
         None => return WASI_EFAULT,
     };

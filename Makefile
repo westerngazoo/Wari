@@ -51,7 +51,7 @@ DEPLOY_FILES := $(KERNEL_BIN) kernel/ abi-shared/ wasi/ apps/ drivers/ \
         test run debug objdump clean \
         kernel-vf2 flash-sd deploy verify \
         test-unit test-integration test-security test-fuzz \
-        clippy fmt check audit
+        clippy clippy-kernel fmt check audit
 
 help:
 	@echo "Wari — make targets"
@@ -66,13 +66,14 @@ help:
 	@echo "    run                build + boot in QEMU"
 	@echo "    test               timed QEMU boot (Phase 0 smoke)"
 	@echo "    debug              QEMU with GDB server :1234"
-	@echo "    test-unit          host-side cargo test --workspace"
+	@echo "    test-unit          host-side cargo test (pure-logic crates)"
 	@echo "    test-integration   QEMU-driven integration tests"
 	@echo "    test-security      adversarial WASM tests"
 	@echo "    test-fuzz          cargo-fuzz targets (long-running)"
 	@echo ""
 	@echo "  Quality gates:"
-	@echo "    clippy             cargo clippy -- -D warnings"
+	@echo "    clippy             cargo clippy on host crates, -D warnings"
+	@echo "    clippy-kernel      cargo clippy on the kernel (riscv64 target)"
 	@echo "    fmt                cargo fmt --check"
 	@echo "    check              clippy + fmt + test-unit"
 	@echo "    audit              cargo-audit on Cargo.lock"
@@ -179,8 +180,22 @@ objdump: build
 
 # ── Host-side tests ────────────────────────────────────────────
 
+# Host-testable workspace crates — the pure-logic crates whose test
+# profile links std. Explicit `-p` list, NOT --workspace: the kernel
+# and the wasm32 crates (drivers/*, apps/*) define their own
+# #[panic_handler] and cannot build under the host test harness
+# (E0152 + RISC-V asm — see docs/kernel-host-testing-design.md §2),
+# and tests/{integration,security} are QEMU-driven with their own
+# targets below. Extraction PRs (wari-sched, wari-validate, wari-cap)
+# append here as they land. Keep in sync with the duplicate list in
+# scripts/build.sh step [1/7] (build.sh cannot depend on make — it
+# exists for boxes without it).
+HOST_CRATES := -p wari-abi -p wari-driver-iface -p wari-mem \
+               -p wari-wnm -p wari-policy -p wari-ipc -p wari-wasi \
+               -p wari-cap -p wari-sched -p wari-validate -p wari-error
+
 test-unit:
-	cargo test --workspace
+	cargo test $(HOST_CRATES)
 
 test-integration: build build-hello
 	cd tests/integration && cargo test --release
@@ -194,8 +209,27 @@ test-fuzz:
 
 # ── Quality gates ──────────────────────────────────────────────
 
+# Two passes: (1) production targets under the full Tier-0 lint wall,
+# including clippy::{unwrap,expect,panic}_used per R5; (2) all targets
+# (tests, benches) with ONLY those three assertion-style lints allowed
+# — test code unwraps and panics by design, everything else stays
+# -D warnings. Pass 1 already enforced the strict wall on lib code,
+# so pass 2's allowance cannot mask a production violation.
 clippy:
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy $(HOST_CRATES) -- -D warnings
+	cargo clippy $(HOST_CRATES) --all-targets -- -D warnings \
+	  -A clippy::unwrap-used -A clippy::expect-used -A clippy::panic
+
+# Kernel lint under the real riscv64 target. Separate from `clippy`
+# because it needs the full include_bytes! artifact closure (signed
+# driver blobs + hello.wasm) and the WARI_BUILD tag to satisfy
+# build.rs's stale-driver guard — so it rides the same dependency
+# chain as `build`. Deliberately NOT wired into `check` yet: whether
+# the artifact-pipeline cost belongs in the every-PR gate is
+# Gustavo's call (see the host-test gate PR discussion).
+clippy-kernel: sign-uart-driver sign-net-driver build-hello
+	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
+	  cargo clippy --release --features qemu --no-default-features -- -D warnings
 
 fmt:
 	cargo fmt --all --check

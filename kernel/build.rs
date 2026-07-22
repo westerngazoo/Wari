@@ -85,9 +85,7 @@ fn check_driver_blob_freshness(kernel_dir: &str) {
     };
     // Embedded tag format: literal ASCII "WARI-DRV-BUILD-TAG-N".
     let needle = b"WARI-DRV-BUILD-TAG-";
-    let pos = bytes
-        .windows(needle.len())
-        .position(|w| w == needle);
+    let pos = bytes.windows(needle.len()).position(|w| w == needle);
     let Some(pos) = pos else {
         println!(
             "cargo::error=stale-driver-guard: {} contains no WARI-DRV-BUILD-TAG. \

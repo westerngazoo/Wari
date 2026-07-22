@@ -51,23 +51,23 @@ pub struct PteFlags(u64);
 
 impl PteFlags {
     /// Empty flag set — identity element of [`union`](Self::union).
-    pub const NONE:    PteFlags = PteFlags(0);
+    pub const NONE: PteFlags = PteFlags(0);
     /// `V` — entry is valid.
-    pub const VALID:   PteFlags = PteFlags(1 << 0);
+    pub const VALID: PteFlags = PteFlags(1 << 0);
     /// `R` — readable.
-    pub const READ:    PteFlags = PteFlags(1 << 1);
+    pub const READ: PteFlags = PteFlags(1 << 1);
     /// `W` — writable.
-    pub const WRITE:   PteFlags = PteFlags(1 << 2);
+    pub const WRITE: PteFlags = PteFlags(1 << 2);
     /// `X` — executable.
     pub const EXECUTE: PteFlags = PteFlags(1 << 3);
     /// `U` — accessible from U-mode.
-    pub const USER:    PteFlags = PteFlags(1 << 4);
+    pub const USER: PteFlags = PteFlags(1 << 4);
     /// `G` — global mapping (not flushed on ASID switch).
-    pub const GLOBAL:  PteFlags = PteFlags(1 << 5);
+    pub const GLOBAL: PteFlags = PteFlags(1 << 5);
     /// `A` — accessed (set by hardware or software).
-    pub const ACCESS:  PteFlags = PteFlags(1 << 6);
+    pub const ACCESS: PteFlags = PteFlags(1 << 6);
     /// `D` — dirty (written to).
-    pub const DIRTY:   PteFlags = PteFlags(1 << 7);
+    pub const DIRTY: PteFlags = PteFlags(1 << 7);
 
     /// Combine two flag sets (bitwise OR). Monoid: associative, NONE is identity.
     pub const fn union(self, other: PteFlags) -> PteFlags {
@@ -101,46 +101,66 @@ impl PteFlags {
 
 /// Kernel text: read + execute, no write (immutable code).
 pub const KERNEL_RX: PteFlags = PteFlags(
-    PteFlags::VALID.0 | PteFlags::READ.0 | PteFlags::EXECUTE.0 |
-    PteFlags::ACCESS.0 | PteFlags::GLOBAL.0
+    PteFlags::VALID.0
+        | PteFlags::READ.0
+        | PteFlags::EXECUTE.0
+        | PteFlags::ACCESS.0
+        | PteFlags::GLOBAL.0,
 );
 
 /// Kernel read-only data.
-pub const KERNEL_RO: PteFlags = PteFlags(
-    PteFlags::VALID.0 | PteFlags::READ.0 |
-    PteFlags::ACCESS.0 | PteFlags::GLOBAL.0
-);
+pub const KERNEL_RO: PteFlags =
+    PteFlags(PteFlags::VALID.0 | PteFlags::READ.0 | PteFlags::ACCESS.0 | PteFlags::GLOBAL.0);
 
 /// Kernel read-write data (BSS, stack, heap).
 pub const KERNEL_RW: PteFlags = PteFlags(
-    PteFlags::VALID.0 | PteFlags::READ.0 | PteFlags::WRITE.0 |
-    PteFlags::ACCESS.0 | PteFlags::DIRTY.0 | PteFlags::GLOBAL.0
+    PteFlags::VALID.0
+        | PteFlags::READ.0
+        | PteFlags::WRITE.0
+        | PteFlags::ACCESS.0
+        | PteFlags::DIRTY.0
+        | PteFlags::GLOBAL.0,
 );
 
 /// MMIO device registers (UART, PLIC): read-write, no execute, no cache.
 pub const KERNEL_MMIO: PteFlags = PteFlags(
-    PteFlags::VALID.0 | PteFlags::READ.0 | PteFlags::WRITE.0 |
-    PteFlags::ACCESS.0 | PteFlags::DIRTY.0 | PteFlags::GLOBAL.0
+    PteFlags::VALID.0
+        | PteFlags::READ.0
+        | PteFlags::WRITE.0
+        | PteFlags::ACCESS.0
+        | PteFlags::DIRTY.0
+        | PteFlags::GLOBAL.0,
 );
 
 /// User code: read + execute + user-accessible.
 pub const USER_RX: PteFlags = PteFlags(
-    PteFlags::VALID.0 | PteFlags::READ.0 | PteFlags::EXECUTE.0 |
-    PteFlags::USER.0 | PteFlags::ACCESS.0
+    PteFlags::VALID.0
+        | PteFlags::READ.0
+        | PteFlags::EXECUTE.0
+        | PteFlags::USER.0
+        | PteFlags::ACCESS.0,
 );
 
 /// User data: read + write + user-accessible.
 pub const USER_RW: PteFlags = PteFlags(
-    PteFlags::VALID.0 | PteFlags::READ.0 | PteFlags::WRITE.0 |
-    PteFlags::USER.0 | PteFlags::ACCESS.0 | PteFlags::DIRTY.0
+    PteFlags::VALID.0
+        | PteFlags::READ.0
+        | PteFlags::WRITE.0
+        | PteFlags::USER.0
+        | PteFlags::ACCESS.0
+        | PteFlags::DIRTY.0,
 );
 
 /// User MMIO: read + write + user-accessible (for userspace device servers).
 /// Same PTE bits as USER_RW — RISC-V cache control is via PMA, not PTEs.
 /// Separate constant for documentation: these pages map device registers.
 pub const USER_MMIO: PteFlags = PteFlags(
-    PteFlags::VALID.0 | PteFlags::READ.0 | PteFlags::WRITE.0 |
-    PteFlags::USER.0 | PteFlags::ACCESS.0 | PteFlags::DIRTY.0
+    PteFlags::VALID.0
+        | PteFlags::READ.0
+        | PteFlags::WRITE.0
+        | PteFlags::USER.0
+        | PteFlags::ACCESS.0
+        | PteFlags::DIRTY.0,
 );
 
 // ── Page Table Entry ────────────────────────────────────────────
@@ -229,11 +249,21 @@ impl core::fmt::Debug for Pte {
         } else {
             let fl = self.flags();
             write!(f, "PTE(phys={:#x}, ", self.phys_addr())?;
-            if fl.contains(PteFlags::READ)    { write!(f, "R")?; }
-            if fl.contains(PteFlags::WRITE)   { write!(f, "W")?; }
-            if fl.contains(PteFlags::EXECUTE) { write!(f, "X")?; }
-            if fl.contains(PteFlags::USER)    { write!(f, "U")?; }
-            if fl.contains(PteFlags::GLOBAL)  { write!(f, "G")?; }
+            if fl.contains(PteFlags::READ) {
+                write!(f, "R")?;
+            }
+            if fl.contains(PteFlags::WRITE) {
+                write!(f, "W")?;
+            }
+            if fl.contains(PteFlags::EXECUTE) {
+                write!(f, "X")?;
+            }
+            if fl.contains(PteFlags::USER) {
+                write!(f, "U")?;
+            }
+            if fl.contains(PteFlags::GLOBAL) {
+                write!(f, "G")?;
+            }
             write!(f, ")")
         }
     }
@@ -245,10 +275,10 @@ impl core::fmt::Debug for Pte {
 ///
 /// Pure function — no side effects, trivially verifiable.
 pub const fn va_parts(va: usize) -> (usize, usize, usize, usize) {
-    let vpn2 = (va >> 30) & 0x1FF;   // bits 38-30 → index into level-2 (root) table
-    let vpn1 = (va >> 21) & 0x1FF;   // bits 29-21 → index into level-1 table
-    let vpn0 = (va >> 12) & 0x1FF;   // bits 20-12 → index into level-0 (leaf) table
-    let offset = va & 0xFFF;          // bits 11-0  → offset within the 4KB page
+    let vpn2 = (va >> 30) & 0x1FF; // bits 38-30 → index into level-2 (root) table
+    let vpn1 = (va >> 21) & 0x1FF; // bits 29-21 → index into level-1 table
+    let vpn0 = (va >> 12) & 0x1FF; // bits 20-12 → index into level-0 (leaf) table
+    let offset = va & 0xFFF; // bits 11-0  → offset within the 4KB page
     (vpn2, vpn1, vpn0, offset)
 }
 
@@ -341,7 +371,9 @@ mod tests {
 
     #[test]
     fn test_flags_union_associative() {
-        let a = PteFlags::READ.union(PteFlags::WRITE).union(PteFlags::EXECUTE);
+        let a = PteFlags::READ
+            .union(PteFlags::WRITE)
+            .union(PteFlags::EXECUTE);
         let b = PteFlags::READ.union(PteFlags::WRITE.union(PteFlags::EXECUTE));
         assert_eq!(a, b);
     }
@@ -367,9 +399,9 @@ mod tests {
         assert!(PteFlags::WRITE.is_leaf());
         assert!(PteFlags::EXECUTE.is_leaf());
         assert!(PteFlags::READ.union(PteFlags::WRITE).is_leaf());
-        assert!(!PteFlags::VALID.is_leaf());   // V alone = branch
+        assert!(!PteFlags::VALID.is_leaf()); // V alone = branch
         assert!(!PteFlags::NONE.is_leaf());
-        assert!(!PteFlags::USER.is_leaf());    // U without R/W/X is not leaf
+        assert!(!PteFlags::USER.is_leaf()); // U without R/W/X is not leaf
     }
 
     #[test]
@@ -435,16 +467,25 @@ mod tests {
         for &addr in &addrs {
             let aligned = addr & !0xFFF; // ensure page-aligned
             let p = Pte::new(aligned, KERNEL_RW);
-            assert_eq!(p.phys_addr(), aligned,
-                "roundtrip failed for {:#x}", aligned);
+            assert_eq!(
+                p.phys_addr(),
+                aligned,
+                "roundtrip failed for {:#x}",
+                aligned
+            );
         }
     }
 
     #[test]
     fn test_pte_preserves_all_flags() {
-        let all = PteFlags::VALID.union(PteFlags::READ).union(PteFlags::WRITE)
-            .union(PteFlags::EXECUTE).union(PteFlags::USER).union(PteFlags::GLOBAL)
-            .union(PteFlags::ACCESS).union(PteFlags::DIRTY);
+        let all = PteFlags::VALID
+            .union(PteFlags::READ)
+            .union(PteFlags::WRITE)
+            .union(PteFlags::EXECUTE)
+            .union(PteFlags::USER)
+            .union(PteFlags::GLOBAL)
+            .union(PteFlags::ACCESS)
+            .union(PteFlags::DIRTY);
         let p = Pte::new(0x1000, all);
         assert_eq!(p.flags().bits() & 0xFF, all.bits() & 0xFF);
     }
@@ -475,9 +516,9 @@ mod tests {
     fn test_va_parts_kernel_addr() {
         let va = 0x8020_0000usize;
         let (vpn2, vpn1, vpn0, offset) = va_parts(va);
-        assert_eq!(vpn2, 2,   "vpn2 for {:#x}", va);
-        assert_eq!(vpn1, 1,   "vpn1 for {:#x}", va);
-        assert_eq!(vpn0, 0,   "vpn0 for {:#x}", va);
+        assert_eq!(vpn2, 2, "vpn2 for {:#x}", va);
+        assert_eq!(vpn1, 1, "vpn1 for {:#x}", va);
+        assert_eq!(vpn0, 0, "vpn0 for {:#x}", va);
         assert_eq!(offset, 0, "offset for {:#x}", va);
     }
 
@@ -502,7 +543,14 @@ mod tests {
 
     #[test]
     fn test_va_roundtrip_various() {
-        let addrs = [0x0, 0x1000, 0x8020_0000, 0x4020_0000, 0x1000_0000, 0x0C00_0000];
+        let addrs = [
+            0x0,
+            0x1000,
+            0x8020_0000,
+            0x4020_0000,
+            0x1000_0000,
+            0x0C00_0000,
+        ];
         for &va in &addrs {
             let parts = va_parts(va);
             let rt = va_from_parts(parts.0, parts.1, parts.2, parts.3);
@@ -549,12 +597,16 @@ mod tests {
 
     // Construct a leaf PTE (V + R + W + U + A + D) at `page_pa`.
     fn user_leaf(page_pa: usize) -> u64 {
-        Pte::new(page_pa, PteFlags::USER
-            .union(PteFlags::READ)
-            .union(PteFlags::WRITE)
-            .union(PteFlags::VALID)
-            .union(PteFlags::ACCESS)
-            .union(PteFlags::DIRTY)).bits()
+        Pte::new(
+            page_pa,
+            PteFlags::USER
+                .union(PteFlags::READ)
+                .union(PteFlags::WRITE)
+                .union(PteFlags::VALID)
+                .union(PteFlags::ACCESS)
+                .union(PteFlags::DIRTY),
+        )
+        .bits()
     }
 
     fn branch(child_pa: usize) -> u64 {
@@ -568,7 +620,9 @@ mod tests {
     struct FakeMem(std::collections::HashMap<usize, u64>);
 
     impl FakeMem {
-        fn new() -> Self { FakeMem(std::collections::HashMap::new()) }
+        fn new() -> Self {
+            FakeMem(std::collections::HashMap::new())
+        }
         fn set_pte(&mut self, table_pa: usize, idx: usize, v: u64) {
             self.0.insert(table_pa + idx * 8, v);
         }
@@ -588,17 +642,17 @@ mod tests {
     #[test]
     fn walk_single_valid_4k_mapping_resolves_pa_and_flags() {
         let mut mem = FakeMem::new();
-        let root_pa = 0x1000;   // root table
-        let l1_pa   = 0x2000;   // level-1 table
-        let l0_pa   = 0x3000;   // level-0 table
+        let root_pa = 0x1000; // root table
+        let l1_pa = 0x2000; // level-1 table
+        let l0_pa = 0x3000; // level-0 table
         let page_pa = 0x80_0000; // the user page we're mapping
 
         // VA we want to resolve:  vpn2=5  vpn1=7  vpn0=42  offset=0x123
         let va = (5 << 30) | (7 << 21) | (42 << 12) | 0x123;
 
         mem.set_pte(root_pa, 5, branch(l1_pa));
-        mem.set_pte(l1_pa,   7, branch(l0_pa));
-        mem.set_pte(l0_pa,  42, user_leaf(page_pa));
+        mem.set_pte(l1_pa, 7, branch(l0_pa));
+        mem.set_pte(l0_pa, 42, user_leaf(page_pa));
 
         let r = walk(root_pa, va, mem.reader()).expect("walk should resolve");
         // walk returns page_pa + offset.
@@ -624,7 +678,7 @@ mod tests {
         // superpages in the Phase 0 walker; it should return None.
         let mut mem = FakeMem::new();
         let root_pa = 0x1000;
-        let l1_pa   = 0x2000;
+        let l1_pa = 0x2000;
         mem.set_pte(root_pa, 5, branch(l1_pa));
         // Level-1 slot holds a leaf (has R/W/X bits) — rejected.
         mem.set_pte(l1_pa, 7, user_leaf(0x40_0000));
@@ -645,17 +699,20 @@ mod tests {
     }
 
     #[test]
+    // identity_op allowed: the `+ 0x000` below keeps the three offset
+    // assertions visually parallel (0x000 / 0x123 / 0xFFF).
+    #[allow(clippy::identity_op)]
     fn walk_preserves_page_offset_in_phys() {
         // Different offsets in the same page should resolve to distinct
         // PAs that share the same page base.
         let mut mem = FakeMem::new();
         let root_pa = 0x1000;
-        let l1_pa   = 0x2000;
-        let l0_pa   = 0x3000;
+        let l1_pa = 0x2000;
+        let l0_pa = 0x3000;
         let page_pa = 0x80_0000;
         mem.set_pte(root_pa, 0, branch(l1_pa));
-        mem.set_pte(l1_pa,   0, branch(l0_pa));
-        mem.set_pte(l0_pa,   0, user_leaf(page_pa));
+        mem.set_pte(l1_pa, 0, branch(l0_pa));
+        mem.set_pte(l0_pa, 0, user_leaf(page_pa));
 
         let a = walk(root_pa, 0x000, mem.reader()).unwrap();
         let b = walk(root_pa, 0x123, mem.reader()).unwrap();
@@ -673,18 +730,22 @@ mod tests {
         // the PTE.
         let mut mem = FakeMem::new();
         let root_pa = 0x1000;
-        let l1_pa   = 0x2000;
-        let l0_pa   = 0x3000;
+        let l1_pa = 0x2000;
+        let l0_pa = 0x3000;
         let page_pa = 0x80_0000;
-        let kernel_leaf = Pte::new(page_pa, PteFlags::READ
-            .union(PteFlags::WRITE)
-            .union(PteFlags::VALID)
-            .union(PteFlags::ACCESS)
-            .union(PteFlags::DIRTY)).bits(); // no USER bit
+        let kernel_leaf = Pte::new(
+            page_pa,
+            PteFlags::READ
+                .union(PteFlags::WRITE)
+                .union(PteFlags::VALID)
+                .union(PteFlags::ACCESS)
+                .union(PteFlags::DIRTY),
+        )
+        .bits(); // no USER bit
 
         mem.set_pte(root_pa, 0, branch(l1_pa));
-        mem.set_pte(l1_pa,   0, branch(l0_pa));
-        mem.set_pte(l0_pa,   0, kernel_leaf);
+        mem.set_pte(l1_pa, 0, branch(l0_pa));
+        mem.set_pte(l0_pa, 0, kernel_leaf);
 
         let r = walk(root_pa, 0x0, mem.reader()).unwrap();
         assert!(!r.flags.contains(PteFlags::USER));

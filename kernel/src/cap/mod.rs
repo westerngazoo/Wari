@@ -53,14 +53,15 @@ pub mod cspace;
 pub mod objects;
 pub mod pool;
 pub mod reg;
-pub mod ring_drain;
 pub mod revoke;
+pub mod ring_drain;
 pub mod storage;
 pub mod syscall;
 pub mod types;
 
-#[cfg(kani)]
-pub mod proofs;
+// The Kani proof harnesses moved to `wari_cap::proofs` with the
+// types they verify (B-3 slice 3) — run them with
+// `cargo kani -p wari-cap`.
 
 pub use static_caps::{caps_for, Caps, ModuleId, Tier};
 // `TIER1_DEFAULT_CAPS` / `TIER2_UART_DRIVER_CAPS` are referenced only
@@ -70,30 +71,28 @@ pub use static_caps::{caps_for, Caps, ModuleId, Tier};
 // Phase-1b dynamic re-exports. These are the userspace-facing names
 // for the new cap layer; downstream PRs build on top.
 pub use boot::{
-    PROC_ID_RESERVED, PROC_ID_TIER1_HELLO, PROC_ID_TIER1_HELLO_B,
-    PROC_ID_TIER2_NET, PROC_ID_TIER2_UART,
+    PROC_ID_RESERVED, PROC_ID_TIER1_HELLO, PROC_ID_TIER1_HELLO_B, PROC_ID_TIER2_NET,
+    PROC_ID_TIER2_UART,
 };
 pub use cspace::{CSpace, CSPACE_SLOTS, MAX_PROCS};
 pub use objects::{
     Endpoint, Frame, Net, Notification, ObjectPools, Socket, TcbRef, Untyped,
-    ENDPOINT_POOL_CAPACITY, FRAME_POOL_CAPACITY, NET_POOL_CAPACITY,
-    NOTIFICATION_POOL_CAPACITY, SOCKET_POOL_CAPACITY, UNTYPED_POOL_CAPACITY,
+    ENDPOINT_POOL_CAPACITY, FRAME_POOL_CAPACITY, NET_POOL_CAPACITY, NOTIFICATION_POOL_CAPACITY,
+    SOCKET_POOL_CAPACITY, UNTYPED_POOL_CAPACITY,
 };
 pub use pool::{BoundedQueue, Pool};
 pub use reg::{RegEntry, RegTable};
 pub use ring_drain::{ring_setup_impl, ring_submit_impl, RingDesc};
 pub use storage::{cspaces, object_pools, reg_tables, ring_descriptors};
 pub use syscall::{
-    cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl,
-    cap_register_impl, cap_revoke_impl, cap_unregister_impl, check_cap,
-    lin_mem_base_impl,
-    net_socket_accept_impl, net_socket_bind_impl, net_socket_close_impl,
-    net_socket_create_impl, net_socket_listen_impl, net_socket_send_canned_impl,
-    nic_attach_queue_impl, nic_queue_notify_impl, nic_set_mac_impl,
-    notification_ack_impl, notification_wait_impl, E_AGAIN, E_INVAL,
-    E_NOMEM, E_NOTCONN, E_PERM, E_REFUSED,
+    cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl, cap_register_impl,
+    cap_revoke_impl, cap_unregister_impl, check_cap, lin_mem_base_impl, net_socket_accept_impl,
+    net_socket_bind_impl, net_socket_close_impl, net_socket_create_impl, net_socket_listen_impl,
+    net_socket_send_canned_impl, nic_attach_queue_impl, nic_queue_notify_impl, nic_set_mac_impl,
+    notification_ack_impl, notification_wait_impl, E_AGAIN, E_INVAL, E_NOMEM, E_NOTCONN, E_PERM,
+    E_REFUSED,
 };
 pub use types::{
-    Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_GRANT,
-    CAP_RIGHT_GRANT_REPLY, CAP_RIGHT_READ, CAP_RIGHT_WRITE,
+    Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_GRANT, CAP_RIGHT_GRANT_REPLY,
+    CAP_RIGHT_READ, CAP_RIGHT_WRITE,
 };

@@ -138,9 +138,7 @@ static mut IRQ_NOTIFICATION_BINDINGS: [Option<u16>; MAX_BOUND_IRQS] =
 pub fn init() {
     // Set threshold = 0 (accept any priority ≥ 1).
     // SAFETY: INV-3. PLIC MMIO at the fixed RV64 base.
-    let threshold = unsafe {
-        VolatilePtr::<u32>::new(threshold_addr(HART_CONTEXT) as *mut u32)
-    };
+    let threshold = unsafe { VolatilePtr::<u32>::new(threshold_addr(HART_CONTEXT) as *mut u32) };
     threshold.write(0);
 
     // Enable external interrupts in S-mode. `sie.SEIE` is bit 9.
@@ -177,9 +175,8 @@ pub fn enable_irq(irq: u32, priority: u32) -> Result<(), KernelError> {
     let word = (irq / 32) as usize;
     let bit = irq % 32;
     // SAFETY: INV-3.
-    let enable = unsafe {
-        VolatilePtr::<u32>::new(enable_word_addr(HART_CONTEXT, word) as *mut u32)
-    };
+    let enable =
+        unsafe { VolatilePtr::<u32>::new(enable_word_addr(HART_CONTEXT, word) as *mut u32) };
     let cur = enable.read();
     enable.write(cur | (1u32 << bit));
     Ok(())
@@ -200,9 +197,8 @@ pub fn disable_irq(irq: u32) -> Result<(), KernelError> {
     let word = (irq / 32) as usize;
     let bit = irq % 32;
     // SAFETY: INV-3.
-    let enable = unsafe {
-        VolatilePtr::<u32>::new(enable_word_addr(HART_CONTEXT, word) as *mut u32)
-    };
+    let enable =
+        unsafe { VolatilePtr::<u32>::new(enable_word_addr(HART_CONTEXT, word) as *mut u32) };
     let cur = enable.read();
     enable.write(cur & !(1u32 << bit));
     Ok(())
@@ -221,10 +217,7 @@ pub fn disable_irq(irq: u32) -> Result<(), KernelError> {
 /// # Errors
 ///
 /// `KernelError::InvalidArgument` if `irq >= MAX_BOUND_IRQS`.
-pub fn bind_irq_to_notification(
-    irq: u32,
-    notification_pool_index: u16,
-) -> Result<(), KernelError> {
+pub fn bind_irq_to_notification(irq: u32, notification_pool_index: u16) -> Result<(), KernelError> {
     if (irq as usize) >= MAX_BOUND_IRQS {
         return Err(KernelError::InvalidArgument);
     }
@@ -265,9 +258,7 @@ pub fn notification_for_irq(irq: u32) -> Option<u16> {
 /// claim per dispatch.
 pub fn dispatch() {
     // SAFETY: INV-3. Claim register at fixed PLIC base.
-    let claim_reg = unsafe {
-        VolatilePtr::<u32>::new(claim_addr(HART_CONTEXT) as *mut u32)
-    };
+    let claim_reg = unsafe { VolatilePtr::<u32>::new(claim_addr(HART_CONTEXT) as *mut u32) };
     let irq = claim_reg.read();
     if irq == 0 {
         // Spurious interrupt; nothing to do.

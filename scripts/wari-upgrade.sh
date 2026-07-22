@@ -9,8 +9,8 @@
 # Why /boot/kernel.bin (not /boot/wari.bin): keeps U-Boot's
 # /boot/extlinux/extlinux.conf unchanged from goose-os days.
 
-WARI_DIR="/root/wari"
-WARI_KERNEL="/boot/kernel.bin"
+WARI_DIR="${WARI_DIR:-/root/wari}"
+WARI_KERNEL="${WARI_KERNEL:-/boot/kernel.bin}"
 
 # Extract the build number embedded in a kernel binary by grepping
 # for the `WARI-BUILD-TAG-<n>` rodata string. Trustworthy because it
@@ -84,11 +84,46 @@ _wari_pull_and_verify() {
         if [ "$script_before" != "$script_after" ]; then
             echo "  >>> $script_path changed in this pull"
             export WARI_SCRIPT_CHANGED=1
+            # HARD STOP: everything below this point is the loaded
+            # (= now stale) version's logic. The July 2026 release-flow
+            # cutover proved the failure mode: the old logic errored on
+            # "binary missing" before the caller's re-source step could
+            # run, bricking every old->new transition. Return a distinct
+            # code; hardened callers re-source + re-run, and even
+            # pre-hardening callers merely abort (never flash stale).
+            return 3
+        fi
+    fi
+
+    # Artifact-release flow: wari.bin is no longer tracked by git
+    # (binary artifacts made every parallel branch conflict on an
+    # unmergeable file). The repo tracks build/wari.release — a
+    # one-line pointer to the GitHub Release tag carrying this
+    # build's binaries. Download when the on-disk binary is missing
+    # or its embedded WARI-BUILD-TAG doesn't match the pointer; the
+    # embedded-tag verification below then runs on the downloaded
+    # file exactly as it always did on the git-tracked one.
+    if [ -s build/wari.release ]; then
+        local rel_tag rel_build have_build
+        rel_tag=$(head -1 build/wari.release | tr -d '[:space:]')
+        rel_build="${rel_tag#build-}"; rel_build="${rel_build%%-*}"
+        have_build=$(_wari_embedded_build build/wari.bin)
+        if [ "$have_build" != "$rel_build" ]; then
+            echo "Fetching release artifact $rel_tag (have build $have_build, want $rel_build)..."
+            local rel_url="https://github.com/westerngazoo/Wari/releases/download/${rel_tag}/wari.bin"
+            if ! curl -fSL --retry 3 -o build/wari.bin.tmp "$rel_url"; then
+                echo "ERROR: download failed: $rel_url"
+                echo "       Was this build published? (scripts/build.sh --publish)"
+                rm -f build/wari.bin.tmp
+                return 1
+            fi
+            mv build/wari.bin.tmp build/wari.bin
         fi
     fi
 
     if [ ! -s build/wari.bin ]; then
         echo "ERROR: build/wari.bin missing or empty after pull"
+        [ -s build/wari.release ] || echo "       (no build/wari.release pointer either — pre-release-flow branch?)"
         return 1
     fi
 
@@ -167,15 +202,22 @@ wari() {
     case "${1:-help}" in
         upgrade|up)
             echo "=== Wari Upgrade (main) ==="
-            _wari_pull_and_verify main || return 1
+            _wari_pull_and_verify main
+            local rc_up=$?
+            # Reload-FIRST: if the pull shipped a new script, re-source
+            # and re-run under it EVEN IF rc says failure — the failure
+            # may be the stale logic itself (the release-flow cutover
+            # trap). The second pass finds the repo already at latest,
+            # detects no script change, and proceeds under new logic.
             if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
-                echo "  re-sourcing scripts/wari-upgrade.sh and continuing..."
+                echo "  script updated in this pull — re-sourcing and re-running..."
                 unset WARI_SCRIPT_CHANGED
                 # shellcheck source=/dev/null
                 source "$WARI_DIR/scripts/wari-upgrade.sh"
                 wari "$@"
                 return $?
             fi
+            [ "$rc_up" -eq 0 ] || return 1
             _wari_flash_and_verify || return 1
             echo ""
             echo "  Build $BUILD_NUM ready in $WARI_KERNEL"
@@ -187,15 +229,18 @@ wari() {
             local skip_confirm=""
             [ "${2:-}" = "-y" ] && skip_confirm=1
             echo "=== Wari Go (main) ==="
-            _wari_pull_and_verify main || return 1
+            _wari_pull_and_verify main
+            local rc_go=$?
+            # Reload-FIRST (see upgrade case for the why).
             if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
-                echo "  re-sourcing scripts/wari-upgrade.sh and continuing..."
+                echo "  script updated in this pull — re-sourcing and re-running..."
                 unset WARI_SCRIPT_CHANGED
                 # shellcheck source=/dev/null
                 source "$WARI_DIR/scripts/wari-upgrade.sh"
                 wari "$@"
                 return $?
             fi
+            [ "$rc_go" -eq 0 ] || return 1
             _wari_flash_and_verify || return 1
             echo ""
             local flashed_build_after
@@ -236,15 +281,18 @@ wari() {
             echo "  WARNING: flashing a non-main branch for silicon testing."
             echo "           Do not leave this as the permanent /boot/kernel.bin."
             echo ""
-            _wari_pull_and_verify "$target_branch" || return 1
+            _wari_pull_and_verify "$target_branch"
+            local rc_gb=$?
+            # Reload-FIRST (see upgrade case for the why).
             if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
-                echo "  re-sourcing scripts/wari-upgrade.sh and continuing..."
+                echo "  script updated in this pull — re-sourcing and re-running..."
                 unset WARI_SCRIPT_CHANGED
                 # shellcheck source=/dev/null
                 source "$WARI_DIR/scripts/wari-upgrade.sh"
                 wari "$@"
                 return $?
             fi
+            [ "$rc_gb" -eq 0 ] || return 1
             _wari_flash_and_verify || return 1
             echo ""
             local flashed_build_after

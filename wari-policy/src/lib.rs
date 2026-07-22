@@ -156,7 +156,10 @@ mod tests {
             tainted_params: false,
         }
     }
-    const B: Budget = Budget { actions_used: 0, actions_max: 8 };
+    const B: Budget = Budget {
+        actions_used: 0,
+        actions_max: 8,
+    };
 
     #[test]
     fn happy_path_allows() {
@@ -179,7 +182,10 @@ mod tests {
         let mut r = base();
         r.cap_covers_target = false;
         r.tainted_params = true;
-        let full = Budget { actions_used: 8, actions_max: 8 };
+        let full = Budget {
+            actions_used: 8,
+            actions_max: 8,
+        };
         assert_eq!(evaluate(&r, &full), Decision::Deny(DenyReason::CapScope));
     }
 
@@ -187,10 +193,19 @@ mod tests {
     fn rate_exceeded_denies_before_confirm() {
         let mut r = base();
         r.consequence = Consequence::Irreversible; // would otherwise Confirm
-        let full = Budget { actions_used: 8, actions_max: 8 };
-        assert_eq!(evaluate(&r, &full), Decision::Deny(DenyReason::RateExceeded));
+        let full = Budget {
+            actions_used: 8,
+            actions_max: 8,
+        };
+        assert_eq!(
+            evaluate(&r, &full),
+            Decision::Deny(DenyReason::RateExceeded)
+        );
         // Boundary: used == max is exhausted; used < max is fine.
-        let edge = Budget { actions_used: 7, actions_max: 8 };
+        let edge = Budget {
+            actions_used: 7,
+            actions_max: 8,
+        };
         assert_eq!(
             evaluate(&r, &edge),
             Decision::Confirm(ConfirmReason::Irreversible)

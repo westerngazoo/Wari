@@ -20,7 +20,7 @@ use crate::error::KernelError;
 use crate::kprintln;
 use wari_mem::page_alloc::{self, AllocError, BitmapAllocator, PAGE_SIZE};
 use wari_mem::page_table::{
-    make_satp, va_parts, KERNEL_RW, KERNEL_RX, KERNEL_RO, Pte, PteFlags, PT_ENTRIES,
+    make_satp, va_parts, Pte, PteFlags, KERNEL_RO, KERNEL_RW, KERNEL_RX, PT_ENTRIES,
 };
 
 /// QEMU `virt` NS16550 UART base. Matches `mmio::uart_ns16550::UART_BASE`.
@@ -36,7 +36,7 @@ const UART_MMIO_BASE: usize = 0x1000_0000;
 /// register access from `mmio::plic::*` doesn't fault.
 /// Added in PR Net-1 fix.
 const PLIC_MMIO_BASE: usize = 0x0c00_0000;
-const PLIC_MMIO_LEN:  usize = 0x40_0000;
+const PLIC_MMIO_LEN: usize = 0x40_0000;
 
 /// VirtIO MMIO transport range on QEMU virt — `0x10001000..0x10009000`,
 /// 8 transport slots × 0x1000 each. The Phase-1b net driver uses the
@@ -45,7 +45,7 @@ const PLIC_MMIO_LEN:  usize = 0x40_0000;
 #[cfg(feature = "qemu")]
 const VIRTIO_MMIO_BASE: usize = 0x1000_1000;
 #[cfg(feature = "qemu")]
-const VIRTIO_MMIO_LEN:  usize = 0x8000;
+const VIRTIO_MMIO_LEN: usize = 0x8000;
 
 /// JH7110 GMAC register window — 128 KiB at 0x16030000 covers
 /// both GMAC0 (0x16030000) and GMAC1 (0x16040000). Phase-1c-11
@@ -56,7 +56,7 @@ const VIRTIO_MMIO_LEN:  usize = 0x8000;
 #[cfg(feature = "vf2")]
 const GMAC0_MMIO_BASE: usize = 0x1603_0000;
 #[cfg(feature = "vf2")]
-const GMAC0_MMIO_LEN:  usize = 0x2_0000;
+const GMAC0_MMIO_LEN: usize = 0x2_0000;
 
 /// JH7110 STG clock + reset generator (STGCRG). 64 KiB at
 /// 0x10230000. Owns GMAC0_AHB / _AXI / _PTP / _TX / _RX clocks
@@ -65,7 +65,7 @@ const GMAC0_MMIO_LEN:  usize = 0x2_0000;
 #[cfg(feature = "vf2")]
 const STGCRG_MMIO_BASE: usize = 0x1023_0000;
 #[cfg(feature = "vf2")]
-const STGCRG_MMIO_LEN:  usize = 0x1_0000;
+const STGCRG_MMIO_LEN: usize = 0x1_0000;
 
 /// JH7110 SYS clock + reset generator (SYSCRG). 64 KiB at
 /// 0x13020000. Owns the NOC_BUS_STG_AXI clock that the GMAC0
@@ -76,7 +76,7 @@ const STGCRG_MMIO_LEN:  usize = 0x1_0000;
 #[cfg(feature = "vf2")]
 const SYSCRG_MMIO_BASE: usize = 0x1302_0000;
 #[cfg(feature = "vf2")]
-const SYSCRG_MMIO_LEN:  usize = 0x1_0000;
+const SYSCRG_MMIO_LEN: usize = 0x1_0000;
 
 /// JH7110 SYS syscon. 4 KiB at 0x13030000 — separate from SYSCRG.
 /// Holds the GMAC1 phy-interface-mode select field (offset 0x90,
@@ -85,7 +85,7 @@ const SYSCRG_MMIO_LEN:  usize = 0x1_0000;
 #[cfg(feature = "vf2")]
 const SYS_SYSCON_MMIO_BASE: usize = 0x1303_0000;
 #[cfg(feature = "vf2")]
-const SYS_SYSCON_MMIO_LEN:  usize = 0x1000;
+const SYS_SYSCON_MMIO_LEN: usize = 0x1000;
 
 /// JH7110 always-on clock + reset generator (AONCRG). 64 KiB at
 /// 0x17000000. Phase-1c maps this for completeness; the actual
@@ -95,7 +95,7 @@ const SYS_SYSCON_MMIO_LEN:  usize = 0x1000;
 #[cfg(feature = "vf2")]
 const AONCRG_MMIO_BASE: usize = 0x1700_0000;
 #[cfg(feature = "vf2")]
-const AONCRG_MMIO_LEN:  usize = 0x1_0000;
+const AONCRG_MMIO_LEN: usize = 0x1_0000;
 
 /// JH7110 always-on syscon. 4 KiB at 0x17010000 — separate from
 /// AON CRG. Holds the GMAC0 phy-interface-mode select field
@@ -106,7 +106,7 @@ const AONCRG_MMIO_LEN:  usize = 0x1_0000;
 #[cfg(feature = "vf2")]
 const AON_SYSCON_MMIO_BASE: usize = 0x1701_0000;
 #[cfg(feature = "vf2")]
-const AON_SYSCON_MMIO_LEN:  usize = 0x1000;
+const AON_SYSCON_MMIO_LEN: usize = 0x1000;
 
 // ── Linker symbol accessors ─────────────────────────────────────
 
@@ -172,40 +172,47 @@ pub fn init() -> Result<(), KernelError> {
     alloc.init();
     // SAFETY: INV-1, INV-8. Single-hart, called exactly once during boot
     // before any `page_alloc::get()` reader runs.
-    unsafe { page_alloc::install(alloc); }
+    unsafe {
+        page_alloc::install(alloc);
+    }
 
-    kprintln!("  [kvm] heap {:#x} - {:#x} ({} pages)", heap_start, heap_end, num_pages);
+    kprintln!(
+        "  [kvm] heap {:#x} - {:#x} ({} pages)",
+        heap_start,
+        heap_end,
+        num_pages
+    );
 
     // Allocate the root page table.
     let root = alloc_zeroed_page()?;
 
     // Identity-map kernel sections.
     // SAFETY: INV-4. Reading linker symbol addresses.
-    let text_start   = unsafe { sym_addr(&_text_start) };
+    let text_start = unsafe { sym_addr(&_text_start) };
     // SAFETY: INV-4.
-    let text_end     = unsafe { sym_addr(&_text_end) };
+    let text_end = unsafe { sym_addr(&_text_end) };
     // SAFETY: INV-4.
     let rodata_start = unsafe { sym_addr(&_rodata_start) };
     // SAFETY: INV-4.
-    let rodata_end   = unsafe { sym_addr(&_rodata_end) };
+    let rodata_end = unsafe { sym_addr(&_rodata_end) };
     // SAFETY: INV-4.
-    let data_start   = unsafe { sym_addr(&_data_start) };
+    let data_start = unsafe { sym_addr(&_data_start) };
     // SAFETY: INV-4.
-    let data_end     = unsafe { sym_addr(&_data_end) };
+    let data_end = unsafe { sym_addr(&_data_end) };
     // SAFETY: INV-4.
-    let bss_start    = unsafe { sym_addr(&_bss_start) };
+    let bss_start = unsafe { sym_addr(&_bss_start) };
     // SAFETY: INV-4.
-    let bss_end      = unsafe { sym_addr(&_bss_end) };
+    let bss_end = unsafe { sym_addr(&_bss_end) };
     // SAFETY: INV-4.
     let stack_bottom = unsafe { sym_addr(&_stack_bottom) };
     // SAFETY: INV-4.
-    let stack_top    = unsafe { sym_addr(&_stack_top) };
+    let stack_top = unsafe { sym_addr(&_stack_top) };
 
-    map_range(root, text_start,   text_end,   KERNEL_RX)?;
+    map_range(root, text_start, text_end, KERNEL_RX)?;
     map_range(root, rodata_start, rodata_end, KERNEL_RO)?;
-    map_range(root, data_start,   data_end,   KERNEL_RW)?;
-    map_range(root, bss_start,    bss_end,    KERNEL_RW)?;
-    map_range(root, stack_bottom, stack_top,  KERNEL_RW)?;
+    map_range(root, data_start, data_end, KERNEL_RW)?;
+    map_range(root, bss_start, bss_end, KERNEL_RW)?;
+    map_range(root, stack_bottom, stack_top, KERNEL_RW)?;
 
     // The heap (allocator pool) must itself be identity-mapped RW so that
     // every allocator-returned PA is reachable post-MMU.
@@ -217,7 +224,7 @@ pub fn init() -> Result<(), KernelError> {
     // SAFETY: INV-4. Reading linker symbol addresses; no deref.
     let runtime_heap_start = unsafe { sym_addr(&_runtime_heap_start) };
     // SAFETY: INV-4.
-    let runtime_heap_end   = unsafe { sym_addr(&_runtime_heap_end) };
+    let runtime_heap_end = unsafe { sym_addr(&_runtime_heap_end) };
     map_range(root, runtime_heap_start, runtime_heap_end, KERNEL_RW)?;
 
     // UART MMIO — one page, RW. RISC-V Sv39 has no cache-disable PTE bit;
@@ -225,17 +232,57 @@ pub fn init() -> Result<(), KernelError> {
     // the page RW and trust the platform PMA configuration.
     map_range(root, UART_MMIO_BASE, UART_MMIO_BASE + PAGE_SIZE, KERNEL_RW)?;
 
-    map_range(root, PLIC_MMIO_BASE, PLIC_MMIO_BASE + PLIC_MMIO_LEN, KERNEL_RW)?;
+    map_range(
+        root,
+        PLIC_MMIO_BASE,
+        PLIC_MMIO_BASE + PLIC_MMIO_LEN,
+        KERNEL_RW,
+    )?;
     #[cfg(feature = "qemu")]
-    map_range(root, VIRTIO_MMIO_BASE, VIRTIO_MMIO_BASE + VIRTIO_MMIO_LEN, KERNEL_RW)?;
+    map_range(
+        root,
+        VIRTIO_MMIO_BASE,
+        VIRTIO_MMIO_BASE + VIRTIO_MMIO_LEN,
+        KERNEL_RW,
+    )?;
     #[cfg(feature = "vf2")]
     {
-        map_range(root, GMAC0_MMIO_BASE, GMAC0_MMIO_BASE + GMAC0_MMIO_LEN, KERNEL_RW)?;
-        map_range(root, STGCRG_MMIO_BASE, STGCRG_MMIO_BASE + STGCRG_MMIO_LEN, KERNEL_RW)?;
-        map_range(root, SYSCRG_MMIO_BASE, SYSCRG_MMIO_BASE + SYSCRG_MMIO_LEN, KERNEL_RW)?;
-        map_range(root, SYS_SYSCON_MMIO_BASE, SYS_SYSCON_MMIO_BASE + SYS_SYSCON_MMIO_LEN, KERNEL_RW)?;
-        map_range(root, AONCRG_MMIO_BASE, AONCRG_MMIO_BASE + AONCRG_MMIO_LEN, KERNEL_RW)?;
-        map_range(root, AON_SYSCON_MMIO_BASE, AON_SYSCON_MMIO_BASE + AON_SYSCON_MMIO_LEN, KERNEL_RW)?;
+        map_range(
+            root,
+            GMAC0_MMIO_BASE,
+            GMAC0_MMIO_BASE + GMAC0_MMIO_LEN,
+            KERNEL_RW,
+        )?;
+        map_range(
+            root,
+            STGCRG_MMIO_BASE,
+            STGCRG_MMIO_BASE + STGCRG_MMIO_LEN,
+            KERNEL_RW,
+        )?;
+        map_range(
+            root,
+            SYSCRG_MMIO_BASE,
+            SYSCRG_MMIO_BASE + SYSCRG_MMIO_LEN,
+            KERNEL_RW,
+        )?;
+        map_range(
+            root,
+            SYS_SYSCON_MMIO_BASE,
+            SYS_SYSCON_MMIO_BASE + SYS_SYSCON_MMIO_LEN,
+            KERNEL_RW,
+        )?;
+        map_range(
+            root,
+            AONCRG_MMIO_BASE,
+            AONCRG_MMIO_BASE + AONCRG_MMIO_LEN,
+            KERNEL_RW,
+        )?;
+        map_range(
+            root,
+            AON_SYSCON_MMIO_BASE,
+            AON_SYSCON_MMIO_BASE + AON_SYSCON_MMIO_LEN,
+            KERNEL_RW,
+        )?;
     }
 
     kprintln!("  [kvm] root pt at {:#x}", root);
@@ -275,12 +322,7 @@ pub fn init() -> Result<(), KernelError> {
 // ── Internal helpers ────────────────────────────────────────────
 
 /// Identity-map `[start, end)` (rounded out to page boundaries) at `flags`.
-fn map_range(
-    root: usize,
-    start: usize,
-    end: usize,
-    flags: PteFlags,
-) -> Result<(), KernelError> {
+fn map_range(root: usize, start: usize, end: usize, flags: PteFlags) -> Result<(), KernelError> {
     let start_aligned = start & !(PAGE_SIZE - 1);
     let end_aligned = (end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let mut addr = start_aligned;
@@ -293,12 +335,7 @@ fn map_range(
 
 /// Map a single 4 KiB page (VA → PA) walking/allocating intermediate
 /// tables as needed.
-fn map_page(
-    root: usize,
-    va: usize,
-    pa: usize,
-    flags: PteFlags,
-) -> Result<(), KernelError> {
+fn map_page(root: usize, va: usize, pa: usize, flags: PteFlags) -> Result<(), KernelError> {
     let (vpn2, vpn1, vpn0, _) = va_parts(va);
     let l1 = walk_or_create(root, vpn2)?;
     let l0 = walk_or_create(l1, vpn1)?;
@@ -344,7 +381,9 @@ fn write_pte(table: usize, index: usize, pte: Pte) {
     let addr = table + index * 8;
     // SAFETY: INV-5. Same argument as `read_pte`: `addr` is inside an
     // allocator-owned, identity-mapped, kernel-writable page.
-    unsafe { core::ptr::write_volatile(addr as *mut u64, pte.bits()); }
+    unsafe {
+        core::ptr::write_volatile(addr as *mut u64, pte.bits());
+    }
 }
 
 /// Allocate one zeroed page from the global allocator.
@@ -358,6 +397,8 @@ fn alloc_zeroed_page() -> Result<usize, KernelError> {
     })?;
     // SAFETY: INV-5. `page` came from the bitmap allocator whose pool is
     // `[_end, _heap_end)`; that range is kernel-writable.
-    unsafe { BitmapAllocator::zero_page(page); }
+    unsafe {
+        BitmapAllocator::zero_page(page);
+    }
     Ok(page)
 }

@@ -28,11 +28,6 @@
 \---
 
 
-Check graphify before submitting anything
-
----
-
-
 Co-Architect Protocol
 ---
 

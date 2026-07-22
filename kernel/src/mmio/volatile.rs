@@ -50,7 +50,10 @@ impl<T: Copy> VolatilePtr<T> {
     /// properly aligned for `T` for the lifetime of this wrapper.
     #[inline]
     pub const unsafe fn new(ptr: *mut T) -> Self {
-        Self { ptr, _marker: PhantomData }
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
     }
 
     /// Read the register.
