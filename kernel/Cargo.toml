@@ -21,11 +21,14 @@ wari-mem = { path = "../wari-mem" }
 # scheduler's `ProcessState::Blocked` embeds. One source of truth —
 # the kernel must not mirror these enums.
 wari-ipc = { path = "../wari-ipc" }
-# Pure cap-system core (first B-3 slice: the Tier/ModuleId identity
-# enums + the Phase-0 static caps table) and pure scheduler core
-# (B-1: Process state machine + pick-next policy). Kernel-side shims
-# in cap/static_caps.rs and sched/process.rs re-export them — see
-# docs/kernel-host-testing-design.md.
+# The kernel-wide KernelError taxonomy (R5), extracted so the pure
+# crates below can return it; kernel/src/error.rs shims it.
+wari-error = { path = "../wari-error" }
+# Pure cap-system core (B-3 slices: Tier/ModuleId identity enums +
+# static caps table, then Cap/CapId/ObjectKind + Pool/BoundedQueue)
+# and pure scheduler core (B-1: Process state machine + pick-next
+# policy). Kernel-side shims in cap/*.rs and sched/process.rs
+# re-export them — see docs/kernel-host-testing-design.md.
 wari-cap = { path = "../wari-cap" }
 wari-sched = { path = "../wari-sched" }
 # Pure syscall-boundary validators (B-2), incl. both platforms' NIC
