@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 [package]
 name = "wari-bench"
 version.workspace = true
@@ -7,10 +8,17 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+# Host-side benchmark harness (AOT M0-gate, roadmap G1). Runs fixtures
+# under the SAME wasmi the kernel pins so the fuel numbers are the
+# kernel's numbers — keep this version in lockstep with kernel/Cargo.toml.
 [dependencies]
-wasmi = "0.32"
+wasmi = "0.32.3"
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[dev-dependencies]
+wat = "1.253.0"
+
 [lints]
 workspace = true

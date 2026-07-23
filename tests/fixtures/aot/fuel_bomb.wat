@@ -1,11 +1,11 @@
-;; fuel_bomb.wat
-;; Provenance: Wari AOT Workload Corpus
-;; Expected behavior: Infinite loop designed to consume all available execution fuel.
-;; Tests the engine's fuel metering and trap handling capabilities.
+;; What it represents: Infinite loop (for fuel-path parity later)
+;; Provenance: Hand-written fixture for Wari AOT oracle
+;; Expected observable behavior: Exhausts fuel and traps.
 (module
-  (func $bomb (export "bomb")
-    (loop $l
-      (br $l)
+  (func (export "_start") (result i32)
+    (loop $loop
+      (br $loop)
     )
+    (i32.const 0)
   )
 )

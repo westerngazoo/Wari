@@ -1,16 +1,17 @@
-;; arith.wat
-;; Provenance: Wari AOT Workload Corpus
-;; Expected behavior: Performs a hot loop of integer arithmetic operations.
-;; Should be efficiently compiled to machine code with tight loops.
+;; What it represents: Integer hot loop (compute bound)
+;; Provenance: Hand-written fixture for Wari AOT oracle
+;; Expected observable behavior: Returns a fixed integer after some iterations.
 (module
-  (func $hot_loop (export "hot_loop") (param $iters i32) (result i32)
+  (func (export "_start") (result i32)
     (local $i i32)
-    (local $acc i32)
-    (loop $l
-      (local.set $acc (i32.add (local.get $acc) (i32.const 1)))
+    (local $sum i32)
+    (local.set $i (i32.const 0))
+    (local.set $sum (i32.const 0))
+    (loop $loop
+      (local.set $sum (i32.add (local.get $sum) (local.get $i)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br_if $l (i32.lt_u (local.get $i) (local.get $iters)))
+      (br_if $loop (i32.lt_s (local.get $i) (i32.const 1000)))
     )
-    (local.get $acc)
+    (local.get $sum)
   )
 )
