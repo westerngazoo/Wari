@@ -219,6 +219,7 @@ pub fn resume(proc_id: u8) -> StepOutcome {
 fn settle(proc_id: u8, call: Result<ResumableCall, wasmi::Error>) -> StepOutcome {
     match call {
         Ok(ResumableCall::Finished) => {
+            crate::kdebug!(ipc, "settle p{} -> Finished", proc_id);
             // Returned without proc_exit — protocol violation but
             // not a kernel fault (same policy as run_tier1).
             kprintln!("[t1:{}] returned cleanly without proc_exit", proc_id);
@@ -226,6 +227,7 @@ fn settle(proc_id: u8, call: Result<ResumableCall, wasmi::Error>) -> StepOutcome
             StepOutcome::Exited(0)
         }
         Ok(ResumableCall::Resumable(inv)) => {
+            crate::kdebug!(ipc, "settle p{} -> Resumable(yield)", proc_id);
             // wasmi wraps ANY host-fn error as a resumable yield
             // when the WASM call stack is non-empty (executor/
             // instrs/call.rs, `ResumableHostError::new` on non-root
@@ -260,6 +262,7 @@ fn settle(proc_id: u8, call: Result<ResumableCall, wasmi::Error>) -> StepOutcome
             }
         }
         Err(e) => {
+            crate::kdebug!(ipc, "settle p{} -> Err (non-resumable)", proc_id);
             if let Some(code) = e.i32_exit_status() {
                 kprintln!("[t1:{}] exit({})", proc_id, code);
                 release(proc_id);

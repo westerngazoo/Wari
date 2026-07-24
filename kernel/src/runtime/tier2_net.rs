@@ -317,6 +317,29 @@ pub unsafe fn socket_accept(handle: u32, tick_ms: u64) -> Result<i32, KernelErro
                 crate::kprintln!("[accept] window open h={} t0={}ms", handle, tick_ms);
             }
             Some(t0) => {
+                // Wedge trace (build 15x): the deadline never fired on
+                // silicon despite a sane t0. Print both operands,
+                // throttled to ~1/8192 polls so the UART survives.
+                #[cfg(feature = "debug-kernel")]
+                {
+                    static mut DL_TICK: u32 = 0;
+                    // SAFETY: INV-1 single-hart; diagnostic counter only.
+                    let n = unsafe {
+                        DL_TICK = DL_TICK.wrapping_add(1);
+                        DL_TICK
+                    };
+                    if n & 0x1FFF == 0 {
+                        crate::kdebug!(
+                            net,
+                            "deadline h{} t0={}ms now={}ms elapsed={}ms budget={}ms",
+                            handle,
+                            t0,
+                            tick_ms,
+                            tick_ms.saturating_sub(t0),
+                            crate::abi::net::ACCEPT_DEADLINE_MS
+                        );
+                    }
+                }
                 if crate::abi::net::deadline_exceeded(
                     t0,
                     tick_ms,

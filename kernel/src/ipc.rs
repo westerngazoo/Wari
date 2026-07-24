@@ -277,13 +277,26 @@ pub fn ipc_recv_impl(
 ) -> Result<i32, wasmi::Error> {
     let ep_idx = match resolve_endpoint(proc_id, slot, CAP_RIGHT_READ) {
         Ok(i) => i,
-        Err(e) => return Ok(e),
+        Err(e) => {
+            // Wedge trace (build 15x): a cap failure here is silent to
+            // the tenant except via rc — make it visible.
+            crate::kdebug!(ipc, "recv p{} slot{} -> cap err rc={}", proc_id, slot, e);
+            return Ok(e);
+        }
     };
     let pools = object_pools();
     let peer = pools
         .endpoints
         .get_mut(ep_idx)
         .and_then(|ep| ep.senders.pop());
+    crate::kdebug!(
+        ipc,
+        "recv p{} ep{} peer={} msg_ptr={:#x}",
+        proc_id,
+        ep_idx,
+        peer.is_some(),
+        msg_ptr
+    );
     match resolve(Op::Recv, peer.is_some()) {
         Outcome::Rendezvous { .. } => {
             let TcbRef(tx) = match peer {
@@ -301,8 +314,10 @@ pub fn ipc_recv_impl(
                 }
             };
             if let Err(e) = write_msg(caller, msg_ptr, &msg) {
+                crate::kdebug!(ipc, "recv p{} write_msg FAILED rc={}", proc_id, e);
                 return Ok(e);
             }
+            crate::kdebug!(ipc, "recv p{} write_msg ok, badge={:#x}", proc_id, msg.badge);
             // Sender's fate depends on why it waited: a `call`er is
             // promoted to await our reply; a plain `send`er is done.
             let sender_reason = {
@@ -321,6 +336,7 @@ pub fn ipc_recv_impl(
                 }
                 _ => deliver_and_wake(tx, None, 0),
             }
+            crate::kdebug!(ipc, "recv p{} RETURNING 0 (rendezvous done)", proc_id);
             Ok(0)
         }
         Outcome::Enqueue { block } => {

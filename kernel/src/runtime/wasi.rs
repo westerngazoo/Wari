@@ -396,6 +396,11 @@ fn host_fd_write(
     iovs_len: u32,
     nwritten_ptr: u32,
 ) -> u32 {
+    // Wedge trace (build 15x): fires BEFORE the cap gate, so it proves
+    // the tenant reached the host fn even if the cap check then fails.
+    // If ipc recv returns 0 but this never fires for that proc, the
+    // tenant died between the two — narrowing the wedge precisely.
+    crate::kdebug!(uart, "fd_write p{} fd={} iovs={} len={}", proc_id, fd, iovs_ptr, iovs_len);
     // PR 3b cap-mediated gate: Tier-1 holds an Endpoint cap with
     // WRITE rights at slot 0 (the send side of uart_ipc_ep — the
     // shape of "stdout" in Phase 1b's cap model). With the
