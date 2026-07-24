@@ -54,7 +54,7 @@
 
 | Gate | Decision | Status | Blocks |
 |------|----------|--------|--------|
-| **DG-1** | Compiler backend: Cranelift-offline (recommended) / bespoke / wasm2c | **pending confirmation** | G4, G6 |
+| **DG-1** | Compiler backend: Cranelift-offline / bespoke / wasm2c | **CONFIRMED (2026-07): Cranelift-offline.** Validated by the G4 spike — see `docs/aot-spike-results.md` | ~~G4~~, G6 |
 | **DG-2** | Memory-safety model: guard-pages vs explicit-bounds + cert | pending | G5 (recommendation), G7b |
 | **DG-3** | Safety-cert format (adapt VeriWasm vs bespoke) | pending — G7a produces the proposal | G7b, M3 |
 
@@ -111,7 +111,7 @@ numbers, and provide the measurement side of the M0 gate.
 
 **Acceptance criteria.**
 ```bash
-cargo run -p wari-bench -- tests/fixtures/aot/*.wasm --runs 5 --json out.json
+cargo run --release -p wari-bench -- tests/fixtures/aot/*.wasm --runs 5 --json out.json
 # → table on stdout: one row per module, columns
 #   module | fuel | wall_ms_min | wall_ms_median | peak_linmem_pages
 # → out.json parses; contains the same rows

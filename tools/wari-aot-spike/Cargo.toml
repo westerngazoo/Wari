@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "wari-aot-spike"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# THROWAWAY spike — roadmap G4 (docs/aot-parallel-roadmap.md §4).
+# Exists only to produce the M0-gate numbers in docs/aot-spike-results.md.
+# Delete when G6 (tools/wari-aot) lands.
+[dependencies]
+# Pinned exactly: R8 (reproducible builds). The whole point of the spike is
+# that the emitted bytes are attributable to one backend version.
+cranelift-codegen = { version = "=0.134.2", default-features = false, features = ["riscv64"] }
+cranelift-frontend = { version = "=0.134.2" }
+target-lexicon = "=0.13.5"
+wasmparser = "=0.254.0"
+clap = { version = "4.4", features = ["derive"] }
+
+[lints]
+workspace = true
