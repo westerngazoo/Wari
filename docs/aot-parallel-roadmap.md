@@ -54,8 +54,8 @@
 
 | Gate | Decision | Status | Blocks |
 |------|----------|--------|--------|
-| **DG-1** | Compiler backend: Cranelift-offline (recommended) / bespoke / wasm2c | **pending confirmation** | G4, G6 |
-| **DG-2** | Memory-safety model: guard-pages vs explicit-bounds + cert | pending | G5 (recommendation), G7b |
+| **DG-1** | Compiler backend: Cranelift-offline / bespoke / wasm2c | **✅ CONFIRMED (2026-07): Cranelift-offline.** Validated by the G4 spike (`docs/aot-spike-results.md`, PR #69) — sub-ms compile, zero-reloc, byte-reproducible RV64. | ~~G4~~, G6 |
+| **DG-2** | Memory-safety model: guard-pages vs explicit-bounds + cert | **pending architect decision.** G5 RECOMMENDS explicit-bounds + cert (no guard pages) — the MMU-free-endgame argument (`docs/aot-target-abi.md` §A1, PR #68). G4 VALIDATED it is implementable: `memory.wasm`'s bounds check emitted line-for-line as the RFC pseudocode. Merging #68 decides this. | G6, G7b |
 | **DG-3** | Safety-cert format (adapt VeriWasm vs bespoke) | pending — G7a produces the proposal | G7b, M3 |
 
 Tasks G1, G2, G3 need **no** decision and can start immediately, in
@@ -74,17 +74,17 @@ parallel.
  G7a cert RFC (start now, long pole) ── (DG-3) ── G7b checker skeleton
 ```
 
-| id | task | deliverable | gate | size |
-|----|------|-------------|------|------|
-| G1 | benchmark harness | `tools/wari-bench` | none | S |
-| G2 | differential oracle | `tools/wari-oracle` | none | M |
-| G3 | workload corpus | `tests/fixtures/aot/` | none | S |
-| G4 | Cranelift spike | `tools/wari-aot-spike` (throwaway) | DG-1 | M |
-| G5 | target-ABI RFC | `docs/aot-target-abi.md` | none (RFC) | S |
-| G6 | compiler driver | `tools/wari-aot` | DG-1 + G5 approval | L |
-| G7a | cert-format RFC | extension of `aot-safety-cert-design.md` | none (RFC) | M |
-| G7b | cert checker skeleton | `wari-cert` (no_std) | DG-3 | L |
-| G8 | differential CI target | `make test-aot` | G6 | S |
+| id | task | deliverable | gate | size | status |
+|----|------|-------------|------|------|--------|
+| G1 | benchmark harness | `tools/wari-bench` | none | S | ✅ merged (#63) |
+| G2 | differential oracle | `tools/wari-oracle` | none | M | 🔨 in progress (Gemini) |
+| G3 | workload corpus | `tests/fixtures/aot/` | none | S | ✅ merged (#63) |
+| G4 | Cranelift spike | `tools/wari-aot-spike` (throwaway) | DG-1 | M | **✅ done — PR #69** |
+| G5 | target-ABI RFC | `docs/aot-target-abi.md` | none (RFC) | S | **✅ done — PR #68** |
+| G6 | compiler driver | `tools/wari-aot` | DG-1 + G5 approval | L | ⛔ gated (see G6 prereqs) |
+| G7a | cert-format RFC | extension of `aot-safety-cert-design.md` | none (RFC) | M | ✅ merged (#63) |
+| G7b | cert checker skeleton | `wari-cert` (no_std) | DG-3 | L | ⛔ gated on DG-3 |
+| G8 | differential CI target | `make test-aot` | G6 | S | ⛔ gated on G6 |
 
 ---
 
@@ -246,6 +246,14 @@ alone.
 
 **Goal.** The real pipeline tool: `.wasm → native .text + relocs → WNM
 → signed`. Deterministic (R8).
+
+> **Prerequisites discovered by the G4 spike ([PR #69](https://github.com/westerngazoo/Wari/pull/69), `docs/aot-spike-results.md`) — read before estimating G6:**
+>
+> 1. **`cranelift-wasm` is dead upstream** (last published 0.111.11). There is no maintained crate that turns wasm into CLIF. G6 must either (a) own a wasm→CLIF translator (the spike hand-wrote ~300 lines for a handful of opcodes — the real one is much larger), or (b) take a `wasmtime`-shaped dependency and drive its translator. **This is the single biggest unknown in the G6 estimate — resolve it before committing.**
+> 2. **Cranelift lowers `trap` to `unimp` (an illegal instruction), not a call.** That is *not* the target-ABI §A3 thunk. G6 must post-process the emitted code (or use a Cranelift trap-handler hook) to emit the thunk call itself — otherwise the cert checker (G7b) cannot see the trap edge and the property is unverifiable.
+> 3. **`enable_pinned_reg` on riscv64 is unverified** and is a hard blocker for the reserved context register (WCTX) the target-ABI needs (§A2). Confirm Cranelift can pin a register on rv64 *first*; if it can't, §A2's register plan needs rework before any codegen.
+>
+> Also from G4: Cranelift compiles sub-millisecond to correct, zero-reloc, byte-reproducible RV64 — the backend itself is sound. The risk is entirely in the translator front-half and the trap/pinned-reg glue, not Cranelift's codegen.
 
 **Spec.**
 - CLI: `wari-aot compile <in.wasm> --out <out.wnm>` then the existing
