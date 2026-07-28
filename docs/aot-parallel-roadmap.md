@@ -111,7 +111,7 @@ numbers, and provide the measurement side of the M0 gate.
 
 **Acceptance criteria.**
 ```bash
-cargo run -p wari-bench -- tests/fixtures/aot/*.wasm --runs 5 --json out.json
+cargo run --release -p wari-bench -- tests/fixtures/aot/*.wasm --runs 5 --json out.json
 # → table on stdout: one row per module, columns
 #   module | fuel | wall_ms_min | wall_ms_median | peak_linmem_pages
 # → out.json parses; contains the same rows
