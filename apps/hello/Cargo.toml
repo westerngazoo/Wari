@@ -18,6 +18,12 @@ path = "src/lib.rs"
 # Phase 0: hand-rolled WASI bindings live inline in `src/lib.rs` (one
 # `extern "C"` block). When the WASI surface grows past `fd_write` +
 # `proc_exit` (Phase 1), this slot gets a real binding crate.
+#
+# Phase 2 agentic PoC: the AI-OS Executor's mediation policy is the pure
+# `wari-policy` gauntlet. Linked into this demo (wasm32-clean, zero deps)
+# so the Executor role can run `evaluate(req, budget)` in-module — the
+# first agentic brick. See docs/ai-os-assistant-design.md §5.
+wari-policy = { path = "../../wari-policy" }
 
 [profile.release]
 opt-level = "s"
