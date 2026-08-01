@@ -658,6 +658,9 @@ dependencies = [
 [[package]]
 name = "wari-hello"
 version = "0.0.1"
+dependencies = [
+ "wari-policy",
+]
 
 [[package]]
 name = "wari-integration-tests"

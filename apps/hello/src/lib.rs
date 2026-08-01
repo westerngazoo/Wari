@@ -156,6 +156,7 @@ pub extern "C" fn _start() -> ! {
     //   reply: [16] decision (0=Allow 1=Deny 2=Confirm)  [17] reason
     const SLOT_IPC: u32 = 3;
     // SAFETY: extern host fn; returns this instance's proc_id, no args.
+    // SAFETY: extern host fn; returns this instance's proc_id, no args.
     let me = unsafe { wasi::proc_self() };
 
     // The two requests the Planner issues, back to back:
@@ -181,6 +182,8 @@ pub extern "C" fn _start() -> ! {
             ipc_msg[15] = tainted;
             // SAFETY: extern host fn; kernel cap-checks the Endpoint at
             // SLOT_IPC and validates msg_ptr against our linear memory.
+            // SAFETY: host fn; kernel cap-checks the Endpoint at SLOT_IPC
+            // and validates msg_ptr against our linear memory.
             let rc = unsafe { wasi::ipc_call(SLOT_IPC, ipc_msg.as_ptr() as u32) };
             if rc != 0 {
                 print(b"  planner: ipc_call err\r\n");
@@ -208,6 +211,8 @@ pub extern "C" fn _start() -> ! {
         };
         for _ in 0..REQUESTS.len() {
             // SAFETY: extern host fn; cap-checked Endpoint + validated ptr.
+            // SAFETY: host fn; kernel cap-checks the Endpoint and writes
+            // the received message into our own linear memory at msg_ptr.
             let rc = unsafe { wasi::ipc_recv(SLOT_IPC, ipc_msg.as_ptr() as u32) };
             if rc != 0 {
                 print(b"  executor: ipc_recv err\r\n");
@@ -245,6 +250,8 @@ pub extern "C" fn _start() -> ! {
             ipc_msg[16] = dcode;
             ipc_msg[17] = rcode;
             // SAFETY: extern host fn; cap-checked Endpoint + validated ptr.
+            // SAFETY: host fn; replies the verdict over the cap-checked
+            // Endpoint, reading the 40-byte message from our linmem.
             let _ = unsafe { wasi::ipc_reply(SLOT_IPC, ipc_msg.as_ptr() as u32) };
         }
     }
