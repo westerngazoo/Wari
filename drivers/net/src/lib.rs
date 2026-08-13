@@ -2169,8 +2169,31 @@ pub fn driver_start() {
         const YT8521_RGMII_CONFIG1_REG: u16 = 0xA003;
         #[cfg(not(feature = "gmac1"))]
         const YT8531_RC1R_VF2_VALUE: u16 = 0x680A;
+        // GMAC1 RGMII-ID RX-delay calibration (build 15x).
+        //
+        // The BSP default was rx=0x2 (300 ps) → register 0x0850. On
+        // THIS board that value is empirically marginal: ping loss
+        // rolled 0 %..57 % **boot-to-boot on byte-identical code** — the
+        // textbook RGMII timing-margin signature (RXC sampling edge on
+        // the boundary of the RXD data eye, so a fraction of frames fail
+        // CRC and it lands differently on each link-up). RTT stayed
+        // sub-ms whenever a frame did get through, confirming the loss
+        // is timing, not throughput.
+        //
+        // RGMII-ID needs ~1.5–2.0 ns of internal RX-clock delay to
+        // center RXC in the data eye. GMAC0 already uses 1500 ps
+        // (rx=0x0A) and is rock-solid. Bump GMAC1 to the same. If 1500
+        // ps overshoots on this board, the sweep neighbours are 0x08
+        // (1200 ps) and 0x0C (1800 ps) — change RX_DELAY only. The
+        // 'RC1p' verify-read below confirms the latched value, and
+        // `needs_relink` forces a fresh AN so the new delay takes.
         #[cfg(feature = "gmac1")]
-        const YT8531_RC1R_VF2_VALUE: u16 = 0x0850;
+        const YT8531_RC1R_VF2_VALUE: u16 = {
+            const RX_DELAY: u16 = 0x0A; // bits 13:10 — 10 × 150 ps = 1500 ps
+            const FE_TX_DELAY: u16 = 0x5; // bits 7:4 — 100M only; BSP always writes
+            const GE_TX_DELAY: u16 = 0x0; // bits 3:0 — 1G TX delay
+            (RX_DELAY << 10) | (FE_TX_DELAY << 4) | GE_TX_DELAY
+        };
 
         // Pre-read so we know U-Boot's starting value.
         let _ = mdio_write_phy(
