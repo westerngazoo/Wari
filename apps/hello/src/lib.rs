@@ -156,7 +156,6 @@ pub extern "C" fn _start() -> ! {
     //   reply: [16] decision (0=Allow 1=Deny 2=Confirm)  [17] reason
     const SLOT_IPC: u32 = 3;
     // SAFETY: extern host fn; returns this instance's proc_id, no args.
-    // SAFETY: extern host fn; returns this instance's proc_id, no args.
     let me = unsafe { wasi::proc_self() };
 
     // The two requests the Planner issues, back to back:

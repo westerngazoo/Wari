@@ -653,18 +653,33 @@ kernel-VA read. All fail safely; no kernel panic.
 
 ## Current Status
 
-**Phase 1c — silicon bring-up.** Wari boots on QEMU `virt` RV64 and on
-the StarFive VisionFive 2 (JH7110, RV64GC). Phases 0, 1a, and 1b are
-shipped: boot + Sv39 paging + traps, the wasmi runtime, WASI host
-functions, the Tier-1 `hello.wasm` demo on real silicon, the capability
-system, the scheduler, IPC (capability Endpoint/Notification objects),
-and the Tier-2 UART driver.
+**Phase 1c — silicon bring-up — essentially complete.** Wari boots on
+QEMU `virt` RV64 and on the StarFive VisionFive 2 (JH7110, RV64GC).
+Phases 0, 1a, 1b, and the bulk of 1c are shipped **and run on real
+silicon**: boot + Sv39 paging + traps, the wasmi runtime, WASI host
+functions, the capability system, the resumable scheduler, the Tier-2
+UART and **network** drivers (JH7110 GMAC1 + smoltcp), TCP sockets, and
+a Tier-1 HTTP demo served over the wire.
 
-Phase 1c is in progress: the Tier-2 network driver (VirtIO-net on QEMU,
-JH7110 GMAC0 on the VF2). GMAC0 + smoltcp are wired; the ARP/ICMP path
-is under final calibration (YT8531C RGMII delay). The TCP socket layer
-is queued for Net-6c. Live build state is tracked in
-`docs/STATE-OF-PLAY.md`.
+The headline of 1c: **synchronous IPC works cross-tenant on hardware.**
+The seL4-style rendezvous (`send`/`recv`/`call`/`reply`, Option-B
+resumable-suspend model — bricks 2/3a/3b) ran a PING→PONG exchange
+between two isolated Tier-1 instances on the VF2, plus the accept-
+deadline Ctrl-R fix and the extracted-core kernel (pure host-testable
+crates `wari-{cap,sched,validate,error,ipc,policy}` shimmed by the
+kernel).
+
+**The one open 1c item** is the GMAC1 RGMII RX-delay calibration: ping
+loss was diagnosed — by a metric swinging 0–57% *boot-to-boot on
+byte-identical code* — as PHY analog timing, not software. The fix
+(rx-delay 300 ps → 1500 ps) awaits cold-boot confirmation on silicon.
+
+Two **Phase 2** tracks are now open in parallel: the **AOT engine**
+(off-device WASM→RISC-V compiler; G1/G3/G7a merged, G4 spike + G5
+target-ABI RFC done, G6 gated on the DG-2 memory-model call) and the
+**AI-OS agentic layer** (Planner/Executor/Supervisor over the working
+IPC — see `docs/ai-os-assistant-design.md`; the Executor policy engine
+`wari-policy` is merged). Live build state: `docs/STATE-OF-PLAY.md`.
 
 **Cherry-pick discipline** (carried forward from Phase 0): the
 predecessor `goose-os` is reference material — pure-logic modules
