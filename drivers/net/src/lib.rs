@@ -498,17 +498,19 @@ pub static mut VF2_RX_BUFS: VF2RxBuffers = VF2RxBuffers {
 /// third board wants them supplied by the platform (device tree, EEPROM
 /// read, or a build-time config) rather than a `cfg` ladder — tracked
 /// separately so this change stays reviewable.
-#[cfg(feature = "vf2")]
 pub mod netcfg {
     /// Interface MAC, as programmed into `MAC_ADDR0` during bring-up.
     /// `eth0` (GMAC0) is `…:84`; `eth1` (GMAC1) is `…:85`. Builds
     /// 125-128 fed `:84` to the kernel while the rest of the driver
     /// targeted GMAC1, which made the boot trace lie about which
     /// interface was live — hence one constant, cfg-gated once.
-    #[cfg(not(feature = "gmac1"))]
+    /// On `qemu` there is no constant at all: VirtIO supplies the MAC
+    /// in config space, which is what every platform *should* do. See
+    /// the TODO above.
+    #[cfg(all(feature = "vf2", not(feature = "gmac1")))]
     pub const MAC: [u8; 6] = [0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84];
     /// See [`MAC`].
-    #[cfg(feature = "gmac1")]
+    #[cfg(all(feature = "vf2", feature = "gmac1"))]
     pub const MAC: [u8; 6] = [0x6C, 0xCF, 0x39, 0x00, 0x40, 0x85];
 
     /// Static IPv4 address of this interface.
@@ -883,14 +885,10 @@ mod nic_iface {
     // Avoids collision with the operator's home Wi-Fi (192.168.100/24)
     // so Wi-Fi can stay up for client work while the USB-Ethernet
     // adapter handles the test subnet.
-    // Single source: see `super::netcfg`. These aliases keep the use
-    // sites below unchanged while removing the second copy of the value.
-    #[cfg(feature = "vf2")]
+    // Single source for every platform: see `super::netcfg`. Aliased
+    // rather than re-declared, so there is no `cfg(not(...))` arm here
+    // to forget when a third board lands.
     use super::netcfg::{IP as IP_OCTETS, IP_PREFIX_LEN};
-    #[cfg(not(feature = "vf2"))]
-    const IP_OCTETS: [u8; 4] = [192, 168, 50, 10];
-    #[cfg(not(feature = "vf2"))]
-    const IP_PREFIX_LEN: u8 = 24;
 
     /// SocketSet backing storage. Phase-1b reserves 4 socket slots
     /// (none populated until PR Net-6 wires the Tier-1 socket host
