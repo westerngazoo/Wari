@@ -11,6 +11,7 @@ authors.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+wari-net-wire = { path = "../../wari-net-wire" }
 
 # Driver contract — same crate the UART driver depends on.
 wari-driver-iface = { path = "../../driver-iface" }

@@ -300,6 +300,45 @@ this in PR Net-3). The trap handler's `dispatch()` only reads.
 to allow drivers to register IRQs at runtime. INV-23 is then
 replaced by INV-1 (single-hart) covering the binding write path.
 
+### INV-24 · Wire-Format Literals Are Derived, Never Transcribed *(Phase 1c)*
+
+> Any byte sequence a driver places on a physical medium is
+> **constructed** from the same named constants the rest of the driver
+> uses for those values — never typed out as a literal that a human
+> keeps in agreement with a comment. The construction lives in a pure,
+> host-tested builder (`wari-net-wire`), and the builder's contract is
+> pinned by tests that assert independently written expectations rather
+> than the builder's own constants.
+
+**Consequence**: a platform change updates every frame automatically. A
+reader can verify a frame is correct by checking one constant, instead
+of decoding hex against prose.
+
+**Why this exists**: `VF2_FIRST_PKT` was 64 hand-transcribed bytes with
+a prose layout comment. Nothing tied the bytes to the comment, and
+nothing tied either to the platform's real MAC and IP. Both drifted: the
+frame kept the GMAC0 MAC (`…:84`) after the driver moved to GMAC1
+(`…:85`), and carried an IP from a subnet the test network had not used
+since build 120. The frame's stated purpose was to elicit a reply from
+the switch; it had been asking an unanswerable question on a
+nonexistent subnet for months. No test could have caught it, because a
+byte array carries no contract. The MAC existed in three places and the
+IP in two.
+
+**Enforcement**: frames come from `wari_net_wire::*` builders, which
+take typed inputs and are exercised by host tests (`cargo test -p
+wari-net-wire`). Deployment values live once, in `netcfg`. A literal
+frame reappearing in driver code is a review failure — the smell is any
+`[u8; N]` initialized with hex that is destined for a DMA buffer.
+
+**When this breaks**: a protocol needing runtime-variable framing (TCP
+options, fragmentation) outgrows const builders. At that point the
+builder takes parameters rather than the caller taking a byte array —
+the invariant survives, its implementation changes. Bringing up a third
+board also wants `netcfg` supplied by the platform (device tree or
+EEPROM) rather than a `cfg` ladder; that strengthens this invariant
+rather than weakening it.
+
 ### INV-13 · Tier-2 Bytecode Is Signature-Verified Before Instantiation *(Phase 0; generalizes into INV-11 in Phase 1)*
 
 > Any `.wasm` bytecode loaded at Tier 2 passes signature verification
