@@ -35,6 +35,7 @@ members = [
     "drivers/net",
     "tests/integration",
     "tests/security", "tools/wari-bench",
+    "tools/wari-aot-spike",   # throwaway — delete when G6 lands
     # tools/*    — populated as needed
     # tests/fuzz — populated per-phase
 ]
