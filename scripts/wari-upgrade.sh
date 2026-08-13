@@ -95,6 +95,36 @@ _wari_pull_and_verify() {
         fi
     fi
 
+    # The VF2 has no battery-backed RTC: every cold boot the clock
+    # restarts near the last-known/epoch time. When it lands BEFORE
+    # the TLS cert's notBefore, curl aborts with "certificate is not
+    # yet valid" and the flash fails for a reason that has nothing to
+    # do with the build (observed 2026-08-13: board at Jul 25 vs a
+    # freshly-rotated GitHub cert). Fix the clock instead of teaching
+    # the operator a --insecure workaround: dropping cert validation
+    # on the binary-download path is exactly the wrong trade for a
+    # kernel image.
+    #
+    # The bound is offline and trust-free: HEAD was just fetched from
+    # origin, so its commit timestamp is a hard lower bound on "now"
+    # and is within hours of it in practice. Only ever moves the clock
+    # FORWARD, and only when it is behind that bound. NTP would be
+    # tighter but needs a route+port the isolated test net may not
+    # have; this needs nothing beyond the pull that already happened.
+    _wari_fix_clock() {
+        local floor now
+        floor=$(git log -1 --format=%ct HEAD 2>/dev/null) || return 0
+        [ -n "$floor" ] || return 0
+        now=$(date +%s)
+        if [ "$now" -lt "$floor" ]; then
+            echo "  clock: $(date -u '+%Y-%m-%d %H:%M UTC') is before HEAD's commit"
+            echo "         (no RTC battery) — advancing to avoid a TLS date failure"
+            date -u -s "@$floor" >/dev/null 2>&1 \
+                && echo "  clock: now $(date -u '+%Y-%m-%d %H:%M UTC')" \
+                || echo "  clock: WARNING could not set (not root?) — TLS may fail"
+        fi
+    }
+
     # Artifact-release flow: wari.bin is no longer tracked by git
     # (binary artifacts made every parallel branch conflict on an
     # unmergeable file). The repo tracks build/wari.release — a
@@ -110,6 +140,7 @@ _wari_pull_and_verify() {
         have_build=$(_wari_embedded_build build/wari.bin)
         if [ "$have_build" != "$rel_build" ]; then
             echo "Fetching release artifact $rel_tag (have build $have_build, want $rel_build)..."
+            _wari_fix_clock
             local rel_url="https://github.com/westerngazoo/Wari/releases/download/${rel_tag}/wari.bin"
             if ! curl -fSL --retry 3 -o build/wari.bin.tmp "$rel_url"; then
                 echo "ERROR: download failed: $rel_url"

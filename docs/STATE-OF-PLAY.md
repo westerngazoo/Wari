@@ -1,18 +1,38 @@
 # State of Play — pick up here
 
-> **Last updated**: 2026-07-07
-> **Last build shipped**: 138 (on `main`, trace profile)
-> **Last build flashed on VF2**: 137 — **answers ping on real silicon**
-> **Next action**: flash 138 (`wari upgrade && wari go -y`) — fixes the
-> intermittent ping timeouts (smoltcp clock), then Net-6d HTTP demo
+> **Last updated**: 2026-07-16
+> **Last build published**: 152 (release, GMAC1 RGMII rx-delay fix — PR #71)
+> **Diagnostic build**: 151 (debug, IPC-wedge tracers — PR, on-branch)
+> **Next action**: cold-boot sweep to confirm the RGMII rx-delay fix
+> (`wari go-branch phase-1c/gmac1-rgmii-rx-delay`, then `ping -c60` ×4
+> power-cycles); if clean every boot, merge #71 and close Phase 1c.
 
 ## The milestone
+
+**2026-07: synchronous IPC runs cross-tenant on silicon.** Two isolated
+Tier-1 instances completed a PING→PONG rendezvous on the VF2 (seL4-style
+`call`/`recv`/`reply`, the Option-B resumable-suspend model — bricks
+2/3a/3b), and a Tier-1 HTTP demo served `200 OK` over the wire. This is
+the Phase-1c payoff: a **networked, capability-isolated, IPC-capable OS
+on sovereign RISC-V silicon.** The earlier ping milestone (build 137,
+ICMP reply; build 138, rdtime clock stabilising it) is now history — the
+net path PHY → MAC → MTL → DMA → smoltcp is proven, and the residual
+loss was isolated to the RGMII PHY delay (a boot-to-boot analog margin,
+fixed in #71 pending cold-boot confirmation).
+
+**Also since:** the extracted-core kernel (pure host-testable crates),
+the accept-deadline Ctrl-R fix, the artifact-release flow (binaries in
+GitHub Releases, not git), the full dev book (26 chapters), and two
+Phase-2 tracks opened — the AOT engine and the AI-OS agentic layer.
+
+<details><summary>Original 2026-07-07 ping milestone note (history)</summary>
 
 2026-07-07: **Wari replied to ICMP ping on the VF2** (build 137,
 GMAC1/eth1, isolated OpenWrt net, `192.168.50.10`). Phase-1c silicon
 network path is proven end-to-end: PHY → MAC → MTL → DMA → smoltcp →
 TX replies. Build 138 (pushed, not yet flashed) adds the rdtime-based
 clock that makes replies stable instead of intermittent.
+</details>
 
 **Read [`net-driver-vf2.md`](net-driver-vf2.md) first** — it is the
 complete reference: architecture, bring-up sequence with golden

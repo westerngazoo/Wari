@@ -134,40 +134,124 @@ pub extern "C" fn _start() -> ! {
     // success).
     let _ = unsafe { wasi::fd_write(1, &iov, 1, &mut nwritten) };
 
-    // ── Option B brick 3b — cross-tenant synchronous IPC demo ────
+    // ── Agentic PoC brick 1 — policy-mediated Planner → Executor ──
     //
-    // Both hello instances hold a READ+WRITE cap to ONE shared
-    // Endpoint at SLOT_IPC (cap::boot). Role split by proc_self():
-    //   proc 2 (instance A): ipc_call with "PING" in word 0, then
-    //     print the reply that overwrote the same buffer.
-    //   proc 3 (instance B): ipc_recv (rendezvouses with A's queued
-    //     call), print what arrived, ipc_reply "PONG".
-    // Whichever instance runs first blocks (suspends via the kernel
-    // yield protocol) until the other rendezvouses — this exchange
-    // is the first cross-tenant synchronous IPC on Wari.
+    // This evolves the brick-3b PING/PONG into the first agentic
+    // exchange (docs/ai-os-assistant-design.md). Two isolated Tier-1
+    // instances share ONE Endpoint (SLOT_IPC), role-split by
+    // proc_self():
+    //   proc 2 = PLANNER (untrusted, "LLM"): emits action REQUESTS as
+    //            data. It ASKS; it holds no dangerous capability.
+    //   proc 3 = EXECUTOR (deterministic, non-LLM): recv each request,
+    //            run the `wari_policy` gauntlet, and sanction or refuse.
+    //
+    // The whole security thesis in one demo: a request the Planner
+    // "wants" is only performed if the deterministic policy allows it —
+    // a prompt-injected Planner asking for an un-sanctioned action is
+    // blocked by the Executor, not by trusting the model.
+    //
+    // Wire format of the 40-byte IPC message (badge + 4 words):
+    //   [8..12] action_id (u32 LE)     [12] consequence (0/1/2)
+    //   [13] in_allow_list  [14] cap_covers  [15] tainted
+    //   reply: [16] decision (0=Allow 1=Deny 2=Confirm)  [17] reason
     const SLOT_IPC: u32 = 3;
+    // SAFETY: extern host fn; returns this instance's proc_id, no args.
     let me = unsafe { wasi::proc_self() };
+
+    // The two requests the Planner issues, back to back:
+    //   #1 a benign, allow-listed, capable, untainted read → ALLOW
+    //   #2 an irreversible egress the Planner is NOT allow-listed for,
+    //      with tainted params → the "prompt-injected exfiltration"
+    //      the policy must refuse (default-deny on the allow-list).
+    // (action_id, consequence, in_allow_list, cap_covers, tainted)
+    const REQUESTS: [(u32, u8, u8, u8, u8); 2] = [
+        (0x0000_0010, 0, 1, 1, 0), // "read_doc"  → Allow
+        (0x0000_00E6, 2, 0, 0, 1), // "egress"    → Deny(NotInAllowList)
+    ];
+
     let mut ipc_msg = [0u8; 40];
     if me == 2 {
-        ipc_msg[8..12].copy_from_slice(b"PING");
-        let rc = unsafe { wasi::ipc_call(SLOT_IPC, ipc_msg.as_ptr() as u32) };
-        if rc == 0 {
-            let mut line = *b"  ipc: reply=????\r\n";
-            line[13..17].copy_from_slice(&ipc_msg[8..12]);
+        // PLANNER: ask for each action, report the Executor's verdict.
+        for (action_id, cons, allow, covers, tainted) in REQUESTS {
+            ipc_msg = [0u8; 40];
+            ipc_msg[8..12].copy_from_slice(&action_id.to_le_bytes());
+            ipc_msg[12] = cons;
+            ipc_msg[13] = allow;
+            ipc_msg[14] = covers;
+            ipc_msg[15] = tainted;
+            // SAFETY: extern host fn; kernel cap-checks the Endpoint at
+            // SLOT_IPC and validates msg_ptr against our linear memory.
+            // SAFETY: host fn; kernel cap-checks the Endpoint at SLOT_IPC
+            // and validates msg_ptr against our linear memory.
+            let rc = unsafe { wasi::ipc_call(SLOT_IPC, ipc_msg.as_ptr() as u32) };
+            if rc != 0 {
+                print(b"  planner: ipc_call err\r\n");
+                break;
+            }
+            // Reply overwrote the buffer: [16]=decision, [17]=reason.
+            let verdict: &[u8] = match ipc_msg[16] {
+                0 => b"ALLOW  (executor performed it)",
+                1 => b"DENY   (blocked by policy)    ",
+                _ => b"CONFIRM(needs human authority)",
+            };
+            let mut line = *b"  planner: action 0x00000000 -> ??????????????????????????????\r\n";
+            hex8(action_id, &mut line[20..28]);
+            line[32..32 + verdict.len()].copy_from_slice(verdict);
             print(&line);
-        } else {
-            print(b"  ipc: call err\r\n");
         }
     } else {
-        let rc = unsafe { wasi::ipc_recv(SLOT_IPC, ipc_msg.as_ptr() as u32) };
-        if rc == 0 {
-            let mut line = *b"  ipc: got=???? -> replying PONG\r\n";
-            line[11..15].copy_from_slice(&ipc_msg[8..12]);
+        // EXECUTOR: mediate each request through the wari_policy
+        // gauntlet. This is the trusted, deterministic core — the same
+        // pure crate the kernel-side policy uses. A generous budget so
+        // the demo turns on allow-list / consequence, not rate.
+        let budget = wari_policy::Budget {
+            actions_used: 0,
+            actions_max: 64,
+        };
+        for _ in 0..REQUESTS.len() {
+            // SAFETY: extern host fn; cap-checked Endpoint + validated ptr.
+            // SAFETY: host fn; kernel cap-checks the Endpoint and writes
+            // the received message into our own linear memory at msg_ptr.
+            let rc = unsafe { wasi::ipc_recv(SLOT_IPC, ipc_msg.as_ptr() as u32) };
+            if rc != 0 {
+                print(b"  executor: ipc_recv err\r\n");
+                break;
+            }
+            let action_id = u32::from_le_bytes([
+                ipc_msg[8], ipc_msg[9], ipc_msg[10], ipc_msg[11],
+            ]);
+            let req = wari_policy::Request {
+                action_id,
+                consequence: match ipc_msg[12] {
+                    0 => wari_policy::Consequence::Benign,
+                    1 => wari_policy::Consequence::Consequential,
+                    _ => wari_policy::Consequence::Irreversible,
+                },
+                in_allow_list: ipc_msg[13] != 0,
+                cap_covers_target: ipc_msg[14] != 0,
+                tainted_params: ipc_msg[15] != 0,
+            };
+            let (dcode, rcode): (u8, u8) = match wari_policy::evaluate(&req, &budget) {
+                wari_policy::Decision::Allow => (0, 0),
+                wari_policy::Decision::Deny(r) => (1, r as u8),
+                wari_policy::Decision::Confirm(r) => (2, r as u8),
+            };
+            let tag: &[u8] = match dcode {
+                0 => b"ALLOW -> performing",
+                1 => b"DENY  -> refused   ",
+                _ => b"CONFIRM-> escalated",
+            };
+            let mut line = *b"  executor: 0x00000000 policy=???????????????????\r\n";
+            hex8(action_id, &mut line[14..22]);
+            line[30..30 + tag.len()].copy_from_slice(tag);
             print(&line);
-            ipc_msg[8..12].copy_from_slice(b"PONG");
+            // Reply the verdict so the Planner learns it (in-place).
+            ipc_msg[16] = dcode;
+            ipc_msg[17] = rcode;
+            // SAFETY: extern host fn; cap-checked Endpoint + validated ptr.
+            // SAFETY: host fn; replies the verdict over the cap-checked
+            // Endpoint, reading the 40-byte message from our linmem.
             let _ = unsafe { wasi::ipc_reply(SLOT_IPC, ipc_msg.as_ptr() as u32) };
-        } else {
-            print(b"  ipc: recv err\r\n");
         }
     }
 
@@ -196,6 +280,15 @@ pub extern "C" fn _start() -> ! {
         };
         // SAFETY: host fn does its own validation.
         let _ = unsafe { wasi::fd_write(1, &iov, 1, &mut nw) };
+    }
+
+    /// Write `v` as 8 lowercase hex digits into `out[0..8]`.
+    /// Used by the agentic demo to print action ids readably.
+    fn hex8(v: u32, out: &mut [u8]) {
+        const D: &[u8; 16] = b"0123456789abcdef";
+        for i in 0..8 {
+            out[i] = D[((v >> (28 - i * 4)) & 0xF) as usize];
+        }
     }
 
     let create_rc = unsafe { wasi::net_socket_create(1, 8) };
