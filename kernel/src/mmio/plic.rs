@@ -123,6 +123,17 @@ static mut SPURIOUS_RUN: u32 = 0;
 /// storm is caught long before it looks like a hang.
 const SPURIOUS_LIMIT: u32 = 1000;
 
+/// Last IRQ claimed, and how many times in a row. A source we claim
+/// and complete but cannot actually silence re-asserts immediately and
+/// storms just as hard as an unclaimable one — and the SPURIOUS_RUN
+/// guard above never sees it, because those claims are non-zero.
+static mut LAST_IRQ: u32 = 0;
+static mut LAST_IRQ_RUN: u32 = 0;
+/// Repeats of one IRQ before we conclude the source is stuck asserted
+/// and disable it. Real traffic never repeats this many times without
+/// the handler making the source go quiet at least once.
+const SAME_IRQ_LIMIT: u32 = 10_000;
+
 // Address helpers — `const fn` so callers see a constant at compile
 // time when irq/context are constant.
 
@@ -375,6 +386,38 @@ pub fn dispatch() {
     // SAFETY: INV-1, as above.
     unsafe {
         SPURIOUS_RUN = 0;
+    }
+
+    // Stuck-source guard. Claiming and completing an IRQ does not
+    // silence a device that keeps asserting — the PLIC re-presents it
+    // and we re-trap forever, with claims that are non-zero so the
+    // guard above stays quiet. Build 157 hung on the VF2 exactly here,
+    // 4 boots out of 4, right after delivery was enabled.
+    //
+    // If one source repeats without pause, take it out of the enable
+    // set and carry on. Losing one IRQ is recoverable; an unbootable
+    // board with no console output is not.
+    // SAFETY: INV-1. Single-hart; the trap handler is the only writer.
+    unsafe {
+        if irq == LAST_IRQ {
+            LAST_IRQ_RUN = LAST_IRQ_RUN.saturating_add(1);
+        } else {
+            LAST_IRQ = irq;
+            LAST_IRQ_RUN = 1;
+        }
+        if LAST_IRQ_RUN == SAME_IRQ_LIMIT {
+            // Priority 0 disables the source for every context.
+            let prio = VolatilePtr::<u32>::new(priority_addr(irq) as *mut u32);
+            prio.write(0);
+            claim_reg.write(irq);
+            crate::kprintln!(
+                "[plic] irq {} asserted {} times without clearing — disabling it. \
+                 Console reboot falls back to idle polling.",
+                irq,
+                LAST_IRQ_RUN,
+            );
+            return;
+        }
     }
 
     // Console UART first, and handled entirely here.
