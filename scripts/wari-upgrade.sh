@@ -37,6 +37,33 @@ _wari_embedded_build() {
 #      function also enforces that the repo is currently ON main, so an
 #      accidental `wari go` from a feature branch is a hard error.
 #      Any other branch skips that check (operator used go-branch explicitly).
+# The isolated test network (GMAC1 / end1) has no WAN, but its DHCP
+# server hands out a default route anyway. Every boot that route can
+# win over end0's, and every `wari go` then dies on "Network is
+# unreachable" until the operator deletes it by hand. Drop it here
+# instead of printing the same instruction forever.
+#
+# Deliberately narrow: only a default route **on the test interface**
+# is touched. end0 — the path to the internet — is never considered,
+# and a box with no such route is a silent no-op.
+#
+# This treats the symptom on our side. The permanent fix is to stop
+# the test interface requesting a gateway at all; see
+# docs/net-driver-vf2.md.
+WARI_TEST_IFACE="${WARI_TEST_IFACE:-end1}"
+_wari_clear_test_net_default_route() {
+    command -v ip >/dev/null 2>&1 || return 0
+    ip route show default 2>/dev/null | grep -q "dev $WARI_TEST_IFACE" || return 0
+    echo "  route: default route is on $WARI_TEST_IFACE (isolated test net, no WAN)"
+    echo "         — removing it so the fetch can reach github"
+    if ip route del default dev "$WARI_TEST_IFACE" 2>/dev/null; then
+        echo "  route: removed; internet path is now via the other interface"
+    else
+        echo "  route: WARNING could not remove (not root?) — run:"
+        echo "         sudo ip route del default dev $WARI_TEST_IFACE"
+    fi
+}
+
 _wari_pull_and_verify() {
     local target="${1:-main}"
     cd "$WARI_DIR" || { echo "ERROR: $WARI_DIR not found"; return 1; }
@@ -54,6 +81,7 @@ _wari_pull_and_verify() {
         fi
     fi
 
+    _wari_clear_test_net_default_route
     echo "Fetching origin/$target..."
     # NOTE: `git fetch ... | sed ...` reports SED's exit status, not
     # git's, so `|| return 1` never fired. On 2026-08-13 the board lost

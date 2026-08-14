@@ -73,14 +73,31 @@ pub const MAX_BOUND_IRQS: usize = 64;
 /// Each hart has two PLIC contexts: M-mode (even index) and S-mode
 /// (odd index). Wari runs in S-mode after OpenSBI hands off.
 ///
-/// - **QEMU virt** boots on hart 0 → S-mode context = 1
-/// - **JH7110 (VF2)** boots on hart 1 → S-mode context = 3
-///   (per the JH7110 TRM; verify on first VF2 net bring-up in
-///   Phase 1c)
+/// Contexts are numbered in the order the PLIC's `interrupts-extended`
+/// device-tree property lists them — NOT by a `2 * hart + 1` formula.
+/// That formula only holds when every hart contributes both an M-mode
+/// and an S-mode entry.
+///
+/// - **QEMU virt**: hart 0 has both, so S-mode context = 1.
+/// - **JH7110 (VF2)**: hart 0 is the S7 monitor core, which has **no
+///   S-mode at all** and therefore contributes a single M-mode entry.
+///   The list is `cpu0(M), cpu1(M), cpu1(S), cpu2(M), cpu2(S), …`, so
+///   the U74 we boot on (hart 1) has S-mode context **2**.
+///
+/// This was `3` from Phase 1b through build 155 — hart 2's *M-mode*
+/// context: wrong hart and wrong privilege, so every threshold,
+/// enable, and claim/complete went to a context we do not run in. It
+/// was invisible because `sstatus.SIE` was never set, so no interrupt
+/// was ever delivered to notice, and the only IRQ ever bound
+/// (VirtIO-net) is QEMU-only. Build 155 enabled delivery and the
+/// latent bug surfaced immediately: Ctrl-R via the PLIC worked in
+/// QEMU and did nothing on the VF2. The original comment said
+/// "verify on first VF2 net bring-up" — this is that verification.
 #[cfg(feature = "qemu")]
 const HART_CONTEXT: usize = 1;
+/// See [`HART_CONTEXT`] on QEMU — VF2 boots on hart 1 (U74 #0).
 #[cfg(feature = "vf2")]
-const HART_CONTEXT: usize = 3;
+const HART_CONTEXT: usize = 2;
 
 /// PLIC source number for UART0 — the console the operator types into.
 ///
