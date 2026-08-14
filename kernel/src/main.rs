@@ -148,6 +148,25 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
     }
     kprintln!("tier-2 net driver loaded");
 
+    // Everything an interrupt handler can touch is now initialized, so
+    // it is safe to let interrupts actually be delivered. This is
+    // deliberately the LAST boot step: `sie.SEIE` has been set since
+    // `plic::init`, but `sstatus.SIE` was never set anywhere, so from
+    // Phase 0 through build 154 no asynchronous interrupt was ever
+    // taken. The kernel was cooperative by accident rather than by
+    // design, and the console UART's RX interrupt — asserted since
+    // `uart_ns16550::init` enabled IER.ERBFI — went nowhere.
+    //
+    // The visible consequence was the reboot key: Ctrl-R was only read
+    // by the idle loop's polling `try_read_byte`, which is reached
+    // solely after every tenant exits. Press it while a tenant is
+    // running — most of a minute during the HTTP accept window — and
+    // the byte was simply discarded. With delivery on, `plic::dispatch`
+    // handles UART RX in trap context, so the key works regardless of
+    // what the scheduler is doing.
+    mmio::plic::enable_supervisor_interrupts();
+    kprintln!("interrupts enabled (Ctrl-R reboots from any state)");
+
     // Register the Tier-2 driver as a "library" process and the
     // two Tier-1 hello instances as Ready tenants, then hand off
     // to the scheduler. The scheduler runs each Tier-1 in proc_id

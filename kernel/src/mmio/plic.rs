@@ -82,6 +82,22 @@ const HART_CONTEXT: usize = 1;
 #[cfg(feature = "vf2")]
 const HART_CONTEXT: usize = 3;
 
+/// PLIC source number for UART0 — the console the operator types into.
+///
+/// - **QEMU virt**: UART0 is IRQ 10 (`qemu/hw/riscv/virt.c`).
+/// - **JH7110 (VF2)**: UART0 is IRQ 32 (JH7110 TRM interrupt map, and
+///   the `interrupts = <32>` property on `uart0` in the vendor DT).
+///
+/// Both are below [`MAX_BOUND_IRQS`], so `enable_irq` accepts them.
+#[cfg(feature = "qemu")]
+const UART_IRQ: u32 = 10;
+/// See [`UART_IRQ`].
+#[cfg(feature = "vf2")]
+const UART_IRQ: u32 = 32;
+
+/// ASCII DC2 — the Ctrl-R the operator presses to reboot.
+const CTRL_R: u8 = 0x12;
+
 // Address helpers — `const fn` so callers see a constant at compile
 // time when irq/context are constant.
 
@@ -145,6 +161,46 @@ pub fn init() {
     // SAFETY: INV-7. `csrs sie` is an S-mode privileged CSR write.
     unsafe {
         asm!("csrs sie, {0}", in(reg) 1usize << 9);
+    }
+
+    // Route the console UART to this hart. The UART has asserted its
+    // RX-available line since `uart_ns16550::init` set IER.ERBFI, but
+    // with no PLIC enable the request never reached us — which is why
+    // Ctrl-R only ever worked from the idle loop's polling read.
+    let _ = enable_irq(UART_IRQ, 1);
+}
+
+/// Unmask interrupts globally for S-mode by setting `sstatus.SIE`.
+///
+/// `sie.SEIE` (set in [`init`]) enables the *cause*; `sstatus.SIE`
+/// enables *delivery*. Without both, an interrupt stays pending
+/// forever and no handler ever runs — which was the state of this
+/// kernel from Phase 0 through build 154: the PLIC was configured,
+/// `trap.rs` had a `SCAUSE_S_EXT` arm, `dispatch` was written and
+/// tested by inspection, and none of it had ever executed.
+///
+/// # Contract
+///
+/// - Precondition: [`init`] has run, the trap vector is installed, and
+///   every `static mut` an interrupt handler may touch is initialized.
+///   Call this LAST in boot for that reason.
+/// - Postcondition: the kernel is preemptible by S-mode interrupts.
+///
+/// # Consequences (read before calling)
+///
+/// This is the moment the kernel stops being cooperative. Every
+/// `static mut` that was safe purely because nothing could interrupt
+/// its update is now only as safe as INV-1 and the handler's
+/// discipline make it. Per R2, handlers must not allocate; per INV-2,
+/// they own the trap frame. Keep handlers short and keep them away
+/// from scheduler and capability state.
+pub fn enable_supervisor_interrupts() {
+    // SAFETY: INV-7. `csrs sstatus` is an S-mode privileged CSR write;
+    // bit 1 is SIE. Boot has completed every static initialization the
+    // UART handler below reads, so a trap taken immediately after this
+    // instruction finds consistent state.
+    unsafe {
+        asm!("csrs sstatus, {0}", in(reg) 1usize << 1);
     }
 }
 
@@ -262,6 +318,30 @@ pub fn dispatch() {
     let irq = claim_reg.read();
     if irq == 0 {
         // Spurious interrupt; nothing to do.
+        return;
+    }
+
+    // Console UART first, and handled entirely here.
+    //
+    // This path deliberately touches no capability, scheduler, or
+    // allocator state — it reads the RX register and, for Ctrl-R,
+    // never returns. That keeps it sound under INV-1 without relying
+    // on the notification machinery below, and it is what makes the
+    // reboot key work while a tenant is running. Reading RBR also
+    // clears the UART's interrupt condition, so the claim/complete
+    // cycle below does not re-fire immediately.
+    if irq == UART_IRQ {
+        while let Some(b) = crate::mmio::uart_ns16550::try_read_byte() {
+            if b == CTRL_R {
+                // Complete the PLIC cycle first: system_reset() does
+                // not return, and leaving an unclaimed IRQ would have
+                // the source still asserted across the reset.
+                claim_reg.write(irq);
+                crate::kprintln!("\r\n[reboot] Ctrl-R received, restarting via SBI...");
+                crate::sbi::system_reset();
+            }
+        }
+        claim_reg.write(irq);
         return;
     }
 
