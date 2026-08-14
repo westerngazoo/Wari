@@ -1678,6 +1678,19 @@ pub mod vf2_phy {
                                 // JH7110 interconnect is IO-coherent and the store
                                 // buffer drains first. Must be resolved in the kernel
                                 // host fn before a second SoC.
+            // Clear RBU before the doorbell. When the engine walks a
+            // descriptor it still owns it raises RBU (DMA_CH0_STATUS
+            // bit 7) and SUSPENDS the RX channel; the bit is sticky
+            // and write-1-to-clear. A tail write alone does not
+            // reliably restart a channel whose RBU is still asserted,
+            // so an engine that suspended once would never receive
+            // another frame — exactly the permanent RX stall seen on
+            // build 155 (frames froze at 47 while polling continued).
+            // Clearing it here makes re-arm the recovery path too.
+            const DMA_CH0_STATUS: u32 = 0x1160;
+            const DMA_STATUS_RBU: u32 = 1 << 7;
+            let _ = wari_net_mmio_write32(GMAC_BASE + DMA_CH0_STATUS, DMA_STATUS_RBU);
+
             let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
             let rx_tail_pa: u32 = (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
             let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
