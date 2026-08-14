@@ -179,6 +179,42 @@ pub fn debug_lsr_snapshot() -> (u8, u32) {
 /// Used by the kmain idle loop's Ctrl-R reboot detection. A future
 /// PR will swap this for an IRQ-driven path (UART RX-Available IRQ
 /// via PLIC → `wfi` wakes on byte) to drop the busy-poll cost.
+/// IIR (read side of the FCR address) — interrupt identification.
+const IIR_REG: usize = 2;
+/// DesignWare-only UART Status Register. Absent on a true NS16550;
+/// reading it on QEMU's 8250 is harmless (returns 0, no side effect).
+const USR_REG: usize = 31;
+/// IIR interrupt-ID field.
+const IIR_ID_MASK: u8 = 0x0F;
+/// DesignWare "busy detect" ID — not an NS16550 code.
+const IIR_BUSY_DETECT: u8 = 0x07;
+
+/// Clear a latched DesignWare "busy detect" interrupt, if present.
+///
+/// The JH7110's `snps,dw-apb-uart` raises this when LCR is written
+/// while the UART is busy — which [`init`] does. It is **only**
+/// cleared by reading USR: no amount of draining RBR will silence it.
+/// Left latched, the line stays asserted, and once interrupt delivery
+/// is enabled the hart re-traps forever and the kernel wedges with no
+/// console output. Linux carries the same workaround in
+/// `dw8250_handle_irq`.
+///
+/// # Postcondition
+///
+/// Returns `true` if a busy-detect condition was found and cleared.
+pub fn clear_busy_detect() -> bool {
+    // SAFETY: INV-3. Both are fixed UART register offsets inside the
+    // identity-mapped UART page; reads have no side effect beyond the
+    // documented clear-on-read of USR.
+    unsafe {
+        if reg(IIR_REG).read() & IIR_ID_MASK != IIR_BUSY_DETECT {
+            return false;
+        }
+        let _ = reg(USR_REG).read();
+        true
+    }
+}
+
 pub fn try_read_byte() -> Option<u8> {
     // SAFETY: INV-3.
     let lsr = unsafe { reg(LSR_REG) };

@@ -115,6 +115,14 @@ const UART_IRQ: u32 = 32;
 /// ASCII DC2 — the Ctrl-R the operator presses to reboot.
 const CTRL_R: u8 = 0x12;
 
+/// Consecutive external traps whose claim returned 0. Reset on any
+/// real claim; at [`SPURIOUS_LIMIT`] the dispatcher masks `sie.SEIE`
+/// so an unclaimable source degrades the kernel instead of wedging it.
+static mut SPURIOUS_RUN: u32 = 0;
+/// Generous enough that a genuine race loses, small enough that a
+/// storm is caught long before it looks like a hang.
+const SPURIOUS_LIMIT: u32 = 1000;
+
 // Address helpers — `const fn` so callers see a constant at compile
 // time when irq/context are constant.
 
@@ -334,8 +342,39 @@ pub fn dispatch() {
     let claim_reg = unsafe { VolatilePtr::<u32>::new(claim_addr(HART_CONTEXT) as *mut u32) };
     let irq = claim_reg.read();
     if irq == 0 {
-        // Spurious interrupt; nothing to do.
+        // A claim of 0 means the hart has an external interrupt pending
+        // that this context cannot claim — a source enabled in another
+        // context, or a device asserting a line we do not service.
+        // Returning leaves it pending, so we re-trap immediately and
+        // spin forever with no output: a hard wedge, which is exactly
+        // how build 157 froze right after enabling delivery.
+        //
+        // We cannot clear a source we cannot claim, so the only way to
+        // stay alive is to stop listening. Mask external interrupts at
+        // the hart after a run of unclaimable traps. Ctrl-R then falls
+        // back to the idle loop's polling read — degraded, but booted
+        // and diagnosable instead of dead.
+        //
+        // SAFETY: INV-1. Single-hart, and the trap handler is the only
+        // writer of this counter.
+        unsafe {
+            SPURIOUS_RUN = SPURIOUS_RUN.saturating_add(1);
+            if SPURIOUS_RUN >= SPURIOUS_LIMIT {
+                asm!("csrc sie, {0}", in(reg) 1usize << 9);
+                crate::kprintln!(
+                    "[plic] {} unclaimable external interrupts — masking SEIE. \
+                     Check HART_CONTEXT ({}) and the enabled sources.",
+                    SPURIOUS_RUN,
+                    HART_CONTEXT,
+                );
+            }
+        }
         return;
+    }
+    // A real claim means we are making progress; reset the run.
+    // SAFETY: INV-1, as above.
+    unsafe {
+        SPURIOUS_RUN = 0;
     }
 
     // Console UART first, and handled entirely here.
@@ -348,6 +387,10 @@ pub fn dispatch() {
     // clears the UART's interrupt condition, so the claim/complete
     // cycle below does not re-fire immediately.
     if irq == UART_IRQ {
+        // A DesignWare busy-detect latch is cleared ONLY by reading
+        // USR — draining RBR will not silence it, and the line would
+        // stay asserted for good.
+        let _ = crate::mmio::uart_ns16550::clear_busy_detect();
         while let Some(b) = crate::mmio::uart_ns16550::try_read_byte() {
             if b == CTRL_R {
                 // Complete the PLIC cycle first: system_reset() does
