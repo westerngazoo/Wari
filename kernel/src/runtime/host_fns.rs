@@ -279,6 +279,31 @@ fn host_net_mmio_write32(_caller: Caller<'_, Tier2HostState>, addr: u32, val: u3
     if !validate::is_net_mmio_addr(addr as usize) {
         return E_INVAL;
     }
+    // Order every prior memory write ahead of this device write.
+    //
+    // This is the barrier INV-25 records as missing, and it has to
+    // live here: a Tier-2 driver is WASM and cannot emit `fence` at
+    // all, so the host-fn boundary is the only place in the
+    // architecture where ordering can be established. Comments in the
+    // net driver claimed the wasm→native transition "naturally
+    // serializes" — it does not; a function call is not a barrier.
+    //
+    // Concretely: the driver writes an RX descriptor (normal memory)
+    // and then rings the tail doorbell (this device write). Without
+    // `fence w,o` the U74 store buffer may make the doorbell visible
+    // to the GMAC first, so the engine reads a descriptor it still
+    // owns, raises RBU, and suspends — RX dies permanently. Builds
+    // ≤154 masked this by re-arming every descriptor twice, which
+    // re-published it after the store buffer had drained by chance.
+    // Removing that duplicate (build 155) exposed the real bug: RX
+    // stalled after ~47 frames on silicon.
+    //
+    // `fence w,o` = prior writes ordered before subsequent device
+    // output, matching Linux's RISC-V `__io_bw()` before `writel`.
+    // SAFETY: INV-7 — `fence` is unprivileged and always legal.
+    unsafe {
+        core::arch::asm!("fence w,o", options(nostack, preserves_flags));
+    }
     // SAFETY: INV-3 + INV-20 (NIC MMIO Window Validity, validator-
     // narrowed). Cap gate above ensures only the signed Tier-2 net
     // driver reaches this point. NIC registers are 32-bit-aligned
