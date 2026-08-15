@@ -382,12 +382,10 @@ pub fn register_wasi_host_fns(
     Ok(())
 }
 
-/// Slot in a guard's CSpace holding its `EventLog` cap.
-///
-/// Distinct from the demo tenants' SLOT_NET(2)/SLOT_IPC(3): a guard
-/// is not a demo tenant and holds neither. Kept in sync with
-/// `cap::boot::install_tier1_guard`.
-pub const SLOT_EVENTLOG: u8 = 4;
+/// Slot in a guard's CSpace holding its `EventLog` cap. Re-exported
+/// from `cap::boot` so the grant site and this check site share ONE
+/// definition and cannot drift.
+pub use crate::cap::boot::SLOT_EVENTLOG;
 
 /// `wari::event_read(cursor_lo, cursor_hi, out_ptr) -> i32`.
 ///

@@ -99,6 +99,13 @@ const SLOT_PRIMARY: u8 = 0;
 /// Slot index for the exit cap (Tier-1 only).
 const SLOT_EXIT: u8 = 1;
 
+/// Slot holding a guard agent's `EventLog` READ cap. Distinct from the
+/// demo tenants' SLOT_NET(2)/SLOT_IPC(3): a guard holds neither. The
+/// single source of truth — `runtime::wasi::event_read` checks this
+/// exact slot (it re-exports this const), so the two cannot drift
+/// (adversarial-review finding folded in).
+pub const SLOT_EVENTLOG: u8 = 4;
+
 // ─────────────────────────────────────────────────────────────────
 // init_root_caps
 // ─────────────────────────────────────────────────────────────────
@@ -367,8 +374,6 @@ static mut BOOT_TIER1_EPS: Option<(u16, u16)> = None;
 /// # Contract / Errors / Panics: as [`install_tier1_dynamic`].
 pub fn install_tier1_guard(proc_id: u8) -> Result<(), KernelError> {
     install_tier1_dynamic(proc_id)?;
-    // SLOT_EVENTLOG kept in sync with runtime::wasi::SLOT_EVENTLOG.
-    const SLOT_EVENTLOG: u8 = 4;
     let cs = cspaces();
     // EventLog is a singleton facility (one kernel ring), so the cap
     // names authority, not a pool object: pool_index is unused, and
@@ -393,6 +398,17 @@ pub fn install_tier1_dynamic(proc_id: u8) -> Result<(), KernelError> {
         return Err(KernelError::InvalidArgument);
     };
     let cs = cspaces();
+    // Clear the whole CSpace FIRST, then install only the granted
+    // caps. `install_tier1_caps` writes only the slots it grants, so
+    // without this a proc_id reused after a future reaper reclaims it
+    // would inherit the PRIOR tenant's caps in the untouched slots —
+    // e.g. a guard's EventLog cap surviving into a plain tenant
+    // (found in adversarial review of this brick). No reaper recycles
+    // proc_ids today, so this is forward-safety; it makes the leak
+    // structurally impossible rather than relying on nobody reusing a
+    // slot. `check_cap` is generation-blind, so clearing at grant
+    // time is the durable fix.
+    cs[proc_id as usize] = super::cspace::CSpace::new();
     let tier1_caps = caps_for(Tier::One, ModuleId::Dynamic(0));
     install_tier1_caps(cs, proc_id, &tier1_caps, uart_ipc_ep, kernel_exit_ep);
     Ok(())

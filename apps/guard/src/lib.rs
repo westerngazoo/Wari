@@ -172,13 +172,14 @@ pub extern "C" fn _start() -> ! {
         // SAFETY: host fn; EventLog-cap-gated; writes 16 bytes into
         // our own linmem at buf, validated by the kernel.
         //
-        // `as_mut_ptr`, not `as_ptr`: the kernel mutates `buf` through
-        // this pointer, which the Rust abstract machine cannot see
-        // across the opaque FFI call. A `*const` (or dropping `mut`)
-        // would let the compiler assume `buf` stays zero and hoist the
-        // `decode` below — the exact stale-read class that cost us the
-        // DMA descriptor loop (INV-25). The mutable pointer escaping to
-        // an opaque call forces the reload.
+        // The kernel writes `buf` through this pointer, which the Rust
+        // abstract machine cannot see across the opaque FFI call — so
+        // `decode(&buf)` below must reload from memory, not read a
+        // cached zero (the stale-read class that cost us the DMA loop,
+        // INV-25). What forces the reload is the address *escaping* to
+        // an opaque call; `as_mut_ptr` states the intent honestly (the
+        // callee mutates), which is why it is used rather than the
+        // `mut`-vs-`const` distinction per se.
         let rc = unsafe { wasi::event_read(lo, hi, buf.as_mut_ptr() as u32) };
         match rc {
             1 => {
