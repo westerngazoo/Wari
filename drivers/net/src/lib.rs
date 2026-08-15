@@ -472,6 +472,11 @@ pub mod vf2_state {
     /// Frames dropped because every TX descriptor was still owned by
     /// the DMA engine.
     pub static mut C_TX_DROPPED: u32 = 0;
+    /// Consecutive `receive()` calls that found no frame. Drives the
+    /// rate-limited RX watchdog.
+    pub static mut EMPTY_POLLS: u32 = 0;
+    /// Times the watchdog found the RX channel suspended and resumed it.
+    pub static mut C_RX_KICKS: u32 = 0;
 }
 
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
@@ -1437,8 +1442,8 @@ pub mod phy {
 #[cfg(feature = "vf2")]
 pub mod vf2_phy {
     use super::{
-        vf2_state, wari_net_mmio_write32, ETH_FRAME_MAX, VF2_RX_BUFS, VF2_RX_RING, VF2_TX_BUFS,
-        VF2_TX_RING, VF2_TX_SCRATCH,
+        vf2_state, wari_net_mmio_read32, wari_net_mmio_write32, ETH_FRAME_MAX, VF2_RX_BUFS,
+        VF2_RX_RING, VF2_TX_BUFS, VF2_TX_RING, VF2_TX_SCRATCH,
     };
     use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
     use smoltcp::time::Instant;
@@ -1611,6 +1616,46 @@ pub mod vf2_phy {
                                 idx: vf2_state::TX_NEXT,
                             },
                         ));
+                    }
+                }
+            }
+
+            // RX watchdog.
+            //
+            // Nothing found. If the DMA channel has SUSPENDED -- it
+            // raises RBU when it walks a descriptor software still
+            // owns -- then no frame will ever be found again, and the
+            // RBU clear lives in `vf2_rx_rearm`, which only runs when
+            // a frame IS found. That is circular: a suspended channel
+            // cannot recover through the re-arm path, which is why
+            // build 159 sat at StRf=45 for ~5M polls before luck
+            // restarted it.
+            //
+            // Break the cycle here, rate-limited so the overwhelmingly
+            // common empty poll costs nothing: sample DMA_CH0_STATUS,
+            // and if RBU is asserted clear it and re-ring the tail
+            // doorbell to resume the channel.
+            //
+            // SAFETY: single-threaded driver (INV-1); statics below are
+            // written only here.
+            unsafe {
+                vf2_state::EMPTY_POLLS = vf2_state::EMPTY_POLLS.wrapping_add(1);
+                if vf2_state::EMPTY_POLLS & 0x0FFF == 0 {
+                    const DMA_CH0_STATUS: u32 = 0x1160;
+                    const DMA_STATUS_RBU: u32 = 1 << 7;
+                    let st = wari_net_mmio_read32(GMAC_BASE + DMA_CH0_STATUS);
+                    if st & DMA_STATUS_RBU != 0 {
+                        let _ = wari_net_mmio_write32(
+                            GMAC_BASE + DMA_CH0_STATUS,
+                            DMA_STATUS_RBU,
+                        );
+                        let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
+                        let rx_tail_pa: u32 =
+                            (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
+                        let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
+                        vf2_state::C_RX_KICKS = vf2_state::C_RX_KICKS.wrapping_add(1);
+                        // tag = 'rXKk' — watchdog resumed a suspended channel.
+                        let _ = super::wari_drv_log_u32(0x7258_4B6B, vf2_state::C_RX_KICKS);
                     }
                 }
             }
