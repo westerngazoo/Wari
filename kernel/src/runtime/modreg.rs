@@ -109,6 +109,11 @@ pub fn stage(bytes: &[u8]) -> Result<u8, KernelError> {
             if *s == SlotState::Free {
                 store[i][..bytes.len()].copy_from_slice(bytes);
                 *s = SlotState::Staged { len: bytes.len() };
+                crate::runtime::events::emit(
+                    wari_events::EventKind::ModuleStaged,
+                    i as u16,
+                    bytes.len() as u32,
+                );
                 return Ok(i as u8);
             }
         }
@@ -158,7 +163,16 @@ pub fn spawn(slot: u8) -> Result<u8, KernelError> {
     // Staged→Live transition runs (single-hart, INV-1).
     let (payload_off, payload_len) = {
         let envelope: &[u8] = unsafe { &(&*addr_of!(STORE))[idx][..env_len] };
-        let payload = sign::verify(envelope)?;
+        let payload = match sign::verify(envelope) {
+            Ok(p) => p,
+            Err(e) => {
+                // The record every guard agent exists to see: bytes
+                // arrived, claimed to be a module, and failed the
+                // signature gate.
+                crate::runtime::events::emit(wari_events::EventKind::SpawnRejected, slot as u16, 0);
+                return Err(e);
+            }
+        };
         // Offset of the payload inside the envelope, computed from
         // the returned subslice — no duplicated envelope-layout math
         // (INV-24 spirit: one source of truth, sign.rs owns the
@@ -179,6 +193,11 @@ pub fn spawn(slot: u8) -> Result<u8, KernelError> {
             proc_id,
         };
     }
+    crate::runtime::events::emit(
+        wari_events::EventKind::SpawnVerified,
+        slot as u16,
+        proc_id as u32,
+    );
     Ok(proc_id)
 }
 

@@ -273,6 +273,7 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
             }
         }
     }
+    runtime::events::boot_summary();
     kprintln!("[sched] all tenants exited, idling (Ctrl-R = reboot)");
 
     // Idle loop. Two responsibilities:

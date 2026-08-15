@@ -878,6 +878,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wari-events"
+version = "0.0.1"
+
+[[package]]
 name = "wari-hello"
 version = "0.0.1"
 dependencies = [
@@ -906,6 +910,7 @@ dependencies = [
  "wari-cap",
  "wari-driver-iface",
  "wari-error",
+ "wari-events",
  "wari-ipc",
  "wari-mem",
  "wari-sched",
