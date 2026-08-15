@@ -477,6 +477,8 @@ pub mod vf2_state {
     pub static mut EMPTY_POLLS: u32 = 0;
     /// Times the watchdog found the RX channel suspended and resumed it.
     pub static mut C_RX_KICKS: u32 = 0;
+    /// Rate limiter for the stall telemetry snapshot.
+    pub static mut STALL_SNAPS: u32 = 0;
 }
 
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
@@ -1644,6 +1646,40 @@ pub mod vf2_phy {
                     const DMA_CH0_STATUS: u32 = 0x1160;
                     const DMA_STATUS_RBU: u32 = 1 << 7;
                     let st = wari_net_mmio_read32(GMAC_BASE + DMA_CH0_STATUS);
+
+                    // Stall telemetry. Build 160 sat at StRf=44 for 860
+                    // counter dumps with RBU CLEAR -- the engine had not
+                    // suspended, we simply stopped seeing frames. That
+                    // splits two very different causes and we had no
+                    // data to choose: either frames reach the MAC and
+                    // the descriptor writeback is not visible to us
+                    // (cache coherence, INV-25's open half), or no frame
+                    // arrives at all (PHY/link).
+                    //
+                    // MMC counters are maintained by the MAC itself and
+                    // read over uncached MMIO, so they are ground truth
+                    // for "did a frame actually arrive". Sampled every
+                    // ~1M empty polls, so this is quiet unless we are
+                    // genuinely stalled.
+                    vf2_state::STALL_SNAPS = vf2_state::STALL_SNAPS.wrapping_add(1);
+                    if vf2_state::STALL_SNAPS & 0xFF == 0 {
+                        const MMC_RX_FRAMECOUNT_GB: u32 = 0x0780;
+                        const MMC_RX_CRC_ERROR: u32 = 0x0794;
+                        const DMA_CH0_CUR_RXDESC: u32 = 0x114C;
+                        let rx_frames = wari_net_mmio_read32(GMAC_BASE + MMC_RX_FRAMECOUNT_GB);
+                        let rx_crc = wari_net_mmio_read32(GMAC_BASE + MMC_RX_CRC_ERROR);
+                        let cur = wari_net_mmio_read32(GMAC_BASE + DMA_CH0_CUR_RXDESC);
+                        // 'MRxF' frames at MAC / 'MRxC' CRC errors /
+                        // 'DCur' engine's current descriptor / 'DSts'.
+                        let _ = super::wari_drv_log_u32(0x4D52_7846, rx_frames);
+                        let _ = super::wari_drv_log_u32(0x4D52_7843, rx_crc);
+                        let _ = super::wari_drv_log_u32(0x4443_7572, cur);
+                        let _ = super::wari_drv_log_u32(0x4453_7473, st);
+                        // What WE see in the descriptor we are parked on.
+                        let own = VF2_RX_RING.descs[vf2_state::RX_NEXT][3];
+                        let _ = super::wari_drv_log_u32(0x524F_776E, own); // 'ROwn'
+                    }
+
                     if st & DMA_STATUS_RBU != 0 {
                         let _ = wari_net_mmio_write32(
                             GMAC_BASE + DMA_CH0_STATUS,
