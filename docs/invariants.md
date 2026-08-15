@@ -330,6 +330,79 @@ this in PR Net-3). The trap handler's `dispatch()` only reads.
 to allow drivers to register IRQs at runtime. INV-23 is then
 replaced by INV-1 (single-hart) covering the binding write path.
 
+### INV-20 · NIC MMIO Window Validity *(Phase 1b PR Net-1)*
+
+> Every `net_mmio_read32` / `net_mmio_write32` validates its address
+> against `wari_validate::is_net_mmio_addr` for the active platform
+> before the access. Sister invariant to INV-3, which covers the
+> fixed-base UART and PLIC windows; this one covers a window that is
+> per-platform data rather than a single hardcoded base.
+
+**Consequence**: a Tier-2 driver cannot reach an MMIO address outside
+its licensed NIC window, even though it supplies the address itself.
+
+**Enforcement**: `kernel/src/runtime/host_fns.rs` checks
+`validate::is_net_mmio_addr(addr)` and returns `E_INVAL` before the
+`write_volatile`/`read_volatile`. The window table lives in
+`wari-validate` as data (`windows::qemu::NET_WINDOWS`,
+`windows::vf2::NET_WINDOWS`) and is host-tested.
+
+**Known gaps** — recorded rather than implied, because this invariant
+was cited by three `unsafe` blocks for months while existing only as a
+row in `docs/net-driver-design.md`:
+
+1. `is_net_mmio_addr` tests a **single byte**, and the caller then
+   performs a **4-byte** access. An address 1–3 bytes below a window's
+   end passes validation and touches up to 3 bytes past it. The check
+   should be `addr + 4 <= window_end`.
+2. Nothing verifies 32-bit alignment. The SAFETY comment at
+   `host_fns.rs` asserts "the driver presents 32-bit-aligned offsets" —
+   an assumption about caller trust written into a soundness proof,
+   with no check behind it.
+3. The address is validated; the **value** is not. The DMA
+   descriptor-base registers sit inside the licensed window, so a
+   Tier-2 driver can point the engine at arbitrary physical memory.
+   See the Tier-2 confinement note in `docs/security-model.md` — this
+   is a threat-model decision, not a bug this invariant can fix.
+
+**When this breaks**: a third platform. The window table gains an arm;
+missing it means the driver's MMIO is rejected outright, which is the
+correct loud failure.
+
+### INV-21 · Socket Cap Implies Net Cap Existence *(Phase 1b PR Net-1)*
+
+> Every `Socket` cap's `net_idx` references a live `Net` pool entry.
+> Revoking a `Net` cap cascades to every `Socket` minted from it.
+
+**Enforcement**: the INV-16 derivation chain — a Socket is always
+derived from the Net cap it names, so the existing revocation cascade
+covers it. No separate mechanism.
+
+### INV-22 · NIC Initialization Is Boot-Once *(Phase 1b PR Net-1)*
+
+> The Tier-2 net driver's NIC-init path runs exactly once per boot,
+> triggered by the driver's `_start`. Every later Tier-1 socket call
+> assumes an initialized NIC.
+
+**Consequence**: socket host functions may treat the NIC as ready
+without re-checking, and the driver's `static mut` device state has a
+single writer at a known point in boot (INV-14).
+
+**When this breaks**: driver restart or hot-reload. Neither exists in
+Phase 1; both would need an explicit re-init path and a way to quiesce
+in-flight DMA first.
+
+### Design-level invariants not yet in this catalog
+
+`INV-α` (a registered handle names a cap the kernel already proved),
+`INV-β` (every SQE is copied out of linear memory before use), and
+`INV-γ` (generation re-check on each drain) are cited in prose in
+`kernel/src/cap/ring_drain.rs` and specified in
+`docs/cap-registered-fastpath-design.md` §5. **No `unsafe` block cites
+them**, so they are not R1 violations — but they should take real
+numbers when the registered-fastpath work lands rather than staying
+Greek.
+
 ### INV-25 · DMA Descriptor Ownership *(Phase 1c)* — **partially unenforced, see Status**
 
 > Once software sets the OWN bit on a descriptor, it does not read or

@@ -44,3 +44,15 @@ pub const NET_MMIO_WINDOWS: &[MmioWindow] = wari_validate::windows::vf2::NET_WIN
 pub const fn is_net_mmio_addr(addr: usize) -> bool {
     wari_validate::addr_in_windows(addr, NET_MMIO_WINDOWS)
 }
+
+/// Is a `width`-byte NIC MMIO access at `addr` licensed?
+///
+/// Use this at real access sites. [`is_net_mmio_addr`] answers only
+/// for the first byte, so an address 1-3 below a window's end passed
+/// it and the caller's 4-byte access then spilled past the window.
+/// This also enforces natural alignment, which the MMIO host
+/// functions' SAFETY comments asserted without checking. See INV-20.
+#[inline]
+pub const fn is_net_mmio_access(addr: usize, width: usize) -> bool {
+    wari_validate::access_in_windows(addr, width, NET_MMIO_WINDOWS)
+}
