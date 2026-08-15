@@ -610,17 +610,23 @@ gantt
     Module attestation + signing pipeline                      :p1d, after p1c, 2w
     Phase 1 demo + audit                                        :milestone, m1, after p1d, 0d
 
-    section Phase 2 — Sovereign AI + Docker ingress
-    WASI-NN host function surface                              :p2a, after p1d, 3w
-    Tier-2 GPU driver (WASM over PCIe)                         :p2b, after p2a, 1M
-    Hardware crypto (Zkn/Zks)                                   :p2c, after p2b, 3w
-    tools/oci2wasm — Docker→WASM compiler (Rust/Go/Python/Node) :p2d, after p2a, 2M
-    First LLM inference on VF2 + audit                          :milestone, m2, after p2c, 0d
+    section Phase 2 — WASM Cloud OS core
+    Dynamic module lifecycle (upload→verify→spawn→reap)         :p2a, after p1d, 1M
+    wari-http — real HTTP layer (pure crate)                    :p2b, after p2a, 3w
+    Ops story: printable panics, per-tenant metrics             :p2c, after p2a, 3w
+    AOT engine lands on-device (G-track, parallel lane)         :p2d, after p1d, 2M
+    Cloud-OS demo: customer wasm over the wire + audit          :milestone, m2, after p2b, 0d
 
-    section Phase 3 — Confidential compute + GAPU
-    RISC-V CoVE integration (confidential tenant memory)        :p3a, after p2c, 2M
-    GAPU FPGA Tier-2 driver over PCIe                          :p3b, after p3a, 2M
-    Per-module WASM formal verification harness                :p3c, after p3b, 2M
+    section Phase 2b — AI capability layer (MCP-native)
+    wari-mcp — JSON-RPC/MCP framing (pure crate)                :p2e, after p2b, 3w
+    Executor as signed Tier-2 MCP server (wari-policy gauntlet) :p2f, after p2e, 1M
+    Supervisor session caps + notification wait queues          :p2g, after p2e, 1M
+    External-model Planner drives Wari on silicon + audit       :milestone, m2b, after p2f, 0d
+
+    section Phase 3 — Multikernel + second silicon
+    Multikernel implementation (ADR-001; per-hart kernels)      :p3a, after p2g, 2M
+    Orange Pi R2S port (Ky X1; board descriptor first)          :p3b, after p2g, 2M
+    RISC-V CoVE integration (confidential tenant memory)        :p3c, after p3a, 2M
     Multi-board clustering + distributed capabilities           :p3d, after p3c, 1M
     Pre-release external audit                                  :milestone, m3, after p3d, 0d
 
@@ -632,7 +638,22 @@ gantt
     Tier-0 frozen-image spec                                    :milestone, imk, after p4d, 0d
     SoC RTL: MMU-free variant (Tier-2-only hardware isolation)  :p4e, after imk, 6M
     Kernel-in-ROM tapeout                                       :milestone, tape, after p4e, 0d
+
+    section Phase 5 — GAPU (deferred by decision, 2026-08-15)
+    Hito 2: pinned contiguous allocator (shared w/ Phase 2b)    :p5a, after p4b, 1M
+    Hito 1/3: Cl(1,3) datapath + ping-pong DMA integration      :p5b, after p5a, 3M
+    Hito 4: full-stack rotor execution                          :milestone, m5, after p5b, 0d
 ```
+
+> **Strategic order (v2.0, decided 2026-08-15)**: WASM cloud OS core →
+> AI/agent capability layer (user-space, MCP as the trust-boundary
+> protocol) → multikernel (`docs/adr/ADR-001-multikernel-smp.md`) →
+> GAPU last (`docs/gapu-architecture-v2.md`, reviewed in
+> `docs/gapu-fit-review.md`). Principle: **the kernel knows nothing
+> about AI — AI is a workload.** The former Phase-2 items WASI-NN /
+> GPU driver / oci2wasm / Zkn-Zks are unscheduled pending the D3
+> outcome; they return to the roadmap if and when the cloud-OS + MCP
+> spine makes them earn their place.
 
 ### Phase 0 Exit Criteria (concrete, testable)
 
@@ -669,17 +690,25 @@ deadline Ctrl-R fix and the extracted-core kernel (pure host-testable
 crates `wari-{cap,sched,validate,error,ipc,policy}` shimmed by the
 kernel).
 
-**The one open 1c item** is the GMAC1 RGMII RX-delay calibration: ping
-loss was diagnosed — by a metric swinging 0–57% *boot-to-boot on
-byte-identical code* — as PHY analog timing, not software. The fix
-(rx-delay 300 ps → 1500 ps) awaits cold-boot confirmation on silicon.
+**Phase 1c is closed** (2026-08-15, build 162): `ping -c 80` at **0%
+loss** on the VF2. The intermittent loss that swung 0–57% boot-to-boot
+on byte-identical code was ultimately a **missing `volatile` on DMA
+descriptor accesses** — not RGMII analog margin (see the correction on
+PR #71 and `docs/STATE-OF-PLAY.md`). The same close-out landed
+interrupt delivery (the first asynchronous interrupt this kernel ever
+took), Ctrl-R reboot from any state, INV-24/INV-25, and the
+platform-selection compile guards.
 
-Two **Phase 2** tracks are now open in parallel: the **AOT engine**
-(off-device WASM→RISC-V compiler; G1/G3/G7a merged, G4 spike + G5
-target-ABI RFC done, G6 gated on the DG-2 memory-model call) and the
-**AI-OS agentic layer** (Planner/Executor/Supervisor over the working
-IPC — see `docs/ai-os-assistant-design.md`; the Executor policy engine
-`wari-policy` is merged). Live build state: `docs/STATE-OF-PLAY.md`.
+**Phase 2 is open under the v2.0 strategic order** (see Roadmap note):
+the **WASM cloud OS core** first — dynamic module lifecycle is the
+spine — then the **AI capability layer** (user-space, MCP-native:
+Executor as a signed Tier-2 MCP server mediating every tool call
+through `wari-policy`; Planner pluggable, external model first). The
+**AOT engine** continues in its parallel lane (G1/G3/G4/G5/G7a done,
+DG-1 Cranelift and DG-2 explicit-bounds both decided). Multikernel is
+the committed SMP direction (ADR-001), implemented after the AI layer;
+the **GAPU** (`docs/gapu-architecture-v2.md`) is deferred to the end
+by decision. Live build state: `docs/STATE-OF-PLAY.md`.
 
 **Cherry-pick discipline** (carried forward from Phase 0): the
 predecessor `goose-os` is reference material — pure-logic modules
