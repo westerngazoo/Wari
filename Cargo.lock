@@ -886,6 +886,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wari-http"
+version = "0.0.1"
+
+[[package]]
 name = "wari-integration-tests"
 version = "0.0.1"
 
