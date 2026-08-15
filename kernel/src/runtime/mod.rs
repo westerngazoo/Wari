@@ -24,6 +24,7 @@
 
 pub mod engine;
 pub mod heap;
+pub mod events;
 pub mod hello_blob;
 pub mod hello_signed_blob;
 pub mod modreg;

@@ -1,0 +1,16 @@
+[package]
+name = "wari-events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pure event-record format and ring arithmetic for the kernel audit stream."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Intentionally none. The kernel ENCODES with this crate and guard
+# agents (wasm32) DECODE with the same crate — one source of truth
+# for the record layout (INV-24 discipline applied to events).

@@ -215,6 +215,11 @@ pub fn run() -> Result<(), KernelError> {
 
         let final_state = match outcome {
             StepOutcome::Exited(code) => {
+                runtime::events::emit(
+                    wari_events::EventKind::TenantExited,
+                    proc_id as u16,
+                    code as u32,
+                );
                 kprintln!(
                     "[sched] Tier-1 instance proc_id={} exited (code={})",
                     proc_id,
@@ -223,6 +228,7 @@ pub fn run() -> Result<(), KernelError> {
                 Some(ProcessState::Exited(code))
             }
             StepOutcome::Faulted => {
+                runtime::events::emit(wari_events::EventKind::TenantFaulted, proc_id as u16, 0);
                 kprintln!("[sched] Tier-1 instance proc_id={} faulted", proc_id);
                 Some(ProcessState::Faulted)
             }

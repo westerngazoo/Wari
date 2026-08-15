@@ -24,6 +24,7 @@ wari-ipc = { path = "../wari-ipc" }
 # The kernel-wide KernelError taxonomy (R5), extracted so the pure
 # crates below can return it; kernel/src/error.rs shims it.
 wari-error = { path = "../wari-error" }
+wari-events = { path = "../wari-events" }
 # Pure cap-system core (B-3 slices: Tier/ModuleId identity enums +
 # static caps table, then Cap/CapId/ObjectKind + Pool/BoundedQueue)
 # and pure scheduler core (B-1: Process state machine + pick-next

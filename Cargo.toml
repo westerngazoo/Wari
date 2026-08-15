@@ -30,6 +30,7 @@ members = [
     "wari-validate",
     "wari-net-wire",
     "wari-mcp",
+    "wari-events",
     "wari-http",
     "wasi",
     "kernel",
