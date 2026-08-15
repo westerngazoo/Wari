@@ -16,6 +16,30 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+// ── Platform selection is mandatory and exclusive ────────────────
+//
+// Exactly one of `qemu` / `vf2` must be active. Without this guard a
+// build with no platform feature compiles cleanly and silently takes
+// every `cfg(not(feature = "vf2"))` arm — i.e. it *becomes* a QEMU
+// build. The failure mode is brutal on real hardware: `UART_REG_STRIDE`
+// would be 1 instead of 4, so the console is dead before a single
+// diagnostic can print, and you debug a silent board with no output.
+//
+// This matters most for the next board. A third platform that forgets
+// to add its arm somewhere should fail to compile, loudly, at the line
+// that forgot — not boot into a subtly wrong configuration.
+#[cfg(not(any(feature = "qemu", feature = "vf2")))]
+compile_error!(
+    "no platform feature selected: build with --features qemu or --features vf2 \
+     (scripts/build.sh sets this per profile). A featureless build would silently \
+     take the QEMU arm of every cfg and produce a kernel with the wrong UART \
+     stride, linker script, and driver blob."
+);
+#[cfg(all(feature = "qemu", feature = "vf2"))]
+compile_error!(
+    "qemu and vf2 are mutually exclusive: exactly one platform per kernel image."
+);
+
 use core::panic::PanicInfo;
 
 // Assemble boot.S into the crate. Keeps the build single-step (no
@@ -86,7 +110,8 @@ pub static WARI_BUILD_TAG: [u8; 64] = {
 /// reach an absolute symbol at value 0/1 from the kernel base.
 #[cfg(feature = "vf2")]
 const BOOT_HART_ID: usize = 1;
-#[cfg(not(feature = "vf2"))]
+/// See [`BOOT_HART_ID`] — QEMU virt lands in S-mode on hart 0.
+#[cfg(feature = "qemu")]
 const BOOT_HART_ID: usize = 0;
 
 /// Kernel entry point, called from `boot.S` after OpenSBI hands

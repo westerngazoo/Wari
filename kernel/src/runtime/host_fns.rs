@@ -276,7 +276,7 @@ fn host_net_mmio_write32(_caller: Caller<'_, Tier2HostState>, addr: u32, val: u3
     if check_cap(PROC_ID_TIER2_NET, 0, ObjectKind::Net, CAP_RIGHT_WRITE).is_err() {
         return E_PERM;
     }
-    if !validate::is_net_mmio_addr(addr as usize) {
+    if !validate::is_net_mmio_access(addr as usize, 4) {
         return E_INVAL;
     }
     // Order every prior memory write ahead of this device write.
@@ -323,7 +323,7 @@ fn host_net_mmio_read32(_caller: Caller<'_, Tier2HostState>, addr: u32) -> u32 {
     if check_cap(PROC_ID_TIER2_NET, 0, ObjectKind::Net, CAP_RIGHT_READ).is_err() {
         return u32::MAX;
     }
-    if !validate::is_net_mmio_addr(addr as usize) {
+    if !validate::is_net_mmio_access(addr as usize, 4) {
         return u32::MAX;
     }
     // SAFETY: INV-3 + INV-20 + cap gate above.

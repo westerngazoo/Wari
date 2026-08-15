@@ -81,6 +81,44 @@ impl MmioWindow {
     pub const fn contains(&self, addr: usize) -> bool {
         addr >= self.base && addr < self.base + self.len
     }
+
+    /// Does this window permit a `width`-byte access at `addr`?
+    ///
+    /// Stronger than [`contains`], which answers only for the FIRST
+    /// byte. A caller that validates one byte and then performs a
+    /// 4-byte access can touch up to 3 bytes past the window: an
+    /// address 1-3 below the end passes `contains` and spills. This
+    /// also requires natural alignment, because the SAFETY comments on
+    /// the MMIO host functions asserted the driver presents aligned
+    /// offsets with nothing checking it — an assumption about caller
+    /// trust written into a soundness proof.
+    ///
+    /// See INV-20 in `docs/invariants.md`.
+    ///
+    /// ```
+    /// use wari_validate::MmioWindow;
+    /// let w = MmioWindow { base: 0x1000, len: 0x10 };
+    /// assert!(w.allows(0x100C, 4));   // last aligned word
+    /// assert!(!w.allows(0x100E, 4));  // would spill past the end
+    /// assert!(!w.allows(0x1002, 4));  // misaligned
+    /// ```
+    ///
+    /// # Contract
+    /// - Returns `true` iff `addr` is `width`-aligned and the whole
+    ///   range `[addr, addr + width)` lies inside the window.
+    /// - Overflow-safe: an `addr` near `usize::MAX` returns `false`
+    ///   rather than wrapping.
+    /// - Panics: never.
+    #[inline]
+    pub const fn allows(&self, addr: usize, width: usize) -> bool {
+        if width == 0 || addr % width != 0 {
+            return false;
+        }
+        let Some(end) = addr.checked_add(width) else {
+            return false;
+        };
+        addr >= self.base && end <= self.base + self.len
+    }
 }
 
 /// Is `addr` inside any of `windows`?
@@ -106,6 +144,32 @@ pub const fn addr_in_windows(addr: usize, windows: &[MmioWindow]) -> bool {
     let mut i = 0;
     while i < windows.len() {
         if windows[i].contains(addr) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Does any window in `windows` permit a `width`-byte access at `addr`?
+///
+/// Width- and alignment-checked counterpart to [`addr_in_windows`].
+/// Prefer this at every real access site; the byte-wise version
+/// remains for range queries that are not themselves accesses.
+///
+/// ```
+/// use wari_validate::{access_in_windows, MmioWindow};
+/// const TABLE: &[MmioWindow] = &[MmioWindow { base: 0x2000, len: 0x100 }];
+/// assert!(access_in_windows(0x20FC, 4, TABLE));   // last aligned word
+/// assert!(!access_in_windows(0x20FE, 4, TABLE));  // spills past the end
+/// assert!(!access_in_windows(0x2001, 4, TABLE));  // misaligned
+/// assert!(!access_in_windows(0x2000, 4, &[]));    // empty refuses all
+/// ```
+#[inline]
+pub const fn access_in_windows(addr: usize, width: usize, windows: &[MmioWindow]) -> bool {
+    let mut i = 0;
+    while i < windows.len() {
+        if windows[i].allows(addr, width) {
             return true;
         }
         i += 1;

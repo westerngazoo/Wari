@@ -13,14 +13,47 @@
 /// Picks `linker-vf2.ld` when the `vf2` feature is active, otherwise
 /// `linker.ld`. Resolved as an absolute path so cargo invocations from
 /// the workspace root and from `kernel/` both link correctly.
+/// The platform this kernel image is being built for.
+enum Platform {
+    Qemu,
+    Vf2,
+}
+
+/// Resolve the platform from cargo's feature env vars, refusing to
+/// guess.
+///
+/// This used to be `if vf2 { .. } else { .. }` in two places. A build
+/// with no platform feature therefore silently produced a QEMU kernel:
+/// linked at QEMU's `ORIGIN` instead of the board's DRAM base, and
+/// embedding the VirtIO net driver. Neither failure prints anything —
+/// the first never reaches the console, and the second passes the
+/// stale-driver build-tag guard because the *tag* matches, which is
+/// exactly the builds-107..114 failure re-entering through the
+/// platform axis rather than the staleness axis.
+///
+/// Panicking here costs one confusing build and saves a silent one.
+fn platform() -> Platform {
+    let qemu = std::env::var("CARGO_FEATURE_QEMU").is_ok();
+    let vf2 = std::env::var("CARGO_FEATURE_VF2").is_ok();
+    match (qemu, vf2) {
+        (true, false) => Platform::Qemu,
+        (false, true) => Platform::Vf2,
+        (false, false) => panic!(
+            "no platform feature: build with --features qemu or --features vf2. \
+             Guessing here would link the wrong address and embed the wrong \
+             driver blob, and neither failure prints anything."
+        ),
+        (true, true) => panic!("qemu and vf2 are mutually exclusive"),
+    }
+}
+
 #[allow(clippy::expect_used)] // build script: cargo guarantees CARGO_MANIFEST_DIR
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("cargo always sets CARGO_MANIFEST_DIR for build scripts");
-    let script = if std::env::var("CARGO_FEATURE_VF2").is_ok() {
-        "linker-vf2.ld"
-    } else {
-        "linker.ld"
+    let script = match platform() {
+        Platform::Vf2 => "linker-vf2.ld",
+        Platform::Qemu => "linker.ld",
     };
     println!("cargo:rustc-link-arg=-T{}/{}", dir, script);
     println!("cargo:rerun-if-changed=linker.ld");
@@ -67,10 +100,9 @@ fn check_driver_blob_freshness(kernel_dir: &str) {
     let Ok(want) = std::env::var("WARI_BUILD") else {
         return;
     };
-    let blob = if std::env::var("CARGO_FEATURE_VF2").is_ok() {
-        format!("{}/../build/drivers/net-vf2.signed.wasm", kernel_dir)
-    } else {
-        format!("{}/../build/drivers/net-qemu.signed.wasm", kernel_dir)
+    let blob = match platform() {
+        Platform::Vf2 => format!("{}/../build/drivers/net-vf2.signed.wasm", kernel_dir),
+        Platform::Qemu => format!("{}/../build/drivers/net-qemu.signed.wasm", kernel_dir),
     };
     let bytes = match std::fs::read(&blob) {
         Ok(b) => b,

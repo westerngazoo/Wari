@@ -40,8 +40,13 @@ const UART_BASE: usize = 0x1000_0000;
 /// Register stride (byte distance between consecutive logical registers).
 /// QEMU's NS16550A uses 1-byte stride; the JH7110 DW8250 uses 4-byte
 /// stride. Picked at compile time by the kernel's platform feature.
-#[cfg(not(feature = "vf2"))]
+/// A wrong stride is the worst possible bring-up bug: the console dies
+/// before it can report anything. Both arms are positive so a third
+/// platform fails to compile here rather than silently inheriting
+/// QEMU's 1-byte stride.
+#[cfg(feature = "qemu")]
 const UART_REG_STRIDE: usize = 1;
+/// See [`UART_REG_STRIDE`] — JH7110 DW8250 uses a 4-byte stride.
 #[cfg(feature = "vf2")]
 const UART_REG_STRIDE: usize = 4;
 
@@ -168,7 +173,7 @@ pub fn debug_lsr_snapshot() -> (u8, u32) {
     // 4-byte aligned — a u32 volatile read is a legal single APB
     // access (the width U-Boot/Linux use on this SoC).
     let l32 = unsafe { VolatilePtr::<u32>::new(reg_addr(LSR_REG) as *mut u32).read() };
-    #[cfg(not(feature = "vf2"))]
+    #[cfg(feature = "qemu")]
     let l32 = l8 as u32;
     (l8, l32)
 }
