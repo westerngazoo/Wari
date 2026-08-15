@@ -485,45 +485,81 @@ pub static mut VF2_RX_BUFS: VF2RxBuffers = VF2RxBuffers {
     bufs: [[0u8; 1536]; 16],
 };
 
+/// Deployment configuration — the **only** place these values appear.
+///
+/// Everything the driver needs to know about *this* interface's
+/// identity lives here, so a platform or network change is a one-line
+/// edit in one file rather than an archaeology exercise. Previously the
+/// MAC existed in three places and the IP in two; they drifted, and the
+/// bring-up frame spent months announcing a MAC the driver had stopped
+/// using on a subnet that no longer existed. See INV-24.
+///
+/// TODO(port): these are still compile-time constants. Bringing up a
+/// third board wants them supplied by the platform (device tree, EEPROM
+/// read, or a build-time config) rather than a `cfg` ladder — tracked
+/// separately so this change stays reviewable.
+pub mod netcfg {
+    /// Interface MAC, as programmed into `MAC_ADDR0` during bring-up.
+    /// `eth0` (GMAC0) is `…:84`; `eth1` (GMAC1) is `…:85`. Builds
+    /// 125-128 fed `:84` to the kernel while the rest of the driver
+    /// targeted GMAC1, which made the boot trace lie about which
+    /// interface was live — hence one constant, cfg-gated once.
+    /// On `qemu` there is no constant at all: VirtIO supplies the MAC
+    /// in config space, which is what every platform *should* do. See
+    /// the TODO above.
+    #[cfg(all(feature = "vf2", not(feature = "gmac1")))]
+    pub const MAC: [u8; 6] = [0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84];
+    /// See [`MAC`].
+    #[cfg(all(feature = "vf2", feature = "gmac1"))]
+    pub const MAC: [u8; 6] = [0x6C, 0xCF, 0x39, 0x00, 0x40, 0x85];
+
+    /// Static IPv4 address of this interface.
+    ///
+    /// History, because it explains why this is a constant and not a
+    /// literal at the use site: it has moved four times (a QEMU-era
+    /// subnet, the operator's home Wi-Fi, a direct-cable attempt, and
+    /// finally an isolated test router) and each move previously
+    /// required finding every transcribed copy.
+    pub const IP: [u8; 4] = [192, 168, 50, 10];
+
+    /// CIDR prefix length for [`IP`].
+    pub const IP_PREFIX_LEN: u8 = 24;
+}
+
 /// PR Phase-1c-6f — first-packet TX buffer.
 ///
-/// Holds a 64-byte broadcast ARP request so the first frame
-/// the GMAC ever transmits is meaningful traffic (a switch
-/// will respond, a Wireshark on a mirror port will recognise
-/// the protocol). Pre-filled at module scope so the descriptor
-/// just points at it.
+/// The first frame the GMAC ever transmits, sent before smoltcp is up.
+/// It exists so bring-up produces *meaningful* traffic: a protocol
+/// analyzer on a mirror port decodes it as ARP rather than as an
+/// unclassified runt, and a switch learns our MAC immediately.
 ///
-/// Wire format (broadcast ARP "who-has 192.168.122.1?"):
-///   00..05  dst MAC = ff:ff:ff:ff:ff:ff (broadcast)
-///   06..0B  src MAC = 6c:cf:39:00:40:84 (VF2 MAC0 from EEPROM)
-///   0C..0D  ethertype = 0x0806 (ARP)
-///   0E..0F  HTYPE = 0x0001 (Ethernet)
-///   10..11  PTYPE = 0x0800 (IPv4)
-///   12      HLEN  = 6
-///   13      PLEN  = 4
-///   14..15  OPER  = 0x0001 (request)
-///   16..1B  SHA = 6c:cf:39:00:40:84
-///   1C..1F  SPA = 192.168.122.10
-///   20..25  THA = 00 00 00 00 00 00
-///   26..29  TPA = 192.168.122.1
-///   2A..3F  zero pad to 64 bytes
+/// Filled at runtime by [`fill_first_pkt`] from [`netcfg`] — never by
+/// hand. The bytes are a gratuitous ARP announcement, which needs no
+/// knowledge of any peer address and is therefore correct on any
+/// network. The layout and its contract live in `wari-net-wire`, which
+/// is host-tested; this is only storage the DMA engine can point at.
 #[cfg(feature = "vf2")]
 #[no_mangle]
-pub static VF2_FIRST_PKT: [u8; 64] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // dst broadcast
-    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84, // src VF2 MAC0
-    0x08, 0x06, // ethertype ARP
-    0x00, 0x01, // HTYPE Ethernet
-    0x08, 0x00, // PTYPE IPv4
-    0x06, 0x04, // HLEN/PLEN
-    0x00, 0x01, // OPER request
-    0x6C, 0xCF, 0x39, 0x00, 0x40, 0x84, // SHA
-    0xC0, 0xA8, 0x7A, 0x0A, // SPA 192.168.122.10
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // THA
-    0xC0, 0xA8, 0x7A, 0x01, // TPA 192.168.122.1
-    // pad to 64
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-];
+pub static mut VF2_FIRST_PKT: [u8; wari_net_wire::ARP_FRAME_LEN] =
+    [0u8; wari_net_wire::ARP_FRAME_LEN];
+
+/// Populate [`VF2_FIRST_PKT`] from [`netcfg`].
+///
+/// # Preconditions
+///
+/// Called exactly once during bring-up, before the TX descriptor that
+/// points at the buffer is handed to the DMA engine.
+#[cfg(feature = "vf2")]
+fn fill_first_pkt() {
+    let frame = wari_net_wire::arp_announce(netcfg::MAC, netcfg::IP);
+    // SAFETY: INV-14 (Tier-2 driver instance is a boot-initialized
+    // singleton) — bring-up is single-threaded and runs once, and this
+    // executes before the descriptor publishing the buffer to DMA, so
+    // there is no concurrent reader, hardware or software.
+    unsafe {
+        VF2_FIRST_PKT = frame;
+    }
+}
 
 /// Driver-side ring index tracking. Phase-1b keeps it simple — no
 /// wraparound logic beyond the `% QUEUE_SIZE` masking; rx_used_seen
@@ -849,8 +885,10 @@ mod nic_iface {
     // Avoids collision with the operator's home Wi-Fi (192.168.100/24)
     // so Wi-Fi can stay up for client work while the USB-Ethernet
     // adapter handles the test subnet.
-    const IP_OCTETS: [u8; 4] = [192, 168, 50, 10];
-    const IP_PREFIX_LEN: u8 = 24;
+    // Single source for every platform: see `super::netcfg`. Aliased
+    // rather than re-declared, so there is no `cfg(not(...))` arm here
+    // to forget when a third board lands.
+    use super::netcfg::{IP as IP_OCTETS, IP_PREFIX_LEN};
 
     /// SocketSet backing storage. Phase-1b reserves 4 socket slots
     /// (none populated until PR Net-6 wires the Tier-1 socket host
@@ -2779,6 +2817,7 @@ pub fn driver_start() {
         //          bit  31    = OWN (1 = DMA owns; 0 = SW)
         //
         // Pkt PA = lin_mem_base + linmem-offset of VF2_FIRST_PKT.
+        fill_first_pkt();
         let pkt_off = core::ptr::addr_of!(VF2_FIRST_PKT) as u32;
         let pkt_pa: u64 = lin_base + pkt_off as u64;
         let _ = unsafe { wari_drv_log_u32(0x504B_5448, (pkt_pa >> 32) as u32) }; // 'PKTH'
@@ -3197,10 +3236,7 @@ pub fn driver_start() {
         // :84 to wari_nic_set_mac even when the rest of the driver
         // was correctly targeting GMAC1 — making the kernel's
         // boot trace lie about which MAC was running.
-        #[cfg(not(feature = "gmac1"))]
-        let mac: [u8; 6] = [0x6c, 0xCF, 0x39, 0x00, 0x40, 0x84];
-        #[cfg(feature = "gmac1")]
-        let mac: [u8; 6] = [0x6c, 0xCF, 0x39, 0x00, 0x40, 0x85];
+        let mac: [u8; 6] = netcfg::MAC;
 
         // Kick smoltcp Interface up. nic_iface owns the static
         // INTERFACE / SOCKETS slots; init populates them.

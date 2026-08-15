@@ -1,0 +1,15 @@
+[package]
+name = "wari-net-wire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pure wire-format builders for frames Wari puts on the network."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Intentionally none. This crate is pure layout arithmetic so it
+# compiles for wasm32 (the driver) and for the host (the tests).
