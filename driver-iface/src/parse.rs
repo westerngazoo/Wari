@@ -302,8 +302,8 @@ mod tests {
         wasm
     }
 
-    fn uart_manifest_bytes() -> [u8; 192] {
-        build_manifest::<192>(
+    fn uart_manifest_bytes() -> [u8; crate::manifest_size(2, 2)] {
+        build_manifest::<{ crate::manifest_size(2, 2) }>(
             DriverKind::Uart,
             &[
                 (b"write", FuncSig::U32xU32I32),

@@ -55,6 +55,11 @@ where
         FuncSig::U32U32 => instance.get_typed_func::<u32, u32>(store, name_str).is_ok(),
         FuncSig::U64I32 => instance.get_typed_func::<u64, i32>(store, name_str).is_ok(),
         FuncSig::UnitU64 => instance.get_typed_func::<(), u64>(store, name_str).is_ok(),
+        FuncSig::U32x4I32 => instance
+            .get_typed_func::<(u32, u32, u32, u32), i32>(store, name_str)
+            .is_ok(),
+        FuncSig::U32Unit => instance.get_typed_func::<u32, ()>(store, name_str).is_ok(),
+        FuncSig::UnitI32 => instance.get_typed_func::<(), i32>(store, name_str).is_ok(),
         FuncSig::U32x5I32 => instance
             .get_typed_func::<(u32, u32, u32, u32, u32), i32>(store, name_str)
             .is_ok(),

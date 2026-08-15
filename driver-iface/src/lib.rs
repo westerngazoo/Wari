@@ -69,7 +69,12 @@ pub const MAGIC: [u8; 4] = *b"WDM\0";
 /// to the layout, the [`FuncSig`] discriminants, or the trait
 /// method shapes. Kernel rejects manifests with an unsupported
 /// version.
-pub const MANIFEST_ABI_VERSION: u16 = 1;
+// v2 (Phase 2): FuncSig gained U32x4I32/U32Unit/UnitI32 and
+// DriverKind gained Tier1App for runtime-loaded Tier-1 modules. Per
+// the contract above, extending the signature table bumps this;
+// kernel + tools + every signed blob rebuild together in one
+// build.sh run, so no mixed-version artifact can ship in an image.
+pub const MANIFEST_ABI_VERSION: u16 = 2;
 
 /// Custom-section name (UTF-8) the kernel scans WASM binaries for.
 /// Must match the `#[link_section = ...]` the macro emits. Stored
@@ -85,7 +90,13 @@ pub const NAME_MAX: usize = 32;
 /// Maximum host-fn module name length (the `wari` in
 /// `linker.func_wrap("wari", "cap_mint", ...)`). 16 bytes is more
 /// than enough for the single namespace Phase 2 uses.
-pub const MODULE_MAX: usize = 16;
+// Was 16 through manifest ABI v1 — every import then came from the
+// 4-byte module "wari". ABI v2 admits Tier-1 manifests, whose WASI
+// imports live in "wasi_snapshot_preview1" (22 bytes + NUL). Widened
+// with the v2 bump; on-wire ImportDecl grows accordingly and every
+// signed artifact rebuilds together, so no v1 blob can meet a v2
+// parser.
+pub const MODULE_MAX: usize = 24;
 
 // ── Discriminants ────────────────────────────────────────────────
 
@@ -103,6 +114,13 @@ pub enum DriverKind {
     Net = 2,
     /// Tier-2 block-device driver. Reserved for Phase 3.
     Block = 3,
+    /// A Tier-1 application manifest (Phase 2 cloud-OS). Not a
+    /// driver at all — the name of the section and crate predate
+    /// Tier-1 adoption — but runtime-loaded Tier-1 modules pass the
+    /// same sign-time manifest cross-check the drivers do (INV-11:
+    /// "Phase 2+ moves Tier-1 manifests to signed distribution" —
+    /// this is that step). Exports `_start` only.
+    Tier1App = 4,
     // Append-only. New kinds get the next id.
 }
 
@@ -115,6 +133,7 @@ impl DriverKind {
             1 => Some(DriverKind::Uart),
             2 => Some(DriverKind::Net),
             3 => Some(DriverKind::Block),
+            4 => Some(DriverKind::Tier1App),
             _ => None,
         }
     }
@@ -164,6 +183,12 @@ pub enum FuncSig {
     /// port), `socket_send` / `socket_recv` (handle, buf_off, len).
     /// Added in PR Net-6c.
     U32x3I32 = 8,
+    /// `(u32, u32, u32, u32) -> i32` — WASI `fd_write`.
+    U32x4I32 = 9,
+    /// `(u32) -> ()` — WASI `proc_exit` (wasm-level; `-> !` in Rust).
+    U32Unit = 10,
+    /// `() -> i32` — `wari::proc_self`.
+    UnitI32 = 11,
     // Append-only. Renumbering breaks every signed driver.
 }
 
@@ -211,6 +236,9 @@ impl FuncSig {
             6 => Some(FuncSig::UnitU64),
             7 => Some(FuncSig::U32x5I32),
             8 => Some(FuncSig::U32x3I32),
+            9 => Some(FuncSig::U32x4I32),
+            10 => Some(FuncSig::U32Unit),
+            11 => Some(FuncSig::UnitI32),
             _ => None,
         }
     }
@@ -226,6 +254,7 @@ impl FuncSig {
         const I32_1: &[WasmValType] = &[I32];
         const I32_2: &[WasmValType] = &[I32, I32];
         const I32_3: &[WasmValType] = &[I32, I32, I32];
+        const I32_4: &[WasmValType] = &[I32, I32, I32, I32];
         const I32_5: &[WasmValType] = &[I32, I32, I32, I32, I32];
         const I64_1: &[WasmValType] = &[I64];
         match self {
@@ -259,6 +288,18 @@ impl FuncSig {
             },
             FuncSig::U32x3I32 => WasmSigShape {
                 params: I32_3,
+                results: I32_1,
+            },
+            FuncSig::U32x4I32 => WasmSigShape {
+                params: I32_4,
+                results: I32_1,
+            },
+            FuncSig::U32Unit => WasmSigShape {
+                params: I32_1,
+                results: E,
+            },
+            FuncSig::UnitI32 => WasmSigShape {
+                params: E,
                 results: I32_1,
             },
         }
@@ -529,7 +570,14 @@ impl SocketProto {
 /// (export count, import count). Computed at compile time so the
 /// `[u8; N]` static the macro emits has a known length.
 pub const fn manifest_size(export_count: usize, import_count: usize) -> usize {
-    16 + export_count * 36 + import_count * 52
+    // Derived from the wire types, never hand-summed: the previous
+    // literal form (16 + e*36 + i*52) silently baked in MODULE_MAX=16
+    // and went stale the day the field widened — caught only because
+    // const-eval bounds-checked the writes. INV-24: one source of
+    // truth, and the struct definitions are it.
+    core::mem::size_of::<ManifestHeader>()
+        + export_count * core::mem::size_of::<ExportDecl>()
+        + import_count * core::mem::size_of::<ImportDecl>()
 }
 
 /// Build the byte image of a manifest at compile time. Driver
@@ -695,7 +743,7 @@ pub const fn pad_name<const N: usize>(name: &[u8]) -> [u8; N] {
 ///   dispatches into `<$t as UartDriver>::write(slice)`.
 /// - `extern "C" fn _start()` — empty WASI command entrypoint, so
 ///   the kernel's explicit `_start.call()` succeeds.
-/// - A 192-byte `WARI_DRIVER_MANIFEST` static in section
+/// - A `manifest_size(2, 2)`-byte `WARI_DRIVER_MANIFEST` static in section
 ///   `wari_driver_manifest`, declaring kind = Uart and the two
 ///   exports (`write`, `_start`) and two imports
 ///   (`wari_mmio_write8`, `wari_mmio_read8`).
@@ -725,14 +773,15 @@ macro_rules! wari_uart_driver {
 
         // ─── manifest ──────────────────────────────────────────
         //
-        // 192-byte image, computed at compile time from the
+        // manifest image, computed at compile time from the
         // descriptors below. `#[link_section]` places it in a WASM
         // custom section named `wari_driver_manifest`. `#[used]`
         // keeps the linker from stripping it under LTO.
         #[link_section = "wari_driver_manifest"]
         #[used]
         #[no_mangle]
-        pub static WARI_DRIVER_MANIFEST: [u8; 192] = $crate::build_manifest::<192>(
+        pub static WARI_DRIVER_MANIFEST: [u8; { $crate::manifest_size(2, 2) }] =
+            $crate::build_manifest::<{ $crate::manifest_size(2, 2) }>(
             $crate::DriverKind::Uart,
             &[
                 (b"write", $crate::FuncSig::U32xU32I32),
@@ -751,7 +800,7 @@ macro_rules! wari_uart_driver {
 }
 
 /// Total manifest size for the Tier-2 net driver. Computed from
-/// `manifest_size(9, 6)` = 16 + 9*36 + 6*52 = 652 bytes. Exported
+/// ABI v2: `manifest_size(11, 8)` = 16 + 11*36 + 8*60 = 892 bytes. Exported
 /// so the macro and external tooling agree on the byte length.
 ///
 /// 9 exports: `_start`, `poll`, `tx_send`, `rx_pop`, `rx_recycle`
@@ -934,8 +983,8 @@ mod tests {
     }
 
     #[test]
-    fn import_decl_is_52_bytes_packed() {
-        assert_eq!(core::mem::size_of::<ImportDecl>(), 52);
+    fn import_decl_is_60_bytes_packed() {
+        assert_eq!(core::mem::size_of::<ImportDecl>(), 60);
         assert_eq!(core::mem::align_of::<ImportDecl>(), 1);
     }
 
@@ -980,7 +1029,7 @@ mod tests {
         // Reproduce what the wari_uart_driver! macro emits and
         // verify byte-by-byte that the header is correct + the
         // export/import names land at the right offsets.
-        const M: [u8; 192] = build_manifest::<192>(
+        const M: [u8; manifest_size(2, 2)] = build_manifest::<{ manifest_size(2, 2) }>(
             DriverKind::Uart,
             &[
                 (b"write", FuncSig::U32xU32I32),
@@ -1023,7 +1072,7 @@ mod tests {
         let h = core::mem::size_of::<ManifestHeader>();
         let e = core::mem::size_of::<ExportDecl>();
         let i = core::mem::size_of::<ImportDecl>();
-        assert_eq!(h + 2 * e + 2 * i, 192);
+        assert_eq!(h + 2 * e + 2 * i, 208);
     }
 
     #[test]
@@ -1031,10 +1080,11 @@ mod tests {
         // Net = 11 exports + 8 imports (7 original + drv_trace_u32,
         // the debug-gated hot-path trace added when the per-frame
         // RX/TX tags were demoted off the always-on drv_log_u32):
-        // 16 + 11*36 + 8*52 = 828. Locks NET_MANIFEST_SIZE to the
-        // declared counts so an import-table edit that forgets the
-        // constant (or vice versa) fails here before the sign-tool.
-        assert_eq!(NET_MANIFEST_SIZE, 828);
+        // ABI v2 (MODULE_MAX 24): 16 + 11*36 + 8*60 = 892. Locks
+        // NET_MANIFEST_SIZE to the declared counts so an import-table
+        // edit that forgets the constant (or vice versa) fails here
+        // before the sign-tool.
+        assert_eq!(NET_MANIFEST_SIZE, 892);
         assert_eq!(manifest_size(11, 8), NET_MANIFEST_SIZE);
     }
 }

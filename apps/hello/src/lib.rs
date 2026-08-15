@@ -355,3 +355,37 @@ pub extern "C" fn _start() -> ! {
     // and never returns to this frame.
     unsafe { wasi::proc_exit(0) }
 }
+
+// ── Module manifest (Phase 2 dynamic loading) ────────────────────
+//
+// Declares this binary's complete import/export surface so
+// `scripts/sign-module` can cross-check it before signing, and the
+// signed envelope can be loaded AT RUNTIME by the kernel's module
+// registry (`kernel/src/runtime/modreg.rs`). The check is symmetric:
+// an import used here but missing below fails the sign step, and a
+// declaration below with no matching import fails it too — so this
+// table cannot silently drift from the `extern` blocks above
+// (INV-24 spirit; INV-11 is the gate it feeds).
+#[link_section = "wari_driver_manifest"]
+#[used]
+static WARI_MANIFEST: [u8; wari_driver_iface::manifest_size(1, 12)] = {
+    use wari_driver_iface::FuncSig::{U32xU32I32, U32x3I32, U32x4I32, U32Unit, U32I32, UnitI32, UnitUnit};
+    wari_driver_iface::build_manifest::<{ wari_driver_iface::manifest_size(1, 12) }>(
+        wari_driver_iface::DriverKind::Tier1App,
+        &[(b"_start", UnitUnit)],
+        &[
+            (b"wasi_snapshot_preview1", b"fd_write", U32x4I32),
+            (b"wasi_snapshot_preview1", b"proc_exit", U32Unit),
+            (b"wari", b"net_socket_create", U32xU32I32),
+            (b"wari", b"net_socket_close", U32I32),
+            (b"wari", b"net_socket_bind", U32x3I32),
+            (b"wari", b"net_socket_listen", U32xU32I32),
+            (b"wari", b"net_socket_accept", U32I32),
+            (b"wari", b"net_socket_send_canned", U32I32),
+            (b"wari", b"ipc_call", U32xU32I32),
+            (b"wari", b"ipc_recv", U32xU32I32),
+            (b"wari", b"ipc_reply", U32xU32I32),
+            (b"wari", b"proc_self", UnitI32),
+        ],
+    )
+};

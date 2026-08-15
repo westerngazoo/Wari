@@ -405,8 +405,8 @@ fn wasm_sig_shape(
     // results match. There are 7 variants today; bounded.
     use FuncSig::*;
     for s in [
-        UnitUnit, U32xU32I32, U32I32, U32U32, U64I32, UnitU64, U32x5I32,
-        U32x3I32,
+        U32Unit, U32I32, U32U32, U32x3I32, U32x4I32, U32x5I32, U32xU32I32, U64I32, UnitI32,
+        UnitU64, UnitUnit,
     ] {
         let shape = s.wasm_shape();
         if shape.params == p.as_slice() && shape.results == r.as_slice() {

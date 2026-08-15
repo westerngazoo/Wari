@@ -314,6 +314,10 @@ fn pick_next_tenant() -> Option<u8> {
 fn blob_for(module_id: ModuleId) -> &'static [u8] {
     match module_id {
         ModuleId::Tier1Hello => runtime::hello_blob::HELLO_WASM,
+        // Runtime-loaded module: verified payload held by the
+        // registry. Returns the empty slice for a slot that is not
+        // Live — same refuse-by-default as the arms below.
+        ModuleId::Dynamic(slot) => runtime::modreg::payload(slot),
         // Tier2 drivers are libraries, not run via run_tier1; the
         // match arms should never fire from the scheduler. Returning
         // an empty slice is the safest fallback for unreachable

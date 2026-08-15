@@ -137,6 +137,13 @@ for p in "${PROG_ARR[@]}"; do
     [ -d "apps/$p" ] || { echo "apps/$p does not exist"; exit 1; }
     ( cd "apps/$p" && cargo build --release )
     cp "target/wasm32-unknown-unknown/release/wari_${p}.wasm" "build/apps/${p}.wasm"
+    # Signed envelope for the dynamic-load path. Baked Tier-1 blobs
+    # ride the kernel image and inherit its attestation; a module
+    # arriving at RUNTIME has no such cover, so the module registry
+    # (kernel/src/runtime/modreg.rs) accepts only signed envelopes —
+    # same INV-11/INV-13 gate the Tier-2 drivers already pass.
+    cargo run --quiet --manifest-path scripts/Cargo.toml --bin sign-module -- \
+        "build/apps/${p}.wasm" "build/apps/${p}.signed.wasm"
 done
 
 # ── 3. UART driver, both platforms + sign ───────────────────────
