@@ -21,6 +21,36 @@ Format inherited from `../goose-os/docs/unsafe-audit.md`.
 **Consequence**: `static mut` access without synchronization is sound
 for scheduler-owned state (`PROCS`, `CURRENT_PID`, `TICKS`, etc.).
 
+**Amendment (build 155) — this invariant now does real work.** From
+Phase 0 through build 154, `sstatus.SIE` was never set anywhere in the
+kernel. `sie.SEIE` was set in `plic::init`, so the *cause* was enabled,
+but *delivery* was globally masked: no asynchronous S-mode interrupt
+was ever taken. Every `static mut` above was protected not by INV-1 but
+by something far stronger and entirely accidental — the total
+impossibility of preemption. `trap.rs`'s `SCAUSE_S_EXT` arm and
+`plic::dispatch` had never once executed.
+
+Build 155 sets `sstatus.SIE` as the last boot step so the console UART
+IRQ can reach the kernel. From that instruction onward the kernel is
+genuinely preemptible and INV-1 is load-bearing. Two rules follow, and
+a new handler that breaks either is a soundness bug, not a style
+issue:
+
+1. Per **R2**, an interrupt handler allocates nothing. The bump
+   allocator's `HEAP_CURSOR` is a `static mut` with no reentrancy
+   guard; an allocating handler that preempts `alloc()` corrupts it.
+2. A handler must not touch capability or scheduler state.
+   `cap::object_pools()` is a *safe* function returning
+   `&'static mut`; a handler calling it while ordinary kernel code
+   holds the same reference creates two live `&mut` — aliasing UB
+   independent of hart count. The UART path in `plic::dispatch`
+   therefore reads the UART and nothing else.
+
+**Known exposure**: the IRQ→Notification path in `plic::dispatch` *does*
+call `object_pools()`. It is unreachable on `vf2` (no IRQ is bound
+there) and reachable on `qemu` only via the VirtIO-net IRQ. Making that
+path re-entrancy-safe is required before any second bound IRQ.
+
 **When this breaks**: SMP. Every INV-1 citation needs per-hart or
 locked access.
 

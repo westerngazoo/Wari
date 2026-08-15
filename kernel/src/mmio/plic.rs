@@ -73,14 +73,66 @@ pub const MAX_BOUND_IRQS: usize = 64;
 /// Each hart has two PLIC contexts: M-mode (even index) and S-mode
 /// (odd index). Wari runs in S-mode after OpenSBI hands off.
 ///
-/// - **QEMU virt** boots on hart 0 → S-mode context = 1
-/// - **JH7110 (VF2)** boots on hart 1 → S-mode context = 3
-///   (per the JH7110 TRM; verify on first VF2 net bring-up in
-///   Phase 1c)
+/// Contexts are numbered in the order the PLIC's `interrupts-extended`
+/// device-tree property lists them — NOT by a `2 * hart + 1` formula.
+/// That formula only holds when every hart contributes both an M-mode
+/// and an S-mode entry.
+///
+/// - **QEMU virt**: hart 0 has both, so S-mode context = 1.
+/// - **JH7110 (VF2)**: hart 0 is the S7 monitor core, which has **no
+///   S-mode at all** and therefore contributes a single M-mode entry.
+///   The list is `cpu0(M), cpu1(M), cpu1(S), cpu2(M), cpu2(S), …`, so
+///   the U74 we boot on (hart 1) has S-mode context **2**.
+///
+/// This was `3` from Phase 1b through build 155 — hart 2's *M-mode*
+/// context: wrong hart and wrong privilege, so every threshold,
+/// enable, and claim/complete went to a context we do not run in. It
+/// was invisible because `sstatus.SIE` was never set, so no interrupt
+/// was ever delivered to notice, and the only IRQ ever bound
+/// (VirtIO-net) is QEMU-only. Build 155 enabled delivery and the
+/// latent bug surfaced immediately: Ctrl-R via the PLIC worked in
+/// QEMU and did nothing on the VF2. The original comment said
+/// "verify on first VF2 net bring-up" — this is that verification.
 #[cfg(feature = "qemu")]
 const HART_CONTEXT: usize = 1;
+/// See [`HART_CONTEXT`] on QEMU — VF2 boots on hart 1 (U74 #0).
 #[cfg(feature = "vf2")]
-const HART_CONTEXT: usize = 3;
+const HART_CONTEXT: usize = 2;
+
+/// PLIC source number for UART0 — the console the operator types into.
+///
+/// - **QEMU virt**: UART0 is IRQ 10 (`qemu/hw/riscv/virt.c`).
+/// - **JH7110 (VF2)**: UART0 is IRQ 32 (JH7110 TRM interrupt map, and
+///   the `interrupts = <32>` property on `uart0` in the vendor DT).
+///
+/// Both are below [`MAX_BOUND_IRQS`], so `enable_irq` accepts them.
+#[cfg(feature = "qemu")]
+const UART_IRQ: u32 = 10;
+/// See [`UART_IRQ`].
+#[cfg(feature = "vf2")]
+const UART_IRQ: u32 = 32;
+
+/// ASCII DC2 — the Ctrl-R the operator presses to reboot.
+const CTRL_R: u8 = 0x12;
+
+/// Consecutive external traps whose claim returned 0. Reset on any
+/// real claim; at [`SPURIOUS_LIMIT`] the dispatcher masks `sie.SEIE`
+/// so an unclaimable source degrades the kernel instead of wedging it.
+static mut SPURIOUS_RUN: u32 = 0;
+/// Generous enough that a genuine race loses, small enough that a
+/// storm is caught long before it looks like a hang.
+const SPURIOUS_LIMIT: u32 = 1000;
+
+/// Last IRQ claimed, and how many times in a row. A source we claim
+/// and complete but cannot actually silence re-asserts immediately and
+/// storms just as hard as an unclaimable one — and the SPURIOUS_RUN
+/// guard above never sees it, because those claims are non-zero.
+static mut LAST_IRQ: u32 = 0;
+static mut LAST_IRQ_RUN: u32 = 0;
+/// Repeats of one IRQ before we conclude the source is stuck asserted
+/// and disable it. Real traffic never repeats this many times without
+/// the handler making the source go quiet at least once.
+const SAME_IRQ_LIMIT: u32 = 10_000;
 
 // Address helpers — `const fn` so callers see a constant at compile
 // time when irq/context are constant.
@@ -145,6 +197,46 @@ pub fn init() {
     // SAFETY: INV-7. `csrs sie` is an S-mode privileged CSR write.
     unsafe {
         asm!("csrs sie, {0}", in(reg) 1usize << 9);
+    }
+
+    // Route the console UART to this hart. The UART has asserted its
+    // RX-available line since `uart_ns16550::init` set IER.ERBFI, but
+    // with no PLIC enable the request never reached us — which is why
+    // Ctrl-R only ever worked from the idle loop's polling read.
+    let _ = enable_irq(UART_IRQ, 1);
+}
+
+/// Unmask interrupts globally for S-mode by setting `sstatus.SIE`.
+///
+/// `sie.SEIE` (set in [`init`]) enables the *cause*; `sstatus.SIE`
+/// enables *delivery*. Without both, an interrupt stays pending
+/// forever and no handler ever runs — which was the state of this
+/// kernel from Phase 0 through build 154: the PLIC was configured,
+/// `trap.rs` had a `SCAUSE_S_EXT` arm, `dispatch` was written and
+/// tested by inspection, and none of it had ever executed.
+///
+/// # Contract
+///
+/// - Precondition: [`init`] has run, the trap vector is installed, and
+///   every `static mut` an interrupt handler may touch is initialized.
+///   Call this LAST in boot for that reason.
+/// - Postcondition: the kernel is preemptible by S-mode interrupts.
+///
+/// # Consequences (read before calling)
+///
+/// This is the moment the kernel stops being cooperative. Every
+/// `static mut` that was safe purely because nothing could interrupt
+/// its update is now only as safe as INV-1 and the handler's
+/// discipline make it. Per R2, handlers must not allocate; per INV-2,
+/// they own the trap frame. Keep handlers short and keep them away
+/// from scheduler and capability state.
+pub fn enable_supervisor_interrupts() {
+    // SAFETY: INV-7. `csrs sstatus` is an S-mode privileged CSR write;
+    // bit 1 is SIE. Boot has completed every static initialization the
+    // UART handler below reads, so a trap taken immediately after this
+    // instruction finds consistent state.
+    unsafe {
+        asm!("csrs sstatus, {0}", in(reg) 1usize << 1);
     }
 }
 
@@ -261,7 +353,98 @@ pub fn dispatch() {
     let claim_reg = unsafe { VolatilePtr::<u32>::new(claim_addr(HART_CONTEXT) as *mut u32) };
     let irq = claim_reg.read();
     if irq == 0 {
-        // Spurious interrupt; nothing to do.
+        // A claim of 0 means the hart has an external interrupt pending
+        // that this context cannot claim — a source enabled in another
+        // context, or a device asserting a line we do not service.
+        // Returning leaves it pending, so we re-trap immediately and
+        // spin forever with no output: a hard wedge, which is exactly
+        // how build 157 froze right after enabling delivery.
+        //
+        // We cannot clear a source we cannot claim, so the only way to
+        // stay alive is to stop listening. Mask external interrupts at
+        // the hart after a run of unclaimable traps. Ctrl-R then falls
+        // back to the idle loop's polling read — degraded, but booted
+        // and diagnosable instead of dead.
+        //
+        // SAFETY: INV-1. Single-hart, and the trap handler is the only
+        // writer of this counter.
+        unsafe {
+            SPURIOUS_RUN = SPURIOUS_RUN.saturating_add(1);
+            if SPURIOUS_RUN >= SPURIOUS_LIMIT {
+                asm!("csrc sie, {0}", in(reg) 1usize << 9);
+                crate::kprintln!(
+                    "[plic] {} unclaimable external interrupts — masking SEIE. \
+                     Check HART_CONTEXT ({}) and the enabled sources.",
+                    SPURIOUS_RUN,
+                    HART_CONTEXT,
+                );
+            }
+        }
+        return;
+    }
+    // A real claim means we are making progress; reset the run.
+    // SAFETY: INV-1, as above.
+    unsafe {
+        SPURIOUS_RUN = 0;
+    }
+
+    // Stuck-source guard. Claiming and completing an IRQ does not
+    // silence a device that keeps asserting — the PLIC re-presents it
+    // and we re-trap forever, with claims that are non-zero so the
+    // guard above stays quiet. Build 157 hung on the VF2 exactly here,
+    // 4 boots out of 4, right after delivery was enabled.
+    //
+    // If one source repeats without pause, take it out of the enable
+    // set and carry on. Losing one IRQ is recoverable; an unbootable
+    // board with no console output is not.
+    // SAFETY: INV-1. Single-hart; the trap handler is the only writer.
+    unsafe {
+        if irq == LAST_IRQ {
+            LAST_IRQ_RUN = LAST_IRQ_RUN.saturating_add(1);
+        } else {
+            LAST_IRQ = irq;
+            LAST_IRQ_RUN = 1;
+        }
+        if LAST_IRQ_RUN == SAME_IRQ_LIMIT {
+            // Priority 0 disables the source for every context.
+            let prio = VolatilePtr::<u32>::new(priority_addr(irq) as *mut u32);
+            prio.write(0);
+            claim_reg.write(irq);
+            crate::kprintln!(
+                "[plic] irq {} asserted {} times without clearing — disabling it. \
+                 Console reboot falls back to idle polling.",
+                irq,
+                LAST_IRQ_RUN,
+            );
+            return;
+        }
+    }
+
+    // Console UART first, and handled entirely here.
+    //
+    // This path deliberately touches no capability, scheduler, or
+    // allocator state — it reads the RX register and, for Ctrl-R,
+    // never returns. That keeps it sound under INV-1 without relying
+    // on the notification machinery below, and it is what makes the
+    // reboot key work while a tenant is running. Reading RBR also
+    // clears the UART's interrupt condition, so the claim/complete
+    // cycle below does not re-fire immediately.
+    if irq == UART_IRQ {
+        // A DesignWare busy-detect latch is cleared ONLY by reading
+        // USR — draining RBR will not silence it, and the line would
+        // stay asserted for good.
+        let _ = crate::mmio::uart_ns16550::clear_busy_detect();
+        while let Some(b) = crate::mmio::uart_ns16550::try_read_byte() {
+            if b == CTRL_R {
+                // Complete the PLIC cycle first: system_reset() does
+                // not return, and leaving an unclaimed IRQ would have
+                // the source still asserted across the reset.
+                claim_reg.write(irq);
+                crate::kprintln!("\r\n[reboot] Ctrl-R received, restarting via SBI...");
+                crate::sbi::system_reset();
+            }
+        }
+        claim_reg.write(irq);
         return;
     }
 
