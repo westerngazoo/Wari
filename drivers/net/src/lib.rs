@@ -400,6 +400,37 @@ pub static mut VF2_RX_RING: VF2DmaRing = VF2DmaRing {
     descs: [[0u32; 4]; 16],
 };
 
+/// Read one word of a DMA descriptor.
+///
+/// **Must be volatile.** These rings are written by the GMAC's DMA
+/// engine, which the Rust abstract machine knows nothing about: no
+/// Rust code ever stores to the OWN bit the hardware clears, so a
+/// plain load is one LLVM is free to hoist out of the polling loop and
+/// keep in a register indefinitely. `receive()` then spins forever on
+/// a stale OWN bit, reporting "no frame" while the MAC is delivering
+/// packets normally and `DMA_CH0_STATUS` shows a perfectly healthy
+/// channel — the exact stall seen on builds 155-160.
+///
+/// Whether it bites depends on inlining decisions, which is why it
+/// looked like an intermittent hardware fault and moved between
+/// builds. `addr_of!` keeps us off `&`/`&mut` to a `static mut`.
+#[cfg(feature = "vf2")]
+#[inline(always)]
+unsafe fn desc_rd(ring: *const VF2DmaRing, i: usize, w: usize) -> u32 {
+    // SAFETY: caller passes addr_of!(ring static); i < 16, w < 4.
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*ring).descs[i][w])) }
+}
+
+/// Write one word of a DMA descriptor. Volatile for the mirror of the
+/// reason in [`desc_rd`]: the engine reads these, so the store must
+/// not be elided, sunk, or reordered by the compiler.
+#[cfg(feature = "vf2")]
+#[inline(always)]
+unsafe fn desc_wr(ring: *mut VF2DmaRing, i: usize, w: usize, v: u32) {
+    // SAFETY: as above.
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!((*ring).descs[i][w]), v) }
+}
+
 /// PR Phase-1c-7 — TX buffer pool for the vf2 GMAC0 path. Mirrors
 /// the RX pool: 16 × 1536 byte buffers, each bound to one entry
 /// in VF2_TX_RING. The smoltcp Device::transmit token writes into
@@ -1557,7 +1588,7 @@ pub mod vf2_phy {
                 let start = vf2_state::RX_NEXT;
                 for n in 0..16usize {
                     let i = (start + n) % 16;
-                    let rdes3 = VF2_RX_RING.descs[i][3];
+                    let rdes3 = super::desc_rd(core::ptr::addr_of!(VF2_RX_RING), i, 3);
                     if rdes3 & RDES3_OWN == 0 {
                         // Frame received in slot i. Length is in
                         // RDES3 bits 14:0.
@@ -1676,7 +1707,8 @@ pub mod vf2_phy {
                         let _ = super::wari_drv_log_u32(0x4443_7572, cur);
                         let _ = super::wari_drv_log_u32(0x4453_7473, st);
                         // What WE see in the descriptor we are parked on.
-                        let own = VF2_RX_RING.descs[vf2_state::RX_NEXT][3];
+                        let own =
+                            super::desc_rd(core::ptr::addr_of!(VF2_RX_RING), vf2_state::RX_NEXT, 3);
                         let _ = super::wari_drv_log_u32(0x524F_776E, own); // 'ROwn'
                     }
 
@@ -1702,7 +1734,7 @@ pub mod vf2_phy {
             // SAFETY: same as above.
             unsafe {
                 let i = vf2_state::TX_NEXT;
-                let tdes3 = VF2_TX_RING.descs[i][3];
+                let tdes3 = super::desc_rd(core::ptr::addr_of!(VF2_TX_RING), i, 3);
                 if tdes3 & TDES3_OWN != 0 {
                     // DMA hasn't released this slot yet; back-pressure.
                     return None;
@@ -1740,11 +1772,11 @@ pub mod vf2_phy {
             vf2_state::C_REARM_CALLS = vf2_state::C_REARM_CALLS.wrapping_add(1);
             let bp: u64 =
                 vf2_state::LIN_BASE + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
-            let d = &mut VF2_RX_RING.descs[idx];
-            d[0] = bp as u32;
-            d[1] = (bp >> 32) as u32;
-            d[2] = 0;
-            d[3] = 0xC100_0000; // OWN | IOC | BUF1V
+            let r = core::ptr::addr_of_mut!(VF2_RX_RING);
+            super::desc_wr(r, idx, 0, bp as u32);
+            super::desc_wr(r, idx, 1, (bp >> 32) as u32);
+            super::desc_wr(r, idx, 2, 0);
+            super::desc_wr(r, idx, 3, 0xC100_0000); // OWN | IOC | BUF1V
                                 // Re-kick the RX_TAIL doorbell so DWMAC4 walks the
                                 // descriptor we just rearmed.
                                 //
@@ -1854,7 +1886,7 @@ pub mod vf2_phy {
                 let start = vf2_state::TX_NEXT;
                 (0..16usize)
                     .map(|n| (start + n) % 16)
-                    .find(|&c| VF2_TX_RING.descs[c][3] & TDES3_OWN == 0)
+                    .find(|&c| super::desc_rd(core::ptr::addr_of!(VF2_TX_RING), c, 3) & TDES3_OWN == 0)
             };
 
             let i = match free {
@@ -1893,11 +1925,16 @@ pub mod vf2_phy {
             unsafe {
                 let bp: u64 =
                     vf2_state::LIN_BASE + (core::ptr::addr_of!(VF2_TX_BUFS.bufs[i]) as u32) as u64;
-                let d = &mut VF2_TX_RING.descs[i];
-                d[0] = bp as u32;
-                d[1] = (bp >> 32) as u32;
-                d[2] = len as u32; // TDES2 buffer-1 length
-                d[3] = TDES3_OWN | TDES3_LD | TDES3_FD | (len as u32 & 0x7FFF);
+                let t = core::ptr::addr_of_mut!(VF2_TX_RING);
+                super::desc_wr(t, i, 0, bp as u32);
+                super::desc_wr(t, i, 1, (bp >> 32) as u32);
+                super::desc_wr(t, i, 2, len as u32); // TDES2 buffer-1 length
+                super::desc_wr(
+                    t,
+                    i,
+                    3,
+                    TDES3_OWN | TDES3_LD | TDES3_FD | (len as u32 & 0x7FFF),
+                );
 
                 // Round-robin advance.
                 let next = (i + 1) % 16;
@@ -3031,14 +3068,19 @@ pub fn driver_start() {
         // SAFETY: VF2_TX_RING is module-static; this is the only
         // writer and runs once at boot before DMA reads it.
         unsafe {
-            let d = &mut VF2_TX_RING.descs[0];
-            d[0] = pkt_pa as u32; // TDES0 PA low
-            d[1] = (pkt_pa >> 32) as u32; // TDES1 PA high
-            d[2] = 64; // TDES2 buf len = 64
-            d[3] = 0x8000_0000                // OWN
-                 | 0x2000_0000                // LD
-                 | 0x1000_0000                // FD
-                 | 64; // total length 64
+            let t = core::ptr::addr_of_mut!(VF2_TX_RING);
+            desc_wr(t, 0, 0, pkt_pa as u32); // TDES0 PA low
+            desc_wr(t, 0, 1, (pkt_pa >> 32) as u32); // TDES1 PA high
+            desc_wr(t, 0, 2, 64); // TDES2 buf len = 64
+            desc_wr(
+                t,
+                0,
+                3,
+                0x8000_0000            // OWN
+                    | 0x2000_0000      // LD
+                    | 0x1000_0000      // FD
+                    | 64, // total length 64
+            );
         }
 
         // Build 134 — MAC_RXQ_CTRL0 (0x00A0) bits[1:0] = RXQ0EN.
@@ -3092,7 +3134,7 @@ pub fn driver_start() {
         // Read TDES3 of descriptor[0] back from linmem to see if
         // DMA cleared the OWN bit (= packet sent).
         // SAFETY: same — module static, single accessor.
-        let tdes3 = unsafe { VF2_TX_RING.descs[0][3] };
+        let tdes3 = unsafe { desc_rd(core::ptr::addr_of!(VF2_TX_RING), 0, 3) };
         let _ = unsafe { wari_drv_log_u32(0x5444_4533, tdes3) }; // 'TDE3'
 
         // PR Phase-1c-6g — populate RX ring + set RBSZ.
@@ -3123,13 +3165,18 @@ pub fn driver_start() {
         unsafe {
             for i in 0..16 {
                 let bp: u64 = bufs_pa + (i as u64) * 1536;
-                let d = &mut VF2_RX_RING.descs[i];
-                d[0] = bp as u32; // RDES0 PA low
-                d[1] = (bp >> 32) as u32; // RDES1 PA high
-                d[2] = 0; // RDES2 unused
-                d[3] = 0x8000_0000            // OWN
-                     | 0x4000_0000            // IOC
-                     | 0x0100_0000; // BUF1V
+                let r = core::ptr::addr_of_mut!(VF2_RX_RING);
+                desc_wr(r, i, 0, bp as u32); // RDES0 PA low
+                desc_wr(r, i, 1, (bp >> 32) as u32); // RDES1 PA high
+                desc_wr(r, i, 2, 0); // RDES2 unused
+                desc_wr(
+                    r,
+                    i,
+                    3,
+                    0x8000_0000        // OWN
+                        | 0x4000_0000  // IOC
+                        | 0x0100_0000, // BUF1V
+                );
             }
         }
 
@@ -3156,7 +3203,7 @@ pub fn driver_start() {
 
         // Read RDES3 of descriptor[0] — OWN bit should still be
         // set (no frame received yet, DMA owns the buffer).
-        let rdes3_0 = unsafe { VF2_RX_RING.descs[0][3] };
+        let rdes3_0 = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), 0, 3) };
         let _ = unsafe { wari_drv_log_u32(0x5244_4533, rdes3_0) }; // 'RDE3'
 
         // PR Phase-1c-6h — clear sticky DMA_CH0_STATUS bits and
@@ -3187,7 +3234,7 @@ pub fn driver_start() {
         let post_rx_curr = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x114C) };
         let _ = unsafe { wari_drv_log_u32(0x506F_5302, post_rx_curr) }; // PoS\2 (current RX descriptor pointer)
 
-        let post_rdes3_0 = unsafe { VF2_RX_RING.descs[0][3] };
+        let post_rdes3_0 = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), 0, 3) };
         let _ = unsafe { wari_drv_log_u32(0x506F_5303, post_rdes3_0) }; // PoS\3
 
         // If a frame arrived, the buffer's first 4 bytes are the
@@ -3282,7 +3329,7 @@ pub fn driver_start() {
 
         // Walk the first 4 RX descriptors looking for OWN cleared.
         for i in 0..4u32 {
-            let r = unsafe { VF2_RX_RING.descs[i as usize][3] };
+            let r = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), i as usize, 3) };
             let tag = 0x5774_3300 | i;
             let _ = unsafe { wari_drv_log_u32(tag, r) };
         }
@@ -3341,7 +3388,7 @@ pub fn driver_start() {
 
         // Walk all 16 RX descs looking for OWN cleared.
         for i in 0..16u32 {
-            let r = unsafe { VF2_RX_RING.descs[i as usize][3] };
+            let r = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), i as usize, 3) };
             // Only log if changed (not still 0xC1000000).
             if r != 0xC100_0000 {
                 let tag = 0x5230_0000 | (i & 0xFF);
@@ -3381,11 +3428,11 @@ pub fn driver_start() {
         // window. Reuse VF2_FIRST_PKT — descriptor 1.
         let pkt_pa_2: u64 = lin_base + (core::ptr::addr_of!(VF2_FIRST_PKT) as u32) as u64;
         unsafe {
-            let d = &mut VF2_TX_RING.descs[1];
-            d[0] = pkt_pa_2 as u32;
-            d[1] = (pkt_pa_2 >> 32) as u32;
-            d[2] = 64;
-            d[3] = 0xB000_0040; // OWN | LD | FD | length 64
+            let t = core::ptr::addr_of_mut!(VF2_TX_RING);
+            desc_wr(t, 1, 0, pkt_pa_2 as u32);
+            desc_wr(t, 1, 1, (pkt_pa_2 >> 32) as u32);
+            desc_wr(t, 1, 2, 64);
+            desc_wr(t, 1, 3, 0xB000_0040); // OWN | LD | FD | length 64
         }
         // Update TX tail pointer to descriptor[2].
         let new_tx_tail: u32 = (lin_base + tx_ring_off as u64 + 32) as u32;
@@ -3408,7 +3455,7 @@ pub fn driver_start() {
         let _ = unsafe { wari_drv_log_u32(0x5374_3401, st4) }; // 'St4\1'
 
         for i in 0..16u32 {
-            let r = unsafe { VF2_RX_RING.descs[i as usize][3] };
+            let r = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), i as usize, 3) };
             if r != 0xC100_0000 {
                 let tag = 0x5234_0000 | (i & 0xFF);
                 let _ = unsafe { wari_drv_log_u32(tag, r) };
