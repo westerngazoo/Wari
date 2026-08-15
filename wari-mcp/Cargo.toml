@@ -1,0 +1,15 @@
+[package]
+name = "wari-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pure JSON-RPC 2.0 framing for Wari's MCP surface — bounded, zero-allocation."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Intentionally none — see the module docs for why the JSON subset is
+# hand-rolled rather than a serde-json-core dependency.
