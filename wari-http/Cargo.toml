@@ -1,0 +1,16 @@
+[package]
+name = "wari-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pure, zero-allocation HTTP/1.1 request parsing and response building."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Intentionally none. Pure layout/parsing logic: compiles for wasm32
+# (the Tier-2 MCP server) and for the host (the tests). Same
+# discipline as wari-policy / wari-validate / wari-net-wire.
