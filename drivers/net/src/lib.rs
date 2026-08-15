@@ -400,6 +400,37 @@ pub static mut VF2_RX_RING: VF2DmaRing = VF2DmaRing {
     descs: [[0u32; 4]; 16],
 };
 
+/// Read one word of a DMA descriptor.
+///
+/// **Must be volatile.** These rings are written by the GMAC's DMA
+/// engine, which the Rust abstract machine knows nothing about: no
+/// Rust code ever stores to the OWN bit the hardware clears, so a
+/// plain load is one LLVM is free to hoist out of the polling loop and
+/// keep in a register indefinitely. `receive()` then spins forever on
+/// a stale OWN bit, reporting "no frame" while the MAC is delivering
+/// packets normally and `DMA_CH0_STATUS` shows a perfectly healthy
+/// channel — the exact stall seen on builds 155-160.
+///
+/// Whether it bites depends on inlining decisions, which is why it
+/// looked like an intermittent hardware fault and moved between
+/// builds. `addr_of!` keeps us off `&`/`&mut` to a `static mut`.
+#[cfg(feature = "vf2")]
+#[inline(always)]
+unsafe fn desc_rd(ring: *const VF2DmaRing, i: usize, w: usize) -> u32 {
+    // SAFETY: caller passes addr_of!(ring static); i < 16, w < 4.
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*ring).descs[i][w])) }
+}
+
+/// Write one word of a DMA descriptor. Volatile for the mirror of the
+/// reason in [`desc_rd`]: the engine reads these, so the store must
+/// not be elided, sunk, or reordered by the compiler.
+#[cfg(feature = "vf2")]
+#[inline(always)]
+unsafe fn desc_wr(ring: *mut VF2DmaRing, i: usize, w: usize, v: u32) {
+    // SAFETY: as above.
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!((*ring).descs[i][w]), v) }
+}
+
 /// PR Phase-1c-7 — TX buffer pool for the vf2 GMAC0 path. Mirrors
 /// the RX pool: 16 × 1536 byte buffers, each bound to one entry
 /// in VF2_TX_RING. The smoltcp Device::transmit token writes into
@@ -417,6 +448,17 @@ pub struct VF2TxBuffers {
 pub static mut VF2_TX_BUFS: VF2TxBuffers = VF2TxBuffers {
     bufs: [[0u8; 1536]; 16],
 };
+
+/// Discard buffer for frames smoltcp hands us when every TX descriptor
+/// is still owned by the DMA engine.
+///
+/// The `TxToken` contract requires calling the caller's closure even
+/// when we cannot transmit, and the closure must be given somewhere to
+/// write. This deliberately sits **outside** the DMA ring and is never
+/// published to hardware, so a frame written here is dropped rather
+/// than corrupting one already in flight.
+#[cfg(feature = "vf2")]
+static mut VF2_TX_SCRATCH: [u8; ETH_FRAME_MAX] = [0u8; ETH_FRAME_MAX];
 
 /// VF2 driver-side state owned by the smoltcp Device impl. Set
 /// once at boot from `driver_start`'s vf2 branch; read by every
@@ -438,7 +480,6 @@ pub mod vf2_state {
     /// to re-arm. `usize::MAX` = no slot pending re-arm. This
     /// bypasses the Drop-impl path entirely in case wasmi/the
     /// Rust→wasm pipeline isn't synthesizing Drop calls correctly.
-    pub static mut PREV_YIELDED: usize = usize::MAX;
     /// Build-112 diagnostic: counter of receive() entries. Used to
     /// throttle a high-frequency log line so we don't drown the
     /// UART but still get visibility into the hot path.
@@ -456,12 +497,19 @@ pub mod vf2_state {
     pub static mut C_DROP_CALLS: u32 = 0;
     pub static mut C_REARM_CALLS: u32 = 0;
     pub static mut C_TX_SENT: u32 = 0;
-
-    /// Change-detection memory for the `dPrb` probe. Initial sentinel
-    /// (`0xDEAD_BEEF`) forces the first sample to log so we get a
-    /// baseline. After that we only log when the value flips, which
-    /// turns a stuck-at-MAX bug from 100k log lines/sec into one.
-    pub static mut LAST_PREV_YIELDED_LOGGED: u32 = 0xDEAD_BEEF;
+    /// Descriptors rejected by the RX validity gate (bad length, not
+    /// a last-descriptor, context, or errored writeback).
+    pub static mut C_RX_REJECTED: u32 = 0;
+    /// Frames dropped because every TX descriptor was still owned by
+    /// the DMA engine.
+    pub static mut C_TX_DROPPED: u32 = 0;
+    /// Consecutive `receive()` calls that found no frame. Drives the
+    /// rate-limited RX watchdog.
+    pub static mut EMPTY_POLLS: u32 = 0;
+    /// Times the watchdog found the RX channel suspended and resumed it.
+    pub static mut C_RX_KICKS: u32 = 0;
+    /// Rate limiter for the stall telemetry snapshot.
+    pub static mut STALL_SNAPS: u32 = 0;
 }
 
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
@@ -1355,11 +1403,19 @@ pub mod phy {
             // Skip the 12-byte VirtIO-net header to expose the raw
             // Ethernet frame to smoltcp.
             let frame_off = self.buf_off + VIRTIO_NET_HDR_LEN as u32;
-            let frame_len = self.used_len.saturating_sub(VIRTIO_NET_HDR_LEN as u32) as usize;
+            // `used_len` is written by the DEVICE into the used ring and
+            // is never validated on read. Clamp it to the buffer we
+            // actually own before it becomes a slice length, so a
+            // misbehaving or hostile device cannot make us construct a
+            // slice past the end of RX_BUFS.
+            let frame_len = (self.used_len.saturating_sub(VIRTIO_NET_HDR_LEN as u32) as usize)
+                .min(ETH_FRAME_MAX - VIRTIO_NET_HDR_LEN);
             // SAFETY: buf_off is the offset of an entry of RX_BUFS
-            // (each ETH_FRAME_MAX bytes long); used_len ≤
-            // ETH_FRAME_MAX (device wrote ≤ that many bytes,
-            // checked at attach time). Single-threaded. smoltcp
+            // (each ETH_FRAME_MAX bytes long). frame_len is clamped
+            // to ETH_FRAME_MAX immediately below — it is device-
+            // controlled and NOT bounded anywhere else. An earlier
+            // version of this comment claimed the bound was "checked
+            // at attach time"; no such check exists. Single-threaded. smoltcp
             // 0.11 takes &mut [u8] to allow in-place processing.
             let slice = unsafe { core::slice::from_raw_parts_mut(frame_off as *mut u8, frame_len) };
             let r = f(slice);
@@ -1419,7 +1475,8 @@ pub mod phy {
 #[cfg(feature = "vf2")]
 pub mod vf2_phy {
     use super::{
-        vf2_state, wari_net_mmio_write32, VF2_RX_BUFS, VF2_RX_RING, VF2_TX_BUFS, VF2_TX_RING,
+        vf2_state, wari_net_mmio_read32, wari_net_mmio_write32, ETH_FRAME_MAX, VF2_RX_BUFS,
+        VF2_RX_RING, VF2_TX_BUFS, VF2_TX_RING, VF2_TX_SCRATCH,
     };
     use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
     use smoltcp::time::Instant;
@@ -1456,6 +1513,17 @@ pub mod vf2_phy {
 
     /// DWMAC4 RDES3 status bits.
     const RDES3_OWN: u32 = 0x8000_0000;
+    /// RDES3 writeback bits. The packet-length field (14:0) is only
+    /// defined when LD=1, CTXT=0 and ES=0 — see DWMAC4 databook,
+    /// receive-descriptor writeback format.
+    ///
+    /// CAREFUL: RX and TX swap the FD/LD bit positions. TX is FD=28,
+    /// LD=29 (see `TDES3_FD`/`TDES3_LD` below); RX is LD=28, FD=29.
+    /// Copying the TX constants over to RX yields a mask that looks
+    /// plausible and tests the wrong bit.
+    const RDES3_LD: u32 = 0x1000_0000;
+    const RDES3_CTXT: u32 = 0x4000_0000;
+    const RDES3_ES: u32 = 0x0000_8000;
 
     /// DWMAC4 TDES3 — OWN | LD | FD set with packet length in low 15.
     const TDES3_OWN: u32 = 0x8000_0000;
@@ -1476,20 +1544,15 @@ pub mod vf2_phy {
         }
 
         fn receive(&mut self, _ts: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-            // Build-118: change-detection dPrb + cumulative counter
-            // dump (see docs/diagnostic-tags.md). dPrb fires only
-            // when PREV_YIELDED's value flips — stuck-at-MAX bugs
-            // log once, then go silent until the value moves.
             // The 6-line stat burst fires every ~65k receive() calls
             // so we always have current event counters in the trace.
+            //
+            // Watch StRa (re-arms) against StRf (frames found): they
+            // must track 1:1. A 2:1 ratio is the double-re-arm bug —
+            // build 152 on silicon logged StRa=182 / StRf=91.
             unsafe {
                 vf2_state::C_RECEIVE_CALLS = vf2_state::C_RECEIVE_CALLS.wrapping_add(1);
                 vf2_state::RX_CALL_COUNT = vf2_state::RX_CALL_COUNT.wrapping_add(1);
-                let py = vf2_state::PREV_YIELDED as u32;
-                if py != vf2_state::LAST_PREV_YIELDED_LOGGED {
-                    vf2_state::LAST_PREV_YIELDED_LOGGED = py;
-                    let _ = super::wari_drv_trace_u32(0x6450_7262, py);
-                }
                 if vf2_state::RX_CALL_COUNT & 0xFFFF == 0 {
                     let _ = super::wari_drv_log_u32(0x5374_5263, vf2_state::C_RECEIVE_CALLS);
                     let _ = super::wari_drv_log_u32(0x5374_5266, vf2_state::C_FRAMES_FOUND);
@@ -1499,20 +1562,18 @@ pub mod vf2_phy {
                     let _ = super::wari_drv_log_u32(0x5374_5478, vf2_state::C_TX_SENT);
                 }
             }
-            // Build-110 wasmi-tolerant fix, retained: re-arm the
-            // slot we yielded to smoltcp last time. By the time
-            // receive() is called again, smoltcp has finished with
-            // the slot (consume returned + token dropped). The
-            // dPyR diagnostic tag is gone (build 119) — rXCn on
-            // the next line of vf2_rx_rearm covers the same signal,
-            // and StRa in the periodic dump counts these calls.
-            unsafe {
-                if vf2_state::PREV_YIELDED != usize::MAX {
-                    let prev = vf2_state::PREV_YIELDED;
-                    vf2_state::PREV_YIELDED = usize::MAX;
-                    vf2_rx_rearm(prev);
-                }
-            }
+            // NOTE: builds 110-152 re-armed the previously-yielded
+            // slot here, as a hedge in case wasmi was not synthesizing
+            // Drop calls. It was not: `Vf2NicRxToken::consume` re-arms
+            // and blanks its idx, and `Drop` re-arms whenever idx is
+            // still live, so every token re-arms exactly once already.
+            // The hedge made it twice, and `vf2_rx_rearm` writes OWN
+            // unconditionally — so a frame the DMA engine delivered
+            // between consume's re-arm and this one had its descriptor
+            // overwritten with OWN=1 and was silently discarded, never
+            // reaching smoltcp and never counted. That is intermittent,
+            // load-dependent RX loss wearing the costume of an analog
+            // PHY problem. Removed; StRa now tracks StRf 1:1.
             // Build-129 net-diag: 17-register RX-path snapshot every
             // ~32K calls. Branch-predictable: the early-return inside
             // covers 99.997% of calls. See drivers/net/src/diag.rs.
@@ -1527,12 +1588,39 @@ pub mod vf2_phy {
                 let start = vf2_state::RX_NEXT;
                 for n in 0..16usize {
                     let i = (start + n) % 16;
-                    let rdes3 = VF2_RX_RING.descs[i][3];
+                    let rdes3 = super::desc_rd(core::ptr::addr_of!(VF2_RX_RING), i, 3);
                     if rdes3 & RDES3_OWN == 0 {
                         // Frame received in slot i. Length is in
                         // RDES3 bits 14:0.
                         let len = (rdes3 & 0x7FFF) as u16;
                         vf2_state::RX_NEXT = (i + 1) % 16;
+
+                        // The length field is written by the DEVICE and
+                        // is only meaningful on a last-descriptor,
+                        // error-free, non-context writeback. Anything
+                        // else — a split jumbo frame's first descriptor,
+                        // a context descriptor, an errored frame — has
+                        // an undefined length field, and the raw field
+                        // can reach 32767 against a 1536-byte buffer.
+                        // Unvalidated, that indexes out of bounds and
+                        // panics, and this driver's panic handler is an
+                        // infinite loop: any host on the LAN could hang
+                        // the board with one oversized frame, no
+                        // capability required. Reject and recycle
+                        // instead; a dropped bad frame is a non-event,
+                        // a wedged NIC is an outage.
+                        let ok = rdes3 & RDES3_LD != 0
+                            && rdes3 & RDES3_CTXT == 0
+                            && rdes3 & RDES3_ES == 0
+                            && (len as usize) <= ETH_FRAME_MAX;
+                        if !ok {
+                            vf2_state::C_RX_REJECTED =
+                                vf2_state::C_RX_REJECTED.wrapping_add(1);
+                            // tag = 'rXBd' — rejected descriptor.
+                            let _ = super::wari_drv_log_u32(0x7258_4264, rdes3);
+                            vf2_rx_rearm(i);
+                            continue;
+                        }
                         // Build-118: log rXFr with idx in val.b3 (top
                         // byte) and rdes3 in val.b2..b0. Old scheme
                         // OR'd idx into the tag's low nibble, which
@@ -1547,15 +1635,95 @@ pub mod vf2_phy {
                         // guard makes subsequent calls no-ops.
                         #[cfg(feature = "net-diag")]
                         super::diag::note_first_frame(GMAC_BASE, i as u32);
-                        // Stash the slot so the NEXT receive()
-                        // call re-arms it (see top of fn).
-                        vf2_state::PREV_YIELDED = i;
                         return Some((
                             Vf2NicRxToken { idx: i, len },
+                            // The paired TX token is minted WITHOUT the
+                            // OWN check `transmit()` performs, because
+                            // smoltcp's Device contract is both tokens
+                            // or neither, and refusing here would drop a
+                            // good received frame to avoid a possible TX
+                            // stall. `Vf2NicTxToken::consume` therefore
+                            // re-checks ownership itself before touching
+                            // any buffer — see the comment there.
                             Vf2NicTxToken {
                                 idx: vf2_state::TX_NEXT,
                             },
                         ));
+                    }
+                }
+            }
+
+            // RX watchdog.
+            //
+            // Nothing found. If the DMA channel has SUSPENDED -- it
+            // raises RBU when it walks a descriptor software still
+            // owns -- then no frame will ever be found again, and the
+            // RBU clear lives in `vf2_rx_rearm`, which only runs when
+            // a frame IS found. That is circular: a suspended channel
+            // cannot recover through the re-arm path, which is why
+            // build 159 sat at StRf=45 for ~5M polls before luck
+            // restarted it.
+            //
+            // Break the cycle here, rate-limited so the overwhelmingly
+            // common empty poll costs nothing: sample DMA_CH0_STATUS,
+            // and if RBU is asserted clear it and re-ring the tail
+            // doorbell to resume the channel.
+            //
+            // SAFETY: single-threaded driver (INV-1); statics below are
+            // written only here.
+            unsafe {
+                vf2_state::EMPTY_POLLS = vf2_state::EMPTY_POLLS.wrapping_add(1);
+                if vf2_state::EMPTY_POLLS & 0x0FFF == 0 {
+                    const DMA_CH0_STATUS: u32 = 0x1160;
+                    const DMA_STATUS_RBU: u32 = 1 << 7;
+                    let st = wari_net_mmio_read32(GMAC_BASE + DMA_CH0_STATUS);
+
+                    // Stall telemetry. Build 160 sat at StRf=44 for 860
+                    // counter dumps with RBU CLEAR -- the engine had not
+                    // suspended, we simply stopped seeing frames. That
+                    // splits two very different causes and we had no
+                    // data to choose: either frames reach the MAC and
+                    // the descriptor writeback is not visible to us
+                    // (cache coherence, INV-25's open half), or no frame
+                    // arrives at all (PHY/link).
+                    //
+                    // MMC counters are maintained by the MAC itself and
+                    // read over uncached MMIO, so they are ground truth
+                    // for "did a frame actually arrive". Sampled every
+                    // ~1M empty polls, so this is quiet unless we are
+                    // genuinely stalled.
+                    vf2_state::STALL_SNAPS = vf2_state::STALL_SNAPS.wrapping_add(1);
+                    if vf2_state::STALL_SNAPS & 0xFF == 0 {
+                        const MMC_RX_FRAMECOUNT_GB: u32 = 0x0780;
+                        const MMC_RX_CRC_ERROR: u32 = 0x0794;
+                        const DMA_CH0_CUR_RXDESC: u32 = 0x114C;
+                        let rx_frames = wari_net_mmio_read32(GMAC_BASE + MMC_RX_FRAMECOUNT_GB);
+                        let rx_crc = wari_net_mmio_read32(GMAC_BASE + MMC_RX_CRC_ERROR);
+                        let cur = wari_net_mmio_read32(GMAC_BASE + DMA_CH0_CUR_RXDESC);
+                        // 'MRxF' frames at MAC / 'MRxC' CRC errors /
+                        // 'DCur' engine's current descriptor / 'DSts'.
+                        let _ = super::wari_drv_log_u32(0x4D52_7846, rx_frames);
+                        let _ = super::wari_drv_log_u32(0x4D52_7843, rx_crc);
+                        let _ = super::wari_drv_log_u32(0x4443_7572, cur);
+                        let _ = super::wari_drv_log_u32(0x4453_7473, st);
+                        // What WE see in the descriptor we are parked on.
+                        let own =
+                            super::desc_rd(core::ptr::addr_of!(VF2_RX_RING), vf2_state::RX_NEXT, 3);
+                        let _ = super::wari_drv_log_u32(0x524F_776E, own); // 'ROwn'
+                    }
+
+                    if st & DMA_STATUS_RBU != 0 {
+                        let _ = wari_net_mmio_write32(
+                            GMAC_BASE + DMA_CH0_STATUS,
+                            DMA_STATUS_RBU,
+                        );
+                        let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
+                        let rx_tail_pa: u32 =
+                            (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
+                        let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
+                        vf2_state::C_RX_KICKS = vf2_state::C_RX_KICKS.wrapping_add(1);
+                        // tag = 'rXKk' — watchdog resumed a suspended channel.
+                        let _ = super::wari_drv_log_u32(0x7258_4B6B, vf2_state::C_RX_KICKS);
                     }
                 }
             }
@@ -1566,7 +1734,7 @@ pub mod vf2_phy {
             // SAFETY: same as above.
             unsafe {
                 let i = vf2_state::TX_NEXT;
-                let tdes3 = VF2_TX_RING.descs[i][3];
+                let tdes3 = super::desc_rd(core::ptr::addr_of!(VF2_TX_RING), i, 3);
                 if tdes3 & TDES3_OWN != 0 {
                     // DMA hasn't released this slot yet; back-pressure.
                     return None;
@@ -1604,17 +1772,38 @@ pub mod vf2_phy {
             vf2_state::C_REARM_CALLS = vf2_state::C_REARM_CALLS.wrapping_add(1);
             let bp: u64 =
                 vf2_state::LIN_BASE + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
-            let d = &mut VF2_RX_RING.descs[idx];
-            d[0] = bp as u32;
-            d[1] = (bp >> 32) as u32;
-            d[2] = 0;
-            d[3] = 0xC100_0000; // OWN | IOC | BUF1V
+            let r = core::ptr::addr_of_mut!(VF2_RX_RING);
+            super::desc_wr(r, idx, 0, bp as u32);
+            super::desc_wr(r, idx, 1, (bp >> 32) as u32);
+            super::desc_wr(r, idx, 2, 0);
+            super::desc_wr(r, idx, 3, 0xC100_0000); // OWN | IOC | BUF1V
                                 // Re-kick the RX_TAIL doorbell so DWMAC4 walks the
-                                // descriptor we just rearmed. The host-fn call crosses
-                                // the wasm→native boundary and naturally serializes,
-                                // so no explicit fence is needed (and inline asm wouldn't
-                                // compile to wasm anyway — that's how builds 107..114
-                                // silently shipped a stale driver).
+                                // descriptor we just rearmed.
+                                //
+                                // ORDERING (unresolved, see INV-25): there is NO
+                                // hardware fence between the descriptor stores above
+                                // and this MMIO write. A WASM driver cannot emit one,
+                                // and the kernel's MMIO host fn does not either — a
+                                // function call is not a memory barrier. Earlier
+                                // comments here claimed the wasm→native boundary
+                                // serializes; that is an assumption, not an
+                                // architectural guarantee. Correct today only if the
+                                // JH7110 interconnect is IO-coherent and the store
+                                // buffer drains first. Must be resolved in the kernel
+                                // host fn before a second SoC.
+            // Clear RBU before the doorbell. When the engine walks a
+            // descriptor it still owns it raises RBU (DMA_CH0_STATUS
+            // bit 7) and SUSPENDS the RX channel; the bit is sticky
+            // and write-1-to-clear. A tail write alone does not
+            // reliably restart a channel whose RBU is still asserted,
+            // so an engine that suspended once would never receive
+            // another frame — exactly the permanent RX stall seen on
+            // build 155 (frames froze at 47 while polling continued).
+            // Clearing it here makes re-arm the recovery path too.
+            const DMA_CH0_STATUS: u32 = 0x1160;
+            const DMA_STATUS_RBU: u32 = 1 << 7;
+            let _ = wari_net_mmio_write32(GMAC_BASE + DMA_CH0_STATUS, DMA_STATUS_RBU);
+
             let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
             let rx_tail_pa: u32 = (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
             let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
@@ -1680,10 +1869,44 @@ pub mod vf2_phy {
         where
             F: FnOnce(&mut [u8]) -> R,
         {
-            let i = self.idx;
+            // `self.idx` was captured when the token was minted. On the
+            // receive() path that happened with no ownership check, so
+            // by now the DMA engine may own the slot and be reading its
+            // buffer for an in-flight transmit. Writing there would
+            // corrupt a frame already on the wire and stomp a live
+            // descriptor. Find a slot the engine has released; scanning
+            // from TX_NEXT keeps the common case a single check.
+            //
+            // If the whole ring is busy the correct answer is to drop
+            // this frame — smoltcp's own back-pressure path (transmit()
+            // returning None) does exactly that — but the Device
+            // contract still requires calling `f`, so it gets a scratch
+            // buffer outside the ring and the result is discarded.
+            let free = unsafe {
+                let start = vf2_state::TX_NEXT;
+                (0..16usize)
+                    .map(|n| (start + n) % 16)
+                    .find(|&c| super::desc_rd(core::ptr::addr_of!(VF2_TX_RING), c, 3) & TDES3_OWN == 0)
+            };
 
-            // SAFETY: TX_BUFS[i] is exclusively ours until we
-            // publish via the descriptor write below.
+            let i = match free {
+                Some(c) => c,
+                None => {
+                    // SAFETY: scratch is driver-private, never handed to
+                    // the DMA engine, and this is the only writer.
+                    let result = unsafe { f(&mut VF2_TX_SCRATCH[..len]) };
+                    unsafe {
+                        vf2_state::C_TX_DROPPED = vf2_state::C_TX_DROPPED.wrapping_add(1);
+                        // tag = 'tXFl' — TX ring full, frame dropped.
+                        let _ = super::wari_drv_log_u32(0x7458_466C, len as u32);
+                    }
+                    return result;
+                }
+            };
+
+            // SAFETY: TX_BUFS[i] is exclusively ours — the descriptor
+            // check above proved the DMA engine has released slot i,
+            // and nothing republishes it until the write below.
             let result = unsafe {
                 let buf = &mut VF2_TX_BUFS.bufs[i][..len];
                 f(buf)
@@ -1702,11 +1925,16 @@ pub mod vf2_phy {
             unsafe {
                 let bp: u64 =
                     vf2_state::LIN_BASE + (core::ptr::addr_of!(VF2_TX_BUFS.bufs[i]) as u32) as u64;
-                let d = &mut VF2_TX_RING.descs[i];
-                d[0] = bp as u32;
-                d[1] = (bp >> 32) as u32;
-                d[2] = len as u32; // TDES2 buffer-1 length
-                d[3] = TDES3_OWN | TDES3_LD | TDES3_FD | (len as u32 & 0x7FFF);
+                let t = core::ptr::addr_of_mut!(VF2_TX_RING);
+                super::desc_wr(t, i, 0, bp as u32);
+                super::desc_wr(t, i, 1, (bp >> 32) as u32);
+                super::desc_wr(t, i, 2, len as u32); // TDES2 buffer-1 length
+                super::desc_wr(
+                    t,
+                    i,
+                    3,
+                    TDES3_OWN | TDES3_LD | TDES3_FD | (len as u32 & 0x7FFF),
+                );
 
                 // Round-robin advance.
                 let next = (i + 1) % 16;
@@ -2764,6 +2992,20 @@ pub fn driver_start() {
         // page-table mappings — wasm32 pointers ARE the linmem
         // offset (driver is wasm32, 32-bit ptrs).
         let lin_base = unsafe { wari_lin_mem_base() };
+        // The host fn returns 0 on any capability failure. The other
+        // three call sites check this; the one that programs the DMA
+        // engine did not. Unchecked, every PA below collapses to a raw
+        // wasm offset (~0x11000) and gets written into the descriptor
+        // list-address registers — pointing the GMAC at a physical
+        // address that is not DRAM on this SoC, with hardware writes
+        // landing entirely outside the sandbox. Abort bring-up instead:
+        // the kernel reports the interface as uninitialized, which is a
+        // diagnosable failure rather than silent memory corruption.
+        if lin_base == 0 {
+            // tag = 'LBa0' — lin_mem_base returned 0.
+            let _ = unsafe { wari_drv_log_u32(0x4C42_6130, 0) };
+            return;
+        }
 
         let tx_ring_off = unsafe { core::ptr::addr_of!(VF2_TX_RING.descs) as u32 };
         let rx_ring_off = unsafe { core::ptr::addr_of!(VF2_RX_RING.descs) as u32 };
@@ -2826,14 +3068,19 @@ pub fn driver_start() {
         // SAFETY: VF2_TX_RING is module-static; this is the only
         // writer and runs once at boot before DMA reads it.
         unsafe {
-            let d = &mut VF2_TX_RING.descs[0];
-            d[0] = pkt_pa as u32; // TDES0 PA low
-            d[1] = (pkt_pa >> 32) as u32; // TDES1 PA high
-            d[2] = 64; // TDES2 buf len = 64
-            d[3] = 0x8000_0000                // OWN
-                 | 0x2000_0000                // LD
-                 | 0x1000_0000                // FD
-                 | 64; // total length 64
+            let t = core::ptr::addr_of_mut!(VF2_TX_RING);
+            desc_wr(t, 0, 0, pkt_pa as u32); // TDES0 PA low
+            desc_wr(t, 0, 1, (pkt_pa >> 32) as u32); // TDES1 PA high
+            desc_wr(t, 0, 2, 64); // TDES2 buf len = 64
+            desc_wr(
+                t,
+                0,
+                3,
+                0x8000_0000            // OWN
+                    | 0x2000_0000      // LD
+                    | 0x1000_0000      // FD
+                    | 64, // total length 64
+            );
         }
 
         // Build 134 — MAC_RXQ_CTRL0 (0x00A0) bits[1:0] = RXQ0EN.
@@ -2887,7 +3134,7 @@ pub fn driver_start() {
         // Read TDES3 of descriptor[0] back from linmem to see if
         // DMA cleared the OWN bit (= packet sent).
         // SAFETY: same — module static, single accessor.
-        let tdes3 = unsafe { VF2_TX_RING.descs[0][3] };
+        let tdes3 = unsafe { desc_rd(core::ptr::addr_of!(VF2_TX_RING), 0, 3) };
         let _ = unsafe { wari_drv_log_u32(0x5444_4533, tdes3) }; // 'TDE3'
 
         // PR Phase-1c-6g — populate RX ring + set RBSZ.
@@ -2918,13 +3165,18 @@ pub fn driver_start() {
         unsafe {
             for i in 0..16 {
                 let bp: u64 = bufs_pa + (i as u64) * 1536;
-                let d = &mut VF2_RX_RING.descs[i];
-                d[0] = bp as u32; // RDES0 PA low
-                d[1] = (bp >> 32) as u32; // RDES1 PA high
-                d[2] = 0; // RDES2 unused
-                d[3] = 0x8000_0000            // OWN
-                     | 0x4000_0000            // IOC
-                     | 0x0100_0000; // BUF1V
+                let r = core::ptr::addr_of_mut!(VF2_RX_RING);
+                desc_wr(r, i, 0, bp as u32); // RDES0 PA low
+                desc_wr(r, i, 1, (bp >> 32) as u32); // RDES1 PA high
+                desc_wr(r, i, 2, 0); // RDES2 unused
+                desc_wr(
+                    r,
+                    i,
+                    3,
+                    0x8000_0000        // OWN
+                        | 0x4000_0000  // IOC
+                        | 0x0100_0000, // BUF1V
+                );
             }
         }
 
@@ -2951,7 +3203,7 @@ pub fn driver_start() {
 
         // Read RDES3 of descriptor[0] — OWN bit should still be
         // set (no frame received yet, DMA owns the buffer).
-        let rdes3_0 = unsafe { VF2_RX_RING.descs[0][3] };
+        let rdes3_0 = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), 0, 3) };
         let _ = unsafe { wari_drv_log_u32(0x5244_4533, rdes3_0) }; // 'RDE3'
 
         // PR Phase-1c-6h — clear sticky DMA_CH0_STATUS bits and
@@ -2982,7 +3234,7 @@ pub fn driver_start() {
         let post_rx_curr = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x114C) };
         let _ = unsafe { wari_drv_log_u32(0x506F_5302, post_rx_curr) }; // PoS\2 (current RX descriptor pointer)
 
-        let post_rdes3_0 = unsafe { VF2_RX_RING.descs[0][3] };
+        let post_rdes3_0 = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), 0, 3) };
         let _ = unsafe { wari_drv_log_u32(0x506F_5303, post_rdes3_0) }; // PoS\3
 
         // If a frame arrived, the buffer's first 4 bytes are the
@@ -3077,7 +3329,7 @@ pub fn driver_start() {
 
         // Walk the first 4 RX descriptors looking for OWN cleared.
         for i in 0..4u32 {
-            let r = unsafe { VF2_RX_RING.descs[i as usize][3] };
+            let r = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), i as usize, 3) };
             let tag = 0x5774_3300 | i;
             let _ = unsafe { wari_drv_log_u32(tag, r) };
         }
@@ -3136,7 +3388,7 @@ pub fn driver_start() {
 
         // Walk all 16 RX descs looking for OWN cleared.
         for i in 0..16u32 {
-            let r = unsafe { VF2_RX_RING.descs[i as usize][3] };
+            let r = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), i as usize, 3) };
             // Only log if changed (not still 0xC1000000).
             if r != 0xC100_0000 {
                 let tag = 0x5230_0000 | (i & 0xFF);
@@ -3176,11 +3428,11 @@ pub fn driver_start() {
         // window. Reuse VF2_FIRST_PKT — descriptor 1.
         let pkt_pa_2: u64 = lin_base + (core::ptr::addr_of!(VF2_FIRST_PKT) as u32) as u64;
         unsafe {
-            let d = &mut VF2_TX_RING.descs[1];
-            d[0] = pkt_pa_2 as u32;
-            d[1] = (pkt_pa_2 >> 32) as u32;
-            d[2] = 64;
-            d[3] = 0xB000_0040; // OWN | LD | FD | length 64
+            let t = core::ptr::addr_of_mut!(VF2_TX_RING);
+            desc_wr(t, 1, 0, pkt_pa_2 as u32);
+            desc_wr(t, 1, 1, (pkt_pa_2 >> 32) as u32);
+            desc_wr(t, 1, 2, 64);
+            desc_wr(t, 1, 3, 0xB000_0040); // OWN | LD | FD | length 64
         }
         // Update TX tail pointer to descriptor[2].
         let new_tx_tail: u32 = (lin_base + tx_ring_off as u64 + 32) as u32;
@@ -3203,7 +3455,7 @@ pub fn driver_start() {
         let _ = unsafe { wari_drv_log_u32(0x5374_3401, st4) }; // 'St4\1'
 
         for i in 0..16u32 {
-            let r = unsafe { VF2_RX_RING.descs[i as usize][3] };
+            let r = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), i as usize, 3) };
             if r != 0xC100_0000 {
                 let tag = 0x5234_0000 | (i & 0xFF);
                 let _ = unsafe { wari_drv_log_u32(tag, r) };
