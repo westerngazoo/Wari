@@ -192,6 +192,18 @@ cap that was authorized by signature.
 **Enforcement**: PR 2's boot-time root-cap construction is the only
 producer of root caps and consults the signed manifest as input.
 
+**Amendment (Phase 2, dynamic loading)**: the "Phase 2+ moves Tier-1
+manifests to signed distribution" clause above is now partially due.
+A Tier-1 module arriving at RUNTIME (`runtime::modreg`) must be a
+signed envelope: `sign-module` refuses to sign a binary without an
+embedded manifest whose declared import/export surface exactly matches
+the binary (both directions), and the kernel verifies the ed25519
+envelope before any byte is treated as a module. Manifest ABI v2
+(`DriverKind::Tier1App`). A dynamic tenant's CSpace gets the minimal
+set (stdout + exit) regardless of manifest contents — wider authority
+is a Supervisor grant, never a default. Baked demo tenants remain
+compiled-in manifests until they migrate.
+
 ### INV-15 · Capability Forgery Prevention *(Phase 1b)*
 
 > No userspace code path produces a `Cap` value that the kernel did

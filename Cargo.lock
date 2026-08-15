@@ -881,6 +881,7 @@ dependencies = [
 name = "wari-hello"
 version = "0.0.1"
 dependencies = [
+ "wari-driver-iface",
  "wari-policy",
 ]
 

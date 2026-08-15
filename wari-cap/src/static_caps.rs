@@ -46,6 +46,13 @@ pub enum ModuleId {
     /// the new `ObjectKind::Net`, not in the legacy boolean `Caps`,
     /// so `caps_for(Tier::Two, Tier2Net)` returns `Caps::empty()`.
     Tier2Net,
+    /// A runtime-loaded Tier-1 module. The payload lives in the
+    /// kernel's module registry (`runtime::modreg`); the `u8` is the
+    /// registry slot. Phase-2 cloud-OS path: these arrive over the
+    /// wire as signed envelopes, not `include_bytes!` — and they get
+    /// the MINIMAL Tier-1 cap set regardless of what the baked demo
+    /// tenants hold. See `caps_for`.
+    Dynamic(u8),
 }
 
 /// Per-instance capability set.
@@ -109,6 +116,13 @@ pub const fn caps_for(tier: Tier, module_id: ModuleId) -> Caps {
     match (tier, module_id) {
         (Tier::Two, ModuleId::Tier2Uart) => TIER2_UART_DRIVER_CAPS,
         (Tier::One, ModuleId::Tier1Hello) => TIER1_DEFAULT_CAPS,
+        // Runtime-loaded tenants: stdout + exit, nothing else. Any
+        // wider authority is an explicit later grant (the AI-layer
+        // Supervisor's job), never a default. Deliberately identical
+        // to Tier1Hello's boolean caps — the DIFFERENCE is that the
+        // boot path additionally installs Net/IPC caps for the demo
+        // tenants and `cap::boot::install_tier1_dynamic` does not.
+        (Tier::One, ModuleId::Dynamic(_)) => TIER1_DEFAULT_CAPS,
         // Tier2Net has no legacy boolean caps — its authority is
         // the `ObjectKind::Net` cap installed by
         // `cap::boot::init_root_caps`. Returning empty here is

@@ -143,6 +143,14 @@ pub fn init_root_caps() -> Result<(), KernelError> {
     // 1. Allocate the kernel-resident endpoints.
     let uart_ipc_ep = pools.endpoints.alloc(Endpoint::new())?;
     let kernel_exit_ep = pools.endpoints.alloc(Endpoint::new())?;
+    // Remembered for runtime tenant creation: a dynamically spawned
+    // Tier-1 (runtime::modreg) needs caps on the SAME stdout/exit
+    // endpoints the boot tenants use, long after these locals are
+    // gone. SAFETY: INV-1 + INV-8 — written once here during
+    // single-threaded boot, read only by install_tier1_dynamic.
+    unsafe {
+        BOOT_TIER1_EPS = Some((uart_ipc_ep, kernel_exit_ep));
+    }
 
     // Drop the borrow on `pools` so we can take a fresh borrow on
     // `cspaces` next without aliasing-related grief. (See storage.rs
@@ -319,6 +327,46 @@ pub fn init_root_caps() -> Result<(), KernelError> {
 
 /// Install Tier-1 stdout + exit root caps into the CSpace at
 /// `proc_id`, reading the on/off flags from `tier1_caps`.
+/// The (uart_ipc, kernel_exit) endpoint pool indices allocated by
+/// `init_root_caps`, kept so runtime tenant creation can reference
+/// the same kernel objects. `None` until boot cap-init has run.
+static mut BOOT_TIER1_EPS: Option<(u16, u16)> = None;
+
+/// Install the MINIMAL Tier-1 cap set into a dynamic tenant's CSpace.
+///
+/// Runtime counterpart of the boot-time `install_tier1_caps` calls —
+/// same helper, same endpoints, but deliberately nothing beyond
+/// stdout + exit: no Net cap, no IPC endpoint, no demo extras. Wider
+/// authority for a runtime tenant is always an explicit later grant
+/// (the AI-layer Supervisor), never a default. See
+/// `runtime::modreg`'s module docs for the whole authority story.
+///
+/// # Contract
+///
+/// - Precondition: `init_root_caps` has completed (it records the
+///   endpoint indices this reads); `proc_id < MAX_PROCS` and its
+///   CSpace is unused (the registry allocates fresh proc_ids, so a
+///   collision would be a registry bug, not an operator error).
+/// - Postcondition: the CSpace at `proc_id` holds stdout + exit caps
+///   at the standard slots; nothing else.
+/// - Errors: `KernelError::InvalidArgument` if `proc_id` is out of
+///   range or boot cap-init has not run.
+/// - Panics: never.
+pub fn install_tier1_dynamic(proc_id: u8) -> Result<(), KernelError> {
+    if (proc_id as usize) >= super::cspace::MAX_PROCS {
+        return Err(KernelError::InvalidArgument);
+    }
+    // SAFETY: INV-8 — read-only access to a value written once during
+    // boot; INV-1 makes the read race-free.
+    let Some((uart_ipc_ep, kernel_exit_ep)) = (unsafe { BOOT_TIER1_EPS }) else {
+        return Err(KernelError::InvalidArgument);
+    };
+    let cs = cspaces();
+    let tier1_caps = caps_for(Tier::One, ModuleId::Dynamic(0));
+    install_tier1_caps(cs, proc_id, &tier1_caps, uart_ipc_ep, kernel_exit_ep);
+    Ok(())
+}
+
 fn install_tier1_caps(
     cs: &mut [super::cspace::CSpace],
     proc_id: u8,

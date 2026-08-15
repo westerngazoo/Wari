@@ -224,6 +224,21 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
             }
         }
     }
+    // Module-registry self-test (Phase-2 p2a): push the signed hello
+    // envelope through the FULL runtime path — stage → ed25519 verify
+    // → minimal-cap install → scheduler registration — as if it had
+    // been uploaded over the wire. It then runs below alongside the
+    // baked tenants, as the first module this kernel ever loaded at
+    // runtime. Deliberate demonstration: it is the same binary as the
+    // demo tenants but holds only stdout+exit, so its IPC and socket
+    // calls are refused by the cap system while it runs and exits
+    // cleanly. Retires into tests/integration/ when the wari-http
+    // upload path becomes the real caller.
+    match runtime::modreg::self_test_spawn() {
+        Ok(_) => {}
+        Err(e) => kprintln!("[modreg] self-test failed: {:?}", e),
+    }
+
     if let Err(e) = sched::run() {
         kprintln!("wari sched: run failed: {:?}", e);
         loop {

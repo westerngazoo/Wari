@@ -15,6 +15,10 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
+# Manifest declaration (Phase 2 dynamic loading): the embedded
+# `wari_driver_manifest` section that `scripts/sign-module` cross-checks
+# against this binary's real import/export surface before signing.
+wari-driver-iface = { path = "../../driver-iface" }
 # Phase 0: hand-rolled WASI bindings live inline in `src/lib.rs` (one
 # `extern "C"` block). When the WASI surface grows past `fd_write` +
 # `proc_exit` (Phase 1), this slot gets a real binding crate.
