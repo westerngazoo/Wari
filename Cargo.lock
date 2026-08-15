@@ -859,6 +859,7 @@ version = "0.0.1"
 dependencies = [
  "smoltcp",
  "wari-driver-iface",
+ "wari-net-wire",
 ]
 
 [[package]]
@@ -909,6 +910,10 @@ dependencies = [
 
 [[package]]
 name = "wari-mem"
+version = "0.0.1"
+
+[[package]]
+name = "wari-net-wire"
 version = "0.0.1"
 
 [[package]]
