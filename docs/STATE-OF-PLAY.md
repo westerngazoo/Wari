@@ -1,13 +1,60 @@
 # State of Play — pick up here
 
-> **Last updated**: 2026-07-16
-> **Last build published**: 152 (release, GMAC1 RGMII rx-delay fix — PR #71)
-> **Diagnostic build**: 151 (debug, IPC-wedge tracers — PR, on-branch)
-> **Next action**: cold-boot sweep to confirm the RGMII rx-delay fix
-> (`wari go-branch phase-1c/gmac1-rgmii-rx-delay`, then `ping -c60` ×4
-> power-cycles); if clean every boot, merge #71 and close Phase 1c.
+> **Last updated**: 2026-08-15
+> **Last build published**: 162 (release, on `phase-1c/wire-format-derived`)
+> **Next action**: review and merge that branch — it is large, see
+> "Open review" below.
 
 ## The milestone
+
+**2026-08-15: 0% packet loss on silicon. The ping-loss saga is closed,
+and the cause was a missing `volatile`.**
+
+Every DMA descriptor access in the net driver was a plain Rust
+load/store on a `static mut` that the GMAC writes asynchronously. No
+Rust code ever stores to the OWN bit the hardware clears, so LLVM was
+free to hoist the load out of the RX polling loop and keep it in a
+register: `receive()` spun on a stale OWN bit reporting "no frame"
+while the MAC delivered packets normally.
+
+This is why the loss metric swung **0–57% boot-to-boot on byte-identical
+code** — the observation that made no sense as software and sent the
+investigation toward analog RGMII margin for weeks. It *was* software;
+it just was not deterministic software, because whether the compiler
+hoists depends on inlining decisions that shift with any unrelated
+change.
+
+Verified on build 162: `ping -c 80` → **0% loss**, StRf 102 / StRa 102
+(1:1), StTx 81, and zero watchdog kicks, zero rejects, zero ring-full
+drops. No stall during traffic at any point.
+
+**Caveat on PR #71** (RGMII rx-delay 300 ps → 1500 ps, merged): the
+value is defensible on its own — 1500 ps is what GMAC0 uses — but the
+evidence it was merged on was this bug. Do not treat #71 as the reason
+ping works.
+
+### Other silicon results from the same session
+
+- **Ctrl-R reboots from any state**, including mid-tenant. `sstatus.SIE`
+  had never been set since Phase 0, so `trap.rs`'s external-interrupt
+  arm and all of `plic::dispatch` were code that had never executed.
+  The VF2's PLIC `HART_CONTEXT` was also wrong (3 → 2: JH7110 hart 0 is
+  the S7 monitor core with no S-mode, so contexts do not follow
+  `2*hart+1`), and the DesignWare busy-detect latch needed a USR read.
+- **Double RX re-arm removed.** Builds 110–162 re-armed every descriptor
+  twice and silently discarded any frame the DMA delivered in between.
+  `StRa` must track `StRf` 1:1; a 2:1 ratio is that bug returning.
+- **Remote DoS fixed**: an unvalidated device-controlled RX length could
+  panic the driver into its `loop {}` handler from any LAN host.
+
+## Open review
+
+`phase-1c/wire-format-derived` is ~800 lines across four concerns
+(derived wire formats + INV-24, DMA correctness + INV-25, interrupts +
+Ctrl-R, the volatile fix). Past the PR-size rule and worth splitting
+before merge.
+
+## The previous milestone
 
 **2026-07: synchronous IPC runs cross-tenant on silicon.** Two isolated
 Tier-1 instances completed a PING→PONG rendezvous on the VF2 (seL4-style
