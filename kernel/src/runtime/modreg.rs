@@ -121,28 +121,45 @@ pub fn stage(bytes: &[u8]) -> Result<u8, KernelError> {
     Err(KernelError::OutOfHandles)
 }
 
-/// Verify a staged slot and bring it up as a Tier-1 tenant.
+/// Which cap set a spawned module receives. `Tenant` is the default
+/// minimal set (stdout + exit); `Guard` adds one `EventLog` READ cap.
+/// A stopgap discriminant until the Supervisor derives the cap set
+/// from a signed manifest (agents brick 4) — see
+/// `cap::boot::install_tier1_guard`.
+#[derive(Clone, Copy)]
+pub enum Role {
+    /// Minimal authority: stdout + exit.
+    Tenant,
+    /// Minimal authority plus `EventLog` READ (a guard agent).
+    Guard,
+}
+
+/// Verify a staged slot and bring it up with the minimal tenant cap
+/// set. See [`spawn_as`].
+pub fn spawn(slot: u8) -> Result<u8, KernelError> {
+    spawn_as(slot, Role::Tenant)
+}
+
+/// Verify a staged slot and bring it up as a Tier-1 tenant with the
+/// cap set implied by `role`.
 ///
 /// The INV-11/INV-13 gate for runtime code: the envelope's ed25519
 /// signature is checked against the kernel's baked verifying key
 /// *before* any byte of it is treated as a module. A bad signature
-/// leaves the slot `Staged` (the operator can inspect), returns
-/// `BadWasm`, and nothing was registered.
+/// leaves the slot `Staged`, emits `SpawnRejected`, returns `BadWasm`,
+/// and nothing is registered.
 ///
 /// # Contract
 ///
 /// - Precondition: `slot` was returned by [`stage`] and not yet
-///   spawned; the scheduler and cap system are initialized
-///   (`cap::boot::init_root_caps` has run).
-/// - Postcondition: on `Ok(pid)`, the tenant is `Ready` in the
-///   scheduler with the minimal cap set and will run on the next
-///   `sched::run` pass exactly like a baked tenant.
+///   spawned; scheduler and cap system are initialized.
+/// - Postcondition: on `Ok(pid)`, the tenant is `Ready` with the cap
+///   set implied by `role` and runs on the next `sched::run` pass.
 /// - Errors: `InvalidArgument` (bad slot / not staged), `BadWasm`
-///   (envelope/signature — `sign::verify` collapses all signature
-///   failure modes into one, deliberately), `OutOfHandles` (no free
-///   proc_id), plus anything `sched::register_tenant` returns.
+///   (signature), `OutOfHandles` (no free proc_id), plus anything
+///   `sched::register_tenant` returns.
 /// - Panics: never.
-pub fn spawn(slot: u8) -> Result<u8, KernelError> {
+pub fn spawn_as(slot: u8, role: Role) -> Result<u8, KernelError> {
     let idx = slot as usize;
     if idx >= DYN_SLOTS {
         return Err(KernelError::InvalidArgument);
@@ -182,7 +199,10 @@ pub fn spawn(slot: u8) -> Result<u8, KernelError> {
     };
 
     let proc_id = alloc_proc_id()?;
-    crate::cap::boot::install_tier1_dynamic(proc_id)?;
+    match role {
+        Role::Tenant => crate::cap::boot::install_tier1_dynamic(proc_id)?,
+        Role::Guard => crate::cap::boot::install_tier1_guard(proc_id)?,
+    }
     sched::register_tenant(proc_id, Tier::One, ModuleId::Dynamic(slot))?;
 
     // SAFETY: INV-1 + INV-8.
@@ -275,6 +295,13 @@ pub fn self_test_spawn() -> Result<u8, KernelError> {
             }
         }
     }
+
+    // Spawn the guard agent FIRST so it is already watching when the
+    // tenant below is staged and spawned — its own spawn, and the
+    // tenant's, appear in the stream it reads.
+    let guard_slot = stage(crate::runtime::hello_signed_blob::GUARD_SIGNED)?;
+    let guard_pid = spawn_as(guard_slot, Role::Guard)?;
+    kprintln!("[modreg] guard agent spawned as pid {}", guard_pid);
 
     let slot = stage(crate::runtime::hello_signed_blob::HELLO_SIGNED)?;
     let pid = spawn(slot)?;

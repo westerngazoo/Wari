@@ -352,6 +352,37 @@ static mut BOOT_TIER1_EPS: Option<(u16, u16)> = None;
 /// - Errors: `KernelError::InvalidArgument` if `proc_id` is out of
 ///   range or boot cap-init has not run.
 /// - Panics: never.
+/// Install a **guard agent's** cap set: the minimal Tier-1 grants
+/// (stdout + exit) PLUS an `EventLog` READ cap at `SLOT_EVENTLOG`.
+///
+/// A guard is a dynamic tenant like any other — it earns exactly one
+/// authority beyond the default, and that authority is observation of
+/// the audit stream, nothing else. This dedicated installer is the
+/// stopgap until the Supervisor's manifest-driven grants land
+/// (agents brick 4): at that point a guard's `EventLog` cap comes
+/// from its signed manifest + a Supervisor decision, and this
+/// function folds into that path. Documented so the special-case is
+/// a decision, not a smell.
+///
+/// # Contract / Errors / Panics: as [`install_tier1_dynamic`].
+pub fn install_tier1_guard(proc_id: u8) -> Result<(), KernelError> {
+    install_tier1_dynamic(proc_id)?;
+    // SLOT_EVENTLOG kept in sync with runtime::wasi::SLOT_EVENTLOG.
+    const SLOT_EVENTLOG: u8 = 4;
+    let cs = cspaces();
+    // EventLog is a singleton facility (one kernel ring), so the cap
+    // names authority, not a pool object: pool_index is unused, and
+    // `check_cap` validates kind + rights only.
+    install_root_cap(
+        &mut cs[proc_id as usize],
+        SLOT_EVENTLOG,
+        ObjectKind::EventLog,
+        0,
+        CAP_RIGHT_READ,
+    );
+    Ok(())
+}
+
 pub fn install_tier1_dynamic(proc_id: u8) -> Result<(), KernelError> {
     if (proc_id as usize) >= super::cspace::MAX_PROCS {
         return Err(KernelError::InvalidArgument);

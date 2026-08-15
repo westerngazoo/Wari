@@ -1,0 +1,28 @@
+[package]
+name = "wari-guard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Wari's first guard agent — a Tier-1 daemon that watches the kernel audit event stream."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Decode audit records with the SAME crate the kernel encodes with —
+# one source of truth for the Event layout across the trust boundary
+# (INV-24). And the manifest crate for the signed-load cross-check.
+wari-events = { path = "../../wari-events" }
+wari-driver-iface = { path = "../../driver-iface" }
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+lto = true
+strip = true

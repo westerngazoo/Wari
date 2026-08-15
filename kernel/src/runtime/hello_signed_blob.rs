@@ -16,3 +16,8 @@
 
 /// The signed envelope: `pubkey(32) ‖ signature(64) ‖ wasm payload`.
 pub static HELLO_SIGNED: &[u8] = include_bytes!("../../../build/apps/hello.signed.wasm");
+
+/// The signed guard-agent envelope — same envelope format, built and
+/// signed by `scripts/build.sh` step 2. Embedded so the boot self-test
+/// can spawn the guard without a network transport.
+pub static GUARD_SIGNED: &[u8] = include_bytes!("../../../build/apps/guard.signed.wasm");
