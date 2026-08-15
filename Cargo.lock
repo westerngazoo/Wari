@@ -910,6 +910,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wari-mcp"
+version = "0.0.1"
+
+[[package]]
 name = "wari-mem"
 version = "0.0.1"
 

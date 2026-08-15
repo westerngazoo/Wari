@@ -29,6 +29,7 @@ members = [
     "wari-sched",
     "wari-validate",
     "wari-net-wire",
+    "wari-mcp",
     "wasi",
     "kernel",
     "apps/hello",
