@@ -30,6 +30,13 @@ pub enum BlockReason {
     /// to (`call` with no receiver ready). The kernel promotes this to
     /// `ReplyWait` once a receiver takes the message.
     CallWait,
+    /// Blocked in `event_read` with the audit stream caught up: waiting
+    /// for the next `events::emit` to append a record and wake it. Not
+    /// queued on any Endpoint — the waiter set lives in
+    /// `runtime::events`, and the endpoint-revoke sweep never matches
+    /// it (its `ep_idx` is the reserved sentinel). This is what turns a
+    /// guard agent from a busy-poller into a zero-CPU daemon.
+    EventWait,
 }
 
 /// What the *caller* of the op does after the pure decision, when a peer
