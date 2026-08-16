@@ -541,4 +541,73 @@ mod tests {
         assert_eq!(as_str(obj_get_raw(obj, b"a").unwrap()).unwrap(), b"}{,");
         assert_eq!(as_i64(obj_get_raw(obj, b"d").unwrap()).unwrap(), 3);
     }
+
+    /// Corpus smoke test — the dependency-free regression net that
+    /// stands in for the cargo-fuzz `fuzz_mcp_parse_request` target on
+    /// stable CI. cargo-fuzz needs nightly (see `tests/fuzz/README.md`);
+    /// this keeps [`parse_request`]'s "# Panics: never" contract under
+    /// continuous guard on the pinned stable toolchain. Every entry is a
+    /// body an attacker could POST to the MCP endpoint; the property is
+    /// that the parser *returns* (Ok or Err) for all of them — an abort
+    /// is the only failure. Grouped by attack class so a future crash
+    /// traces to a category.
+    #[test]
+    fn corpus_smoke_parse_request_never_panics() {
+        const CORPUS: &[&[u8]] = &[
+            // ── Empty and all-one-byte ──────────────────────────────
+            b"",
+            b"\0\0\0\0\0\0\0\0",
+            b"{{{{{{{{{{{{{{{{",
+            b"}}}}}}}}}}}}}}}}",
+            b"[[[[[[[[[[[[[[[[",
+            b"\"\"\"\"\"\"\"\"",
+            b",,,,,,,,,,,,,,,,",
+            b"................",
+            b"                ",
+            b"\xff\xff\xff\xff\xff\xff\xff\xff",
+            // ── Truncations of a valid request ──────────────────────
+            b"{",
+            br#"{"jsonrpc":"2.0""#,
+            br#"{"jsonrpc":"2.0","id":1"#,
+            br#"{"jsonrpc":"2.0","id":1,"method":"#,
+            br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"#,
+            // ── Depth bomb (20 nested arrays > MAX_DEPTH = 16) ──────
+            br#"{"jsonrpc":"2.0","method":"m","params":[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]}"#,
+            // ── Number / id attacks ─────────────────────────────────
+            br#"{"jsonrpc":"2.0","id":99999999999999999999,"method":"m"}"#,
+            br#"{"jsonrpc":"2.0","id":-99999999999999999999,"method":"m"}"#,
+            br#"{"jsonrpc":"2.0","id":1.5,"method":"m"}"#,
+            br#"{"jsonrpc":"2.0","id":1e400,"method":"m"}"#,
+            br#"{"jsonrpc":"2.0","id":-,"method":"m"}"#,
+            // ── Escapes and unterminated strings ────────────────────
+            br#"{"jsonrpc":"2.0","method":"a\tb"}"#,
+            br#"{"jsonrpc":"2.0","method":"unterminated"#,
+            br#"{"jsonrpc":"2.0","method":"trailing\"#,
+            b"{\"jsonrpc\":\"2.0\",\"method\":\"\xff\xfe\"}",
+            // ── Structural refusals ─────────────────────────────────
+            b"[1,2,3]",
+            br#"{"method":"m"}"#,                  // missing jsonrpc
+            br#"{"jsonrpc":"1.0","method":"m"}"#,  // wrong version
+            br#"{"jsonrpc":"2.0","method":"m"} x"#, // trailing garbage
+            b"42",
+            b"null",
+            br#"{"jsonrpc":"2.0","method":"m","#, // trailing comma, truncated
+        ];
+        let mut seen = 0usize;
+        for input in CORPUS {
+            // Exercises the `parse_request` contract's "# Panics: never":
+            // any Ok/Err outcome is fine, an abort is not.
+            let _ = parse_request(input);
+            seen += 1;
+        }
+        assert_eq!(seen, CORPUS.len());
+
+        // Truncation at *every* byte offset of a deeply-shaped valid
+        // body — the on-the-wire reality of a partial recv. No panic.
+        let body =
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"a":[1,2,{"b":"c"}]}}}"#;
+        for cut in 0..=body.len() {
+            let _ = parse_request(&body[..cut]);
+        }
+    }
 }
