@@ -95,6 +95,15 @@ pub enum ObjectKind {
     /// Tier-2 net driver and granted to the calling Tier-1 tenant
     /// via cap-IPC. Added in PR Net-2.
     Socket = 6,
+    /// Read authority over the kernel audit event stream
+    /// (`kernel/src/runtime/events.rs`). A **singleton facility**,
+    /// not a pool object: there is one event ring, so this cap
+    /// names authority, not an allocation — `check_cap` validates
+    /// kind + rights and the host fn reads the ring directly. Held
+    /// only by guard agents (Phase-2 resident security daemons);
+    /// granted explicitly, never in the default dynamic-tenant set.
+    /// Added with the guard-agent brick.
+    EventLog = 10,
     // Reserved Phase 2+: Tcb = 7, AsidPool = 8, IrqHandler = 9, ...
 }
 

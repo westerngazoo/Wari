@@ -69,7 +69,7 @@ trap 'echo ""; echo "!! BUILD FAILED at step: $STEP (build number NOT advanced)"
 # ── args ────────────────────────────────────────────────────────
 PROFILE="${1:-}"
 shift || true
-PROGRAMS="hello"
+PROGRAMS="hello,guard"
 BUMP=1
 PUBLISH=0
 while [ $# -gt 0 ]; do

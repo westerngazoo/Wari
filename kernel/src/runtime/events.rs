@@ -79,6 +79,49 @@ pub fn recorded() -> u64 {
     unsafe { (*addr_of!(STATE)).next_seq }
 }
 
+/// Status returned to a reader (guard agent) alongside an optional
+/// record. Mirrors `wari_events::ReadPlan` but flattened for the
+/// host-fn ABI: the WASM side gets a small integer and a 16-byte
+/// buffer, not a Rust enum.
+pub enum ReadResult {
+    /// No new record; nothing written. WASM status 1.
+    UpToDate,
+    /// A record is available; caller advances to `event.seq + 1`.
+    /// WASM status 0.
+    Record(Event),
+    /// The reader lagged; `event` is the OLDEST still-available
+    /// record. The WASM side computes the gap as
+    /// `event.seq - its_cursor`. WASM status 2.
+    Lagged(Event),
+}
+
+/// Read the record a guard agent's `cursor` points at.
+///
+/// Pure with respect to the ring — reads only, never advances the
+/// writer. The cap gate lives at the host-fn call site
+/// (`ObjectKind::EventLog` + READ); this function assumes authority
+/// was already checked.
+///
+/// # Contract
+/// - `cursor` is the next sequence the reader wants.
+/// - Returns [`ReadResult::UpToDate`] if the reader is caught up (or
+///   ahead — a corrupt cursor is not trusted, per `wari_events`).
+/// - Panics: never.
+pub fn read_at(cursor: u64) -> ReadResult {
+    // SAFETY: INV-1 read of kernel-owned statics; no concurrent
+    // writer under single-hart + the emit-context rule.
+    let (next_seq, ring) = unsafe { ((*addr_of!(STATE)).next_seq, &*addr_of!(RING)) };
+    match wari_events::read_plan(cursor, next_seq) {
+        wari_events::ReadPlan::UpToDate => ReadResult::UpToDate,
+        wari_events::ReadPlan::Read { slot, .. } => ReadResult::Record(ring[slot]),
+        wari_events::ReadPlan::Lagged { resume_seq, .. } => {
+            // resume_seq is the oldest surviving record's sequence.
+            let slot = (resume_seq as usize) & (RING_CAPACITY - 1);
+            ReadResult::Lagged(ring[slot])
+        }
+    }
+}
+
 /// One-line boot-trace summary plus the tail of the stream, printed
 /// when the scheduler drains. This is the integration test's
 /// observation point until the guard-agent read path lands, and it

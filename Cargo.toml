@@ -35,6 +35,7 @@ members = [
     "wasi",
     "kernel",
     "apps/hello",
+    "apps/guard",
     "drivers/uart",
     "drivers/net",
     "tests/integration",

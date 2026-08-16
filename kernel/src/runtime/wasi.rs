@@ -359,7 +359,95 @@ pub fn register_wasi_host_fns(
         )
         .map_err(|_| KernelError::BadWasm)?;
 
+    // event_read — the guard agent's read path into the audit stream.
+    //
+    // Gated on an `EventLog` READ cap at SLOT_EVENTLOG: a generic
+    // dynamic tenant does NOT hold one (it gets only stdout+exit), so
+    // this host fn is invisible to everything but a guard the
+    // Supervisor deliberately granted. The read is observation only —
+    // there is no event_write, and nothing about the ring's contents
+    // can be altered through this surface.
+    linker
+        .func_wrap(
+            "wari",
+            "event_read",
+            move |mut caller: Caller<'_, Tier1HostState>,
+                  cursor_lo: u32,
+                  cursor_hi: u32,
+                  out_ptr: u32|
+                  -> i32 { event_read_impl(&mut caller, pid, cursor_lo, cursor_hi, out_ptr) },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
     Ok(())
+}
+
+/// Slot in a guard's CSpace holding its `EventLog` cap. Re-exported
+/// from `cap::boot` so the grant site and this check site share ONE
+/// definition and cannot drift.
+pub use crate::cap::boot::SLOT_EVENTLOG;
+
+/// `wari::event_read(cursor_lo, cursor_hi, out_ptr) -> i32`.
+///
+/// Reconstructs the u64 cursor, checks the caller holds an
+/// `EventLog` READ cap, and — when a record is available — writes a
+/// 16-byte `wari_events::Event` (little-endian, `repr(C)`) into the
+/// caller's linear memory at `out_ptr`.
+///
+/// # Returns
+/// - `0`  a record was written; advance the cursor to `event.seq + 1`.
+/// - `1`  up to date; nothing written.
+/// - `2`  lagged; the oldest surviving record was written — the gap
+///   is `event.seq - your_cursor`.
+/// - `E_PERM` (-1)  no `EventLog` cap.
+/// - `E_NOMEM` (-3) linear memory export missing or `out_ptr` OOB.
+fn event_read_impl(
+    caller: &mut Caller<'_, Tier1HostState>,
+    pid: u8,
+    cursor_lo: u32,
+    cursor_hi: u32,
+    out_ptr: u32,
+) -> i32 {
+    use crate::cap::{check_cap, ObjectKind, CAP_RIGHT_READ};
+    use crate::runtime::events::{read_at, ReadResult};
+
+    // `wari::` errno convention: negative on failure, distinct from
+    // the positive status codes 0/1/2.
+    const E_PERM: i32 = -1;
+    const E_FAULT: i32 = -3;
+
+    if check_cap(pid, SLOT_EVENTLOG, ObjectKind::EventLog, CAP_RIGHT_READ).is_err() {
+        return E_PERM;
+    }
+    let cursor = ((cursor_hi as u64) << 32) | (cursor_lo as u64);
+    let event = match read_at(cursor) {
+        ReadResult::UpToDate => return 1,
+        ReadResult::Record(e) => e,
+        ReadResult::Lagged(e) => {
+            return write_event(caller, out_ptr, &e).map_or(E_FAULT, |_| 2);
+        }
+    };
+    write_event(caller, out_ptr, &event).map_or(E_FAULT, |_| 0)
+}
+
+/// Serialize a 16-byte `Event` into the caller's linmem at `off`.
+/// `repr(C)`, little-endian, layout matches `wari_events::Event` and
+/// is decoded by the guard with that same crate (INV-24).
+fn write_event(
+    caller: &mut Caller<'_, Tier1HostState>,
+    off: u32,
+    e: &wari_events::Event,
+) -> Result<(), ()> {
+    let mut buf = [0u8; 16];
+    buf[0..8].copy_from_slice(&e.seq.to_le_bytes());
+    buf[8..10].copy_from_slice(&e.kind.to_le_bytes());
+    buf[10..12].copy_from_slice(&e.a.to_le_bytes());
+    buf[12..16].copy_from_slice(&e.b.to_le_bytes());
+    let memory = caller
+        .get_export("memory")
+        .and_then(|ex| ex.into_memory())
+        .ok_or(())?;
+    memory.write(caller, off as usize, &buf).map_err(|_| ())
 }
 
 /// Size of a WASI Preview 1 `iovec` in linear memory: two `u32`s.

@@ -143,6 +143,8 @@ pub fn revoke(
 pub fn dec_refcount(pools: &mut ObjectPools, kind: ObjectKind, pool_index: u16) {
     match kind {
         ObjectKind::Empty => {}
+        // Singleton facility, no pool object — nothing to refcount.
+        ObjectKind::EventLog => {}
         ObjectKind::Endpoint => {
             if let Some(obj) = pools.endpoints.get_mut(pool_index) {
                 obj.refcount = obj.refcount.saturating_sub(1);
@@ -204,6 +206,8 @@ pub fn dec_refcount(pools: &mut ObjectPools, kind: ObjectKind, pool_index: u16) 
 pub fn inc_refcount(pools: &mut ObjectPools, kind: ObjectKind, pool_index: u16) {
     match kind {
         ObjectKind::Empty => {}
+        // Singleton facility, no pool object — nothing to refcount.
+        ObjectKind::EventLog => {}
         ObjectKind::Endpoint => {
             if let Some(obj) = pools.endpoints.get_mut(pool_index) {
                 obj.refcount = obj.refcount.saturating_add(1);

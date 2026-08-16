@@ -99,6 +99,13 @@ const SLOT_PRIMARY: u8 = 0;
 /// Slot index for the exit cap (Tier-1 only).
 const SLOT_EXIT: u8 = 1;
 
+/// Slot holding a guard agent's `EventLog` READ cap. Distinct from the
+/// demo tenants' SLOT_NET(2)/SLOT_IPC(3): a guard holds neither. The
+/// single source of truth — `runtime::wasi::event_read` checks this
+/// exact slot (it re-exports this const), so the two cannot drift
+/// (adversarial-review finding folded in).
+pub const SLOT_EVENTLOG: u8 = 4;
+
 // ─────────────────────────────────────────────────────────────────
 // init_root_caps
 // ─────────────────────────────────────────────────────────────────
@@ -352,6 +359,35 @@ static mut BOOT_TIER1_EPS: Option<(u16, u16)> = None;
 /// - Errors: `KernelError::InvalidArgument` if `proc_id` is out of
 ///   range or boot cap-init has not run.
 /// - Panics: never.
+/// Install a **guard agent's** cap set: the minimal Tier-1 grants
+/// (stdout + exit) PLUS an `EventLog` READ cap at `SLOT_EVENTLOG`.
+///
+/// A guard is a dynamic tenant like any other — it earns exactly one
+/// authority beyond the default, and that authority is observation of
+/// the audit stream, nothing else. This dedicated installer is the
+/// stopgap until the Supervisor's manifest-driven grants land
+/// (agents brick 4): at that point a guard's `EventLog` cap comes
+/// from its signed manifest + a Supervisor decision, and this
+/// function folds into that path. Documented so the special-case is
+/// a decision, not a smell.
+///
+/// # Contract / Errors / Panics: as [`install_tier1_dynamic`].
+pub fn install_tier1_guard(proc_id: u8) -> Result<(), KernelError> {
+    install_tier1_dynamic(proc_id)?;
+    let cs = cspaces();
+    // EventLog is a singleton facility (one kernel ring), so the cap
+    // names authority, not a pool object: pool_index is unused, and
+    // `check_cap` validates kind + rights only.
+    install_root_cap(
+        &mut cs[proc_id as usize],
+        SLOT_EVENTLOG,
+        ObjectKind::EventLog,
+        0,
+        CAP_RIGHT_READ,
+    );
+    Ok(())
+}
+
 pub fn install_tier1_dynamic(proc_id: u8) -> Result<(), KernelError> {
     if (proc_id as usize) >= super::cspace::MAX_PROCS {
         return Err(KernelError::InvalidArgument);
@@ -362,6 +398,17 @@ pub fn install_tier1_dynamic(proc_id: u8) -> Result<(), KernelError> {
         return Err(KernelError::InvalidArgument);
     };
     let cs = cspaces();
+    // Clear the whole CSpace FIRST, then install only the granted
+    // caps. `install_tier1_caps` writes only the slots it grants, so
+    // without this a proc_id reused after a future reaper reclaims it
+    // would inherit the PRIOR tenant's caps in the untouched slots —
+    // e.g. a guard's EventLog cap surviving into a plain tenant
+    // (found in adversarial review of this brick). No reaper recycles
+    // proc_ids today, so this is forward-safety; it makes the leak
+    // structurally impossible rather than relying on nobody reusing a
+    // slot. `check_cap` is generation-blind, so clearing at grant
+    // time is the durable fix.
+    cs[proc_id as usize] = super::cspace::CSpace::new();
     let tier1_caps = caps_for(Tier::One, ModuleId::Dynamic(0));
     install_tier1_caps(cs, proc_id, &tier1_caps, uart_ipc_ep, kernel_exit_ep);
     Ok(())
