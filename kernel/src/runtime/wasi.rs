@@ -367,6 +367,12 @@ pub fn register_wasi_host_fns(
     // Supervisor deliberately granted. The read is observation only —
     // there is no event_write, and nothing about the ring's contents
     // can be altered through this surface.
+    //
+    // BLOCKING: when the stream is caught up, `event_read_impl` yields
+    // `Err(host(IpcBlock))` instead of returning — the guard suspends
+    // at zero CPU until the next `emit` wakes it. Registered with a
+    // `Result<i32, Error>` signature so wasmi carries the yield, the
+    // same shape as the IPC host fns above.
     linker
         .func_wrap(
             "wari",
@@ -375,7 +381,9 @@ pub fn register_wasi_host_fns(
                   cursor_lo: u32,
                   cursor_hi: u32,
                   out_ptr: u32|
-                  -> i32 { event_read_impl(&mut caller, pid, cursor_lo, cursor_hi, out_ptr) },
+                  -> Result<i32, Error> {
+                event_read_impl(&mut caller, pid, cursor_lo, cursor_hi, out_ptr)
+            },
         )
         .map_err(|_| KernelError::BadWasm)?;
 
@@ -407,27 +415,64 @@ fn event_read_impl(
     cursor_lo: u32,
     cursor_hi: u32,
     out_ptr: u32,
-) -> i32 {
+) -> Result<i32, Error> {
     use crate::cap::{check_cap, ObjectKind, CAP_RIGHT_READ};
-    use crate::runtime::events::{read_at, ReadResult};
+    use crate::runtime::events::{read_at, register_waiter, ReadResult};
 
     // `wari::` errno convention: negative on failure, distinct from
-    // the positive status codes 0/1/2.
+    // the positive status codes 0/1/2. `Ok(rc)` returns to the guard;
+    // `Err(host(IpcBlock))` suspends it.
     const E_PERM: i32 = -1;
     const E_FAULT: i32 = -3;
 
     if check_cap(pid, SLOT_EVENTLOG, ObjectKind::EventLog, CAP_RIGHT_READ).is_err() {
-        return E_PERM;
+        return Ok(E_PERM);
     }
     let cursor = ((cursor_hi as u64) << 32) | (cursor_lo as u64);
     let event = match read_at(cursor) {
-        ReadResult::UpToDate => return 1,
+        ReadResult::UpToDate => {
+            // Caught up: block until `emit` wakes us, rather than
+            // spin. Register in the ring waiter set THEN suspend.
+            //
+            // `register_waiter` cannot return `false`: the set is
+            // sized to `MAX_PROCS`, so there is always room (see
+            // `events::MAX_RING_WAITERS`). The `Ok(1)` arm is a
+            // fail-safe for a future where that ceased to hold — it
+            // degrades to a poll rather than sleeping unwakeably.
+            // Because `Engine::default` runs without fuel, that poll
+            // would busy-spin, which is exactly why the set is sized
+            // so the arm is unreachable.
+            if register_waiter(pid) {
+                return Err(block_on_event_ring(pid));
+            }
+            return Ok(1);
+        }
         ReadResult::Record(e) => e,
         ReadResult::Lagged(e) => {
-            return write_event(caller, out_ptr, &e).map_or(E_FAULT, |_| 2);
+            return Ok(write_event(caller, out_ptr, &e).map_or(E_FAULT, |_| 2));
         }
     };
-    write_event(caller, out_ptr, &event).map_or(E_FAULT, |_| 0)
+    Ok(write_event(caller, out_ptr, &event).map_or(E_FAULT, |_| 0))
+}
+
+/// Mark `pid` blocked on the audit stream and produce the yield error.
+///
+/// Mirrors `ipc::block_and_yield`, minus the message plumbing: an
+/// event waiter delivers no message, so `msg_buf` is deliberately left
+/// at `NO_MSG_BUF` — the resume path's `flush_msg_to_linmem` is then a
+/// no-op for it, and only the ring's `set_resume_value` feeds the
+/// return value back. `ep_idx` is the reserved sentinel so the
+/// endpoint-revoke sweep never matches this waiter.
+fn block_on_event_ring(pid: u8) -> Error {
+    use crate::runtime::tier1_pool::IpcBlock;
+    /// Not a real endpoint index — event waits are queued in
+    /// `runtime::events`, never on an Endpoint.
+    const EVENT_WAIT_SENTINEL: u8 = u8::MAX;
+    let table = crate::sched::processes();
+    if let Some(p) = table[pid as usize].as_mut() {
+        p.block(wari_ipc::BlockReason::EventWait, EVENT_WAIT_SENTINEL);
+    }
+    Error::host(IpcBlock)
 }
 
 /// Serialize a 16-byte `Event` into the caller's linmem at `off`.

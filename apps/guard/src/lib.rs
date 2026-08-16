@@ -13,12 +13,13 @@
 //!
 //! ## Loop shape
 //!
-//! Poll `event_read` from a cursor, printing each record and
-//! advancing. `event_read` returns 1 (up-to-date) when caught up;
-//! the loop keeps polling until a large iteration cap expires, then
-//! reports how many records it saw and exits. A permanent daemon
-//! (restart-on-exit) is the module-registry's job, a later brick —
-//! this proves the read path and the capability gate end to end.
+//! `event_read` from a cursor, printing each record and advancing.
+//! When caught up, `event_read` BLOCKS — the kernel suspends the guard
+//! at zero CPU until the next audit event wakes it — so the daemon
+//! loops forever without spinning and never exits under normal
+//! operation. Surviving a crash (restart-on-exit) is the module
+//! registry's job, a later brick; this proves the blocking read path
+//! and the capability gate end to end.
 //!
 //! ## Records decode with `wari-events`
 //!
@@ -77,14 +78,6 @@ fn print(s: &[u8]) {
     // non-zero errno we ignore.
     let _ = unsafe { wasi::fd_write(1, &iov, 1, &mut nw) };
 }
-
-/// Poll cap — bounds a demo daemon's lifetime without a clock. Kept
-/// modest on purpose: once caught up, the guard busy-polls (no
-/// blocking wait exists yet — that is the notification-wait brick),
-/// so a large cap would hog the CPU for no benefit. A permanent,
-/// event-driven daemon replaces this with a blocking wait + a
-/// restart-on-exit registry flag.
-const POLL_MAX_ITERS: u32 = 2_000_000;
 
 /// Decode a `wari_events::Event` from the 16-byte little-endian
 /// buffer the kernel wrote. Layout is `wari-events`' own, not
@@ -163,10 +156,16 @@ pub extern "C" fn _start() -> ! {
     print(b"[guard] watching the audit stream\r\n");
 
     let mut cursor: u64 = 0;
-    let mut seen: u64 = 0;
     let mut buf = [0u8; 16];
-    let mut i: u32 = 0;
-    while i < POLL_MAX_ITERS {
+    // A real daemon: `event_read` BLOCKS when the stream is caught up —
+    // the kernel suspends us at zero CPU until the next `emit` wakes
+    // us. So this loop is unbounded and never spins. When every other
+    // tenant has exited, we are the only process left, Blocked on the
+    // ring; the scheduler returns to the kernel idle loop and the
+    // system rests with Ctrl-R live and the guard asleep. That is the
+    // whole point of the brick: a watcher that costs nothing while
+    // idle, versus the busy-poll it replaced.
+    loop {
         let lo = cursor as u32;
         let hi = (cursor >> 32) as u32;
         // SAFETY: host fn; EventLog-cap-gated; writes 16 bytes into
@@ -182,10 +181,6 @@ pub extern "C" fn _start() -> ! {
         // `mut`-vs-`const` distinction per se.
         let rc = unsafe { wasi::event_read(lo, hi, buf.as_mut_ptr() as u32) };
         match rc {
-            1 => {
-                // Up to date; keep polling.
-                i = i.wrapping_add(1);
-            }
             0 | 2 => {
                 let e = decode(&buf);
                 if rc == 2 {
@@ -198,22 +193,21 @@ pub extern "C" fn _start() -> ! {
                 }
                 print_record(&e);
                 cursor = e.seq + 1;
-                seen += 1;
             }
+            // 1 = woken after a block (or, only if too many guards are
+            // blocked at once, the kernel's degraded up-to-date
+            // fallback). Either way: loop and re-read — a fresh record
+            // is now waiting for us.
+            1 => {}
             _ => {
-                print(b"[guard] read err\r\n");
+                print(b"[guard] read err, exiting\r\n");
                 break;
             }
         }
     }
 
-    let mut line = *b"[guard] idle, saw ..................... records, exiting\r\n";
-    let end = format_u64(&mut line, 18, seen);
-    let tail = b" records, exiting\r\n";
-    line[end..end + tail.len()].copy_from_slice(tail);
-    print(&line[..end + tail.len()]);
-
-    // SAFETY: extern host fn; `-> !`, traps the instance.
+    // SAFETY: extern host fn; `-> !`, traps the instance. Reached only
+    // on a read error — the healthy daemon never leaves the loop.
     unsafe { wasi::proc_exit(0) }
 }
 
