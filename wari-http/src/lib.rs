@@ -545,6 +545,74 @@ mod tests {
         assert!(respond(&mut tiny, Status::Ok, b"t", b"body").is_none());
     }
 
+    /// Corpus smoke test — the dependency-free regression net that
+    /// stands in for the cargo-fuzz `fuzz_http_parse` target on stable
+    /// CI. cargo-fuzz needs nightly (see `tests/fuzz/README.md`); this
+    /// keeps the "# Panics: never" contract of [`parse`] under
+    /// continuous guard on the pinned stable toolchain. Every entry is
+    /// a byte pattern an unauthenticated peer could put on the wire;
+    /// the property is that the parser *returns* (Ok or Err) for all of
+    /// them — an abort is the only failure. Grouped by attack class so
+    /// a future crash traces to a category.
+    #[test]
+    fn corpus_smoke_parse_never_panics() {
+        const CORPUS: &[&[u8]] = &[
+            // ── Empty and all-one-byte ──────────────────────────────
+            b"",
+            b"\0\0\0\0\0\0\0\0",
+            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            b"                                ",
+            b"\r\r\r\r\r\r\r\r",
+            b"\n\n\n\n\n\n\n\n",
+            b"::::::::::::::::",
+            b"\xff\xff\xff\xff\xff\xff\xff\xff",
+            // ── Truncations of a valid POST ─────────────────────────
+            b"P",
+            b"POST /mcp HTTP/1.1",
+            b"POST /mcp HTTP/1.1\r\n",
+            b"POST /mcp HTTP/1.1\r\ncontent-length: 4\r\n",
+            b"POST /mcp HTTP/1.1\r\ncontent-length: 4\r\n\r\n",
+            b"POST /mcp HTTP/1.1\r\ncontent-length: 4\r\n\r\nbo",
+            // ── Invalid UTF-8 in target / header / body ─────────────
+            b"GET /\xff\xfe\xfd HTTP/1.1\r\n\r\n",
+            b"GET / HTTP/1.1\r\nx-\xff: \xfe\r\n\r\n",
+            b"POST / HTTP/1.1\r\ncontent-length: 2\r\n\r\n\xff\xfe",
+            // ── Content-Length attacks ──────────────────────────────
+            b"POST / HTTP/1.1\r\ncontent-length: 99999999999999999999\r\n\r\n",
+            b"POST / HTTP/1.1\r\ncontent-length: -1\r\n\r\n",
+            b"POST / HTTP/1.1\r\ncontent-length: 0x10\r\n\r\n",
+            b"POST / HTTP/1.1\r\ncontent-length: \r\n\r\n",
+            b"POST / HTTP/1.1\r\ncontent-length: 1\r\ncontent-length: 2\r\n\r\nx",
+            // ── Request-smuggling shapes ────────────────────────────
+            b"GET / HTTP/1.1\r\na: b\r\n c\r\n\r\n", // folded continuation
+            b"GET / HTTP/1.1\r\nx : v\r\n\r\n",       // space in name
+            b"GET / HTTP/1.1\r\n: novalue\r\n\r\n",   // empty name
+            b"GET / HTTP/1.1\r\nnocolon\r\n\r\n",     // header without colon
+            // ── Malformed request lines ─────────────────────────────
+            b"BREW /pot HTTP/1.1\r\n\r\n", // unknown method
+            b"GET  HTTP/1.1\r\n\r\n",       // empty target
+            b"GET / HTTP/9.9\r\n\r\n",      // bad version
+            b"GET /a b HTTP/1.1\r\n\r\n",   // space in target
+            b"\r\n\r\n",                    // bare CRLFs
+            b"GET",                        // a bare method fragment
+        ];
+        let mut seen = 0usize;
+        for input in CORPUS {
+            // Exercises the `parse` contract's "# Panics: never": any
+            // Ok/Err outcome is fine, an abort is not.
+            let _ = parse(input);
+            seen += 1;
+        }
+        assert_eq!(seen, CORPUS.len());
+
+        // Truncation at *every* byte offset of a body-carrying request —
+        // the on-the-wire reality of incremental recv. None may panic.
+        let wire = b"POST /mcp HTTP/1.1\r\ncontent-length: 4\r\n\r\nbody";
+        for cut in 0..=wire.len() {
+            let _ = parse(&wire[..cut]);
+        }
+    }
+
     // no_std-friendly test helpers (no Vec).
     fn alloc_free_concat(head: &[u8]) -> ([u8; 512], usize) {
         let mut buf = [0u8; 512];
