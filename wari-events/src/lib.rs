@@ -62,6 +62,13 @@ pub enum EventKind {
     /// A Tier-1 tenant faulted (trap, invalid WASM behavior).
     /// `a` = proc_id, `b` = 0.
     TenantFaulted = 5,
+    /// The Supervisor attenuated a spawn's requested authority: the
+    /// module asked for more than its ceiling allowed, and the excess
+    /// was withheld. `a` = proc_id, `b` = the DENIED `GrantSpec` bits.
+    /// A security-relevant record every guard exists to see — the
+    /// system telling you a module reached for authority it did not
+    /// get.
+    GrantAttenuated = 6,
     // Append-only. New kinds get the next discriminant.
 }
 
@@ -76,6 +83,7 @@ impl EventKind {
             3 => Some(EventKind::SpawnRejected),
             4 => Some(EventKind::TenantExited),
             5 => Some(EventKind::TenantFaulted),
+            6 => Some(EventKind::GrantAttenuated),
             _ => None,
         }
     }

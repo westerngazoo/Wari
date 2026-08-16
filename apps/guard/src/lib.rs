@@ -100,6 +100,7 @@ fn kind_name(kind: u16) -> &'static [u8] {
         Some(EventKind::SpawnRejected) => b"SPAWN-REJECTED",
         Some(EventKind::TenantExited) => b"tenant-exited",
         Some(EventKind::TenantFaulted) => b"TENANT-FAULTED",
+        Some(EventKind::GrantAttenuated) => b"GRANT-ATTENUATED",
         None => b"unknown-kind",
     }
 }

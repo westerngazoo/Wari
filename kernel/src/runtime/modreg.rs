@@ -23,16 +23,18 @@
 //!
 //! ## Authority story (read this before adding a cap)
 //!
-//! A dynamic tenant gets `TIER1_DEFAULT_CAPS` only: stdout and exit.
-//! No Net cap, no IPC endpoint, no sockets. It can print and it can
-//! leave. Anything more must be granted explicitly by a later
-//! Supervisor decision (the AI-layer design in
-//! `docs/ai-os-assistant-design.md`), never by default. The
-//! self-test below demonstrates the point deliberately: it spawns a
-//! third instance of the *same* hello binary the baked tenants run,
-//! and every privileged call it makes (IPC, sockets) is refused by
-//! the capability system while the process still runs and exits
-//! cleanly. Same code, different authority.
+//! A dynamic tenant gets the baseline (stdout + exit) plus exactly the
+//! optional authorities the **Supervisor grants** — `requested &
+//! ceiling`, computed in [`spawn_with_grants`] against
+//! `wari_cap::grants` (agents brick 4, the AI-layer design in
+//! `docs/ai-os-assistant-design.md`). A module cannot obtain authority
+//! the ceiling withholds, however it asks: attenuation is monotone
+//! (INV-10 at the grant point). The self-test demonstrates all three
+//! shapes: a plain tenant (no optional authority), a guard (requests
+//! and receives `EVENTLOG`), and a greedy module (requests
+//! `EVENTLOG + NET`, receives only `EVENTLOG` — `NET` is denied and a
+//! `GrantAttenuated` audit record names the denial for the guard to
+//! see). Same binary, different authority, decided by policy.
 //!
 //! ## What this slice is NOT
 //!
@@ -45,6 +47,7 @@
 
 use core::ptr::{addr_of, addr_of_mut};
 
+use crate::cap::grants::GrantSpec;
 use crate::cap::{ModuleId, Tier};
 use crate::error::KernelError;
 use crate::runtime::sign;
@@ -121,45 +124,57 @@ pub fn stage(bytes: &[u8]) -> Result<u8, KernelError> {
     Err(KernelError::OutOfHandles)
 }
 
-/// Which cap set a spawned module receives. `Tenant` is the default
-/// minimal set (stdout + exit); `Guard` adds one `EventLog` READ cap.
-/// A stopgap discriminant until the Supervisor derives the cap set
-/// from a signed manifest (agents brick 4) — see
-/// `cap::boot::install_tier1_guard`.
-#[derive(Clone, Copy)]
-pub enum Role {
-    /// Minimal authority: stdout + exit.
-    Tenant,
-    /// Minimal authority plus `EventLog` READ (a guard agent).
-    Guard,
-}
+/// The Supervisor's grant ceiling for a runtime-loaded module: the
+/// most optional authority any dynamic tenant may hold, whatever it
+/// requests. Today that is observation of the audit stream (a module
+/// may be a guard) and nothing else — outward authority like `NET`
+/// requires an attestation the signing pipeline does not yet produce,
+/// so the ceiling withholds it and a module that requests `NET` is
+/// attenuated down. This constant *is* the policy; widening it is a
+/// deliberate Supervisor decision, not an incidental edit.
+const DYNAMIC_CEILING: GrantSpec = GrantSpec::EVENTLOG;
 
-/// Verify a staged slot and bring it up with the minimal tenant cap
-/// set. See [`spawn_as`].
+/// Verify a staged slot and bring it up as a plain tenant (no optional
+/// authority — stdout + exit only). See [`spawn_with_grants`].
 pub fn spawn(slot: u8) -> Result<u8, KernelError> {
-    spawn_as(slot, Role::Tenant)
+    spawn_with_grants(slot, GrantSpec::EMPTY)
 }
 
-/// Verify a staged slot and bring it up as a Tier-1 tenant with the
-/// cap set implied by `role`.
+/// Verify a staged slot and bring it up requesting `requested`
+/// authority. Thin wrapper preserved for call sites that name a class
+/// of module rather than a bitset.
+pub fn spawn_as(slot: u8, requested: GrantSpec) -> Result<u8, KernelError> {
+    spawn_with_grants(slot, requested)
+}
+
+/// Verify a staged slot, attenuate its `requested` authority against
+/// the Supervisor ceiling, and bring it up as a Tier-1 tenant holding
+/// exactly the granted subset.
 ///
-/// The INV-11/INV-13 gate for runtime code: the envelope's ed25519
-/// signature is checked against the kernel's baked verifying key
-/// *before* any byte of it is treated as a module. A bad signature
-/// leaves the slot `Staged`, emits `SpawnRejected`, returns `BadWasm`,
-/// and nothing is registered.
+/// This is the Supervisor's grant point (agents brick 4). Two gates,
+/// in order:
+///   1. **Signature** (INV-11/INV-13): the ed25519 envelope is checked
+///      before any byte is treated as a module. A bad signature emits
+///      `SpawnRejected`, returns `BadWasm`, registers nothing.
+///   2. **Attenuation** (INV-10 at the grant boundary): the module
+///      receives `requested & DYNAMIC_CEILING` — never more than it
+///      asked for, never more than policy allows. If the ceiling
+///      withheld anything, a `GrantAttenuated` audit record names the
+///      denied bits, so a guard sees a module reach for authority it
+///      did not get.
 ///
 /// # Contract
 ///
 /// - Precondition: `slot` was returned by [`stage`] and not yet
 ///   spawned; scheduler and cap system are initialized.
-/// - Postcondition: on `Ok(pid)`, the tenant is `Ready` with the cap
-///   set implied by `role` and runs on the next `sched::run` pass.
+/// - Postcondition: on `Ok(pid)`, the tenant is `Ready` holding
+///   stdout + exit plus the *granted* (attenuated) optional
+///   authorities, and runs on the next `sched::run` pass.
 /// - Errors: `InvalidArgument` (bad slot / not staged), `BadWasm`
 ///   (signature), `OutOfHandles` (no free proc_id), plus anything
 ///   `sched::register_tenant` returns.
 /// - Panics: never.
-pub fn spawn_as(slot: u8, role: Role) -> Result<u8, KernelError> {
+pub fn spawn_with_grants(slot: u8, requested: GrantSpec) -> Result<u8, KernelError> {
     let idx = slot as usize;
     if idx >= DYN_SLOTS {
         return Err(KernelError::InvalidArgument);
@@ -199,9 +214,19 @@ pub fn spawn_as(slot: u8, role: Role) -> Result<u8, KernelError> {
     };
 
     let proc_id = alloc_proc_id()?;
-    match role {
-        Role::Tenant => crate::cap::boot::install_tier1_dynamic(proc_id)?,
-        Role::Guard => crate::cap::boot::install_tier1_guard(proc_id)?,
+    // Attenuate: the module gets requested ∩ ceiling — never more.
+    let granted = requested.attenuate(DYNAMIC_CEILING);
+    crate::cap::boot::install_tier1_grants(proc_id, granted)?;
+    // Surface any withheld authority to the audit stream BEFORE the
+    // SpawnVerified record, so a guard sees the denial attributed to
+    // this proc_id in causal order. `b` carries the denied bits.
+    let denied = requested.denied(granted);
+    if !denied.is_empty() {
+        crate::runtime::events::emit(
+            wari_events::EventKind::GrantAttenuated,
+            proc_id as u16,
+            denied.bits(),
+        );
     }
     sched::register_tenant(proc_id, Tier::One, ModuleId::Dynamic(slot))?;
 
@@ -300,7 +325,7 @@ pub fn self_test_spawn() -> Result<u8, KernelError> {
     // tenant below is staged and spawned — its own spawn, and the
     // tenant's, appear in the stream it reads.
     let guard_slot = stage(crate::runtime::hello_signed_blob::GUARD_SIGNED)?;
-    let guard_pid = spawn_as(guard_slot, Role::Guard)?;
+    let guard_pid = spawn_as(guard_slot, GrantSpec::EVENTLOG)?;
     kprintln!("[modreg] guard agent spawned as pid {}", guard_pid);
 
     let slot = stage(crate::runtime::hello_signed_blob::HELLO_SIGNED)?;
@@ -310,6 +335,19 @@ pub fn self_test_spawn() -> Result<u8, KernelError> {
         slot,
         crate::runtime::hello_signed_blob::HELLO_SIGNED.len(),
         pid,
+    );
+
+    // Attenuation demo (Supervisor grants): stage the same hello binary
+    // but request MORE than the ceiling allows — EventLog AND Net. The
+    // Supervisor grants EventLog (within the ceiling) and DENIES Net,
+    // emitting a GrantAttenuated record the guard above prints. A module
+    // cannot obtain authority policy withholds, however it asks.
+    let greedy_slot = stage(crate::runtime::hello_signed_blob::HELLO_SIGNED)?;
+    let requested = GrantSpec::EVENTLOG.with(GrantSpec::NET);
+    let greedy_pid = spawn_with_grants(greedy_slot, requested)?;
+    kprintln!(
+        "[modreg] grant: pid {} requested EVENTLOG+NET, ceiling denied NET",
+        greedy_pid,
     );
     Ok(pid)
 }
