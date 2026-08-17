@@ -69,6 +69,14 @@ pub enum EventKind {
     /// system telling you a module reached for authority it did not
     /// get.
     GrantAttenuated = 6,
+    /// A daemon-flagged module terminated and the registry restarted
+    /// it. `a` = the NEW proc_id, `b` = restarts remaining in its
+    /// budget. A resident guard watching this sees its peers heal.
+    DaemonRestarted = 7,
+    /// A daemon exhausted its restart budget and was NOT restarted —
+    /// it crash-looped past the cap. `a` = last proc_id, `b` = 0. The
+    /// record that says "a service is down and staying down".
+    DaemonGaveUp = 8,
     // Append-only. New kinds get the next discriminant.
 }
 
@@ -84,6 +92,8 @@ impl EventKind {
             4 => Some(EventKind::TenantExited),
             5 => Some(EventKind::TenantFaulted),
             6 => Some(EventKind::GrantAttenuated),
+            7 => Some(EventKind::DaemonRestarted),
+            8 => Some(EventKind::DaemonGaveUp),
             _ => None,
         }
     }
