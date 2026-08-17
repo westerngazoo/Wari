@@ -153,6 +153,29 @@ mod tests {
     }
 
     #[test]
+    fn restart_cannot_widen_authority() {
+        // The daemon-lifecycle brick re-installs a restarted daemon's
+        // STORED granted set (already attenuated at spawn) without
+        // re-attenuating. This pins the property that makes that safe:
+        // attenuation is idempotent, so re-processing an
+        // already-granted set can never widen it. A restart therefore
+        // grants exactly what the original spawn did — never more —
+        // for every possible (request, ceiling). (Adversarial review
+        // wf_1b195d06 note N3: the trust-boundary test for the restart
+        // re-grant path.)
+        for r in 0u32..16 {
+            for c in 0u32..16 {
+                let granted = GrantSpec::from_bits(r).attenuate(GrantSpec::from_bits(c));
+                // Re-installing (re-attenuating) the granted set yields
+                // the same set — no widening on restart.
+                assert_eq!(granted.attenuate(GrantSpec::from_bits(c)), granted);
+                // And it is still within the ceiling, trivially.
+                assert_eq!(granted.attenuate(GrantSpec::from_bits(c)).bits() & !c, 0);
+            }
+        }
+    }
+
+    #[test]
     fn contains_and_empty() {
         let s = GrantSpec::EVENTLOG.with(GrantSpec::NET);
         assert!(s.contains(GrantSpec::EVENTLOG));
