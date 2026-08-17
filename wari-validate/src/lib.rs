@@ -177,6 +177,10 @@ pub const fn access_in_windows(addr: usize, width: usize, windows: &[MmioWindow]
     false
 }
 
+/// Per-platform board descriptors (audit blocker B3) — every constant
+/// that differs by SoC, as one record per platform. See `board`.
+pub mod board;
+
 /// Per-platform NIC MMIO window tables — pure data, both platforms,
 /// host-tested. The kernel's `#[cfg(feature)]` shim picks one; the
 /// INV-3 / INV-20 narrowing (exact register set the Tier-2 net driver
