@@ -26,7 +26,7 @@ use wari_mem::page_table::{
 /// QEMU `virt` NS16550 UART base. Matches `mmio::uart_ns16550::UART_BASE`.
 /// Hardcoded here because Phase 0 has no `platform::` module yet (lands in
 /// Phase 1 alongside VF2 support).
-const UART_MMIO_BASE: usize = 0x1000_0000;
+const UART_MMIO_BASE: usize = crate::board::BOARD.uart_base;
 
 /// PLIC MMIO base — Platform-Level Interrupt Controller. Standard
 /// RV64 layout at `0x0c000000`; covers 0x400000 bytes (4 MiB) of
@@ -35,7 +35,7 @@ const UART_MMIO_BASE: usize = 0x1000_0000;
 /// only the first hart's contexts but maps the full window so PLIC
 /// register access from `mmio::plic::*` doesn't fault.
 /// Added in PR Net-1 fix.
-const PLIC_MMIO_BASE: usize = 0x0c00_0000;
+const PLIC_MMIO_BASE: usize = crate::board::BOARD.plic_base;
 const PLIC_MMIO_LEN: usize = 0x40_0000;
 
 /// VirtIO MMIO transport range on QEMU virt — `0x10001000..0x10009000`,

@@ -33,22 +33,18 @@
 
 use super::volatile::VolatilePtr;
 
-/// UART0 base address. Same on QEMU virt and JH7110 — kept as a single
-/// constant; if a future platform diverges, gate this with `cfg` too.
-const UART_BASE: usize = 0x1000_0000;
+/// UART0 base address, from the active board descriptor (B3). It
+/// coincides between QEMU virt and the JH7110 today — which is exactly
+/// why it must be per-board data, not a shared literal a third board
+/// would silently inherit.
+const UART_BASE: usize = crate::board::BOARD.uart_base;
 
-/// Register stride (byte distance between consecutive logical registers).
-/// QEMU's NS16550A uses 1-byte stride; the JH7110 DW8250 uses 4-byte
-/// stride. Picked at compile time by the kernel's platform feature.
-/// A wrong stride is the worst possible bring-up bug: the console dies
-/// before it can report anything. Both arms are positive so a third
-/// platform fails to compile here rather than silently inheriting
-/// QEMU's 1-byte stride.
-#[cfg(feature = "qemu")]
-const UART_REG_STRIDE: usize = 1;
-/// See [`UART_REG_STRIDE`] — JH7110 DW8250 uses a 4-byte stride.
-#[cfg(feature = "vf2")]
-const UART_REG_STRIDE: usize = 4;
+/// Register stride (byte distance between consecutive logical
+/// registers), from the board descriptor: `1` on QEMU's NS16550A, `4`
+/// on the JH7110 DW8250. A wrong stride is the worst bring-up bug — the
+/// console dies before it can report anything — so it is per-board data
+/// with the values pinned in `wari_validate::board`'s host tests.
+const UART_REG_STRIDE: usize = crate::board::BOARD.uart_stride;
 
 const THR_REG: usize = 0;
 const IER_REG: usize = 1;
