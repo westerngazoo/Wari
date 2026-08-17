@@ -8,15 +8,17 @@
 //! constants that only *coincide* between QEMU and the VF2 today.
 //! See `docs/rfcs/board-descriptor.md`.
 //!
-//! ## Slice 1 (this file): the descriptor exists as data
+//! ## The descriptor is the single source; the kernel reads it
 //!
-//! This is purely additive. The kernel does NOT read from these yet —
-//! it still uses its own per-site constants, and the [`tests`] below
-//! pin every field to exactly the value the kernel uses at HEAD, with
-//! the source line cited. Slice 2 migrates the kernel to read
-//! `board::BOARD.field`; because the values are pinned here, that
-//! migration is behavior-preserving and the QEMU/VF2 integration tests
-//! prove it. Nothing about VF2 or QEMU behavior changes in this slice.
+//! `kernel/src/board.rs` selects one instance behind a single `cfg`,
+//! and every per-SoC constant site (`uart_ns16550`, `plic`, `main`,
+//! `kvm`, `tier2_net`) reads `board::BOARD.field` instead of its own
+//! `cfg`-gated literal. The [`tests`] below pin every field to the
+//! value the kernel expects, with the source line cited — so the
+//! migration is behavior-preserving (a drift surfaces as a QEMU/VF2
+//! integration failure) and this file is the *one* place a value is
+//! written. Adding a third board is one more `const` here plus one arm
+//! in the kernel selector.
 //!
 //! ## The one field that is a decision, not a transcription
 //!
@@ -58,6 +60,11 @@ pub struct BoardDescriptor {
     pub dram_origin: usize,
     /// `rdtime` frequency in Hz, for the millisecond clock.
     pub timebase_hz: u64,
+    /// PLIC source number for UART0 — the console IRQ. QEMU virt uses
+    /// 10; the JH7110 uses 32 (per its interrupt map). A different SoC
+    /// has its own; wrong, and Ctrl-R (the only bound console IRQ)
+    /// silently stops working.
+    pub uart_irq: u32,
     /// The NIC MMIO windows the Tier-2 net driver is licensed to touch
     /// (INV-20). Reuses the existing per-platform window tables.
     pub net_windows: &'static [MmioWindow],
@@ -78,6 +85,7 @@ pub const QEMU: BoardDescriptor = BoardDescriptor {
     boot_hart_id: 0,
     dram_origin: 0x8020_0000,
     timebase_hz: 10_000_000,
+    uart_irq: 10,
     net_windows: crate::windows::qemu::NET_WINDOWS,
     dma_coherent: true,
 };
@@ -92,6 +100,7 @@ pub const VF2: BoardDescriptor = BoardDescriptor {
     boot_hart_id: 1,
     dram_origin: 0x4020_0000,
     timebase_hz: 4_000_000,
+    uart_irq: 32,
     net_windows: crate::windows::vf2::NET_WINDOWS,
     dma_coherent: true,
 };
@@ -120,6 +129,8 @@ mod tests {
         assert_eq!(QEMU.dram_origin, 0x8020_0000);
         // kernel/src/runtime/tier2_net.rs:119
         assert_eq!(QEMU.timebase_hz, 10_000_000);
+        // kernel/src/mmio/plic.rs UART_IRQ (qemu)
+        assert_eq!(QEMU.uart_irq, 10);
         assert!(QEMU.dma_coherent);
     }
 
@@ -137,6 +148,8 @@ mod tests {
         assert_eq!(VF2.dram_origin, 0x4020_0000);
         // kernel/src/runtime/tier2_net.rs:117
         assert_eq!(VF2.timebase_hz, 4_000_000);
+        // kernel/src/mmio/plic.rs UART_IRQ (vf2)
+        assert_eq!(VF2.uart_irq, 32);
         assert!(VF2.dma_coherent);
     }
 
