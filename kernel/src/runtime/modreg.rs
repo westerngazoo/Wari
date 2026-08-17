@@ -74,7 +74,20 @@ enum SlotState {
     /// Envelope staged, not yet verified. `len` = envelope bytes.
     Staged { len: usize },
     /// Verified and registered. Payload = `store[off .. off+len]`.
-    Live { off: usize, len: usize, proc_id: u8 },
+    ///
+    /// `grants` is the *attenuated* set the module was installed with,
+    /// kept so a restart re-installs exactly the same authority — a
+    /// restarted guard comes back with its `EventLog` cap, not a
+    /// stripped one. `daemon` marks a module the registry restarts on
+    /// termination; `restarts_left` is its remaining crash budget.
+    Live {
+        off: usize,
+        len: usize,
+        proc_id: u8,
+        grants: GrantSpec,
+        daemon: bool,
+        restarts_left: u8,
+    },
 }
 
 /// Backing store for staged envelopes. Static, bounded, zero-alloc —
@@ -175,6 +188,29 @@ pub fn spawn_as(slot: u8, requested: GrantSpec) -> Result<u8, KernelError> {
 ///   `sched::register_tenant` returns.
 /// - Panics: never.
 pub fn spawn_with_grants(slot: u8, requested: GrantSpec) -> Result<u8, KernelError> {
+    spawn_inner(slot, requested, 0)
+}
+
+/// Verify and spawn a **daemon**: a module the registry restarts on
+/// termination, up to `max_restarts` consecutive times, then gives up.
+/// A daemon that keeps crashing degrades to "down and staying down"
+/// (a `DaemonGaveUp` audit record) rather than crash-looping the hart.
+/// `max_restarts` bounds the storm; `0` is just a plain tenant.
+///
+/// Each restart consumes a fresh proc_id (there is no reaper yet, so
+/// exited instances are not recycled). Effective restarts are thus
+/// `min(max_restarts, free dynamic proc_ids)`: if the pool is
+/// exhausted mid-budget, `alloc_proc_id` returns `OutOfHandles` and the
+/// restart path treats that as give-up — the daemon degrades safely,
+/// never wedges. proc_id recycling arrives with the reaper brick.
+pub fn spawn_daemon(slot: u8, requested: GrantSpec, max_restarts: u8) -> Result<u8, KernelError> {
+    spawn_inner(slot, requested, max_restarts)
+}
+
+/// Shared spawn: verify, attenuate, install, register, and record the
+/// slot as `Live` with its restart policy. `restart_budget == 0` is a
+/// plain tenant (never restarted); `> 0` is a daemon with that budget.
+fn spawn_inner(slot: u8, requested: GrantSpec, restart_budget: u8) -> Result<u8, KernelError> {
     let idx = slot as usize;
     if idx >= DYN_SLOTS {
         return Err(KernelError::InvalidArgument);
@@ -202,6 +238,14 @@ pub fn spawn_with_grants(slot: u8, requested: GrantSpec) -> Result<u8, KernelErr
                 // arrived, claimed to be a module, and failed the
                 // signature gate.
                 crate::runtime::events::emit(wari_events::EventKind::SpawnRejected, slot as u16, 0);
+                // Free the slot: a rejected envelope is worthless, and
+                // holding its slot would let an attacker exhaust the
+                // registry with garbage uploads (slot-exhaustion DoS).
+                // The staged bytes stay in STORE until overwritten; the
+                // slot is what matters. SAFETY: INV-1 + INV-8.
+                unsafe {
+                    (*addr_of_mut!(SLOTS))[idx] = SlotState::Free;
+                }
                 return Err(e);
             }
         };
@@ -236,6 +280,9 @@ pub fn spawn_with_grants(slot: u8, requested: GrantSpec) -> Result<u8, KernelErr
             off: payload_off,
             len: payload_len,
             proc_id,
+            grants: granted,
+            daemon: restart_budget > 0,
+            restarts_left: restart_budget,
         };
     }
     crate::runtime::events::emit(
@@ -244,6 +291,125 @@ pub fn spawn_with_grants(slot: u8, requested: GrantSpec) -> Result<u8, KernelErr
         proc_id as u32,
     );
     Ok(proc_id)
+}
+
+/// A tenant terminated (exited or faulted) — restart it if it is a
+/// daemon with budget left, else let it lie. Called by the scheduler
+/// from termination context (after the process is marked, no borrow
+/// held), never from a resumable frame — so the `DaemonRestarted`
+/// emit's wake is safe (same context as the exit emit beside it).
+///
+/// # Contract
+///
+/// - Restarts a daemon by re-spawning its *already-verified* payload
+///   under a fresh proc_id with the *same* attenuated grants (no
+///   re-verify, no re-attenuate — the slot is trusted `Live`), and
+///   updates the slot to name the new proc_id. Decrements its budget
+///   and emits `DaemonRestarted(new_pid, budget_left)`.
+/// - When a daemon's budget is exhausted, emits `DaemonGaveUp` and
+///   flips `daemon` off so the dead slot is not revisited.
+/// - A non-daemon tenant, or any slot not `Live` under `proc_id`, is
+///   a no-op (normal reap).
+/// - Panics: never. A failed restart (out of proc_ids, install/register
+///   error) is treated as give-up rather than propagated — the
+///   scheduler cannot act on an error here.
+pub fn on_tenant_terminated(proc_id: u8) {
+    // Locate the Live slot this proc_id belongs to, and read its
+    // restart policy. SAFETY: INV-1 + INV-8 — single-hart, scheduler
+    // context, no interrupt races the registry statics.
+    let found = unsafe {
+        let slots = &*addr_of!(SLOTS);
+        slots.iter().enumerate().find_map(|(i, s)| match *s {
+            SlotState::Live {
+                proc_id: p,
+                daemon: true,
+                restarts_left,
+                grants,
+                off,
+                len,
+            } if p == proc_id => Some((i, restarts_left, grants, off, len)),
+            _ => None,
+        })
+    };
+    let Some((idx, restarts_left, grants, off, len)) = found else {
+        return; // not a daemon (or already gave up)
+    };
+
+    if restarts_left == 0 {
+        // Budget spent: stop restarting, record it, disarm the slot.
+        // SAFETY: as above.
+        unsafe {
+            (*addr_of_mut!(SLOTS))[idx] = SlotState::Live {
+                off,
+                len,
+                proc_id,
+                grants,
+                daemon: false,
+                restarts_left: 0,
+            };
+        }
+        crate::runtime::events::emit(wari_events::EventKind::DaemonGaveUp, proc_id as u16, 0);
+        kprintln!(
+            "[modreg] daemon slot {} gave up (restart budget exhausted)",
+            idx
+        );
+        return;
+    }
+
+    // Restart: fresh proc_id, same payload, same grants. The payload
+    // is already verified (the slot is Live), so no signature re-check.
+    let restart = (|| -> Result<u8, KernelError> {
+        let new_pid = alloc_proc_id()?;
+        crate::cap::boot::install_tier1_grants(new_pid, grants)?;
+        sched::register_tenant(new_pid, Tier::One, ModuleId::Dynamic(idx as u8))?;
+        Ok(new_pid)
+    })();
+
+    match restart {
+        Ok(new_pid) => {
+            let left = restarts_left - 1;
+            // SAFETY: as above.
+            unsafe {
+                (*addr_of_mut!(SLOTS))[idx] = SlotState::Live {
+                    off,
+                    len,
+                    proc_id: new_pid,
+                    grants,
+                    daemon: true,
+                    restarts_left: left,
+                };
+            }
+            crate::runtime::events::emit(
+                wari_events::EventKind::DaemonRestarted,
+                new_pid as u16,
+                left as u32,
+            );
+            kprintln!(
+                "[modreg] daemon slot {} restarted as pid {} ({} left)",
+                idx,
+                new_pid,
+                left
+            );
+        }
+        Err(_) => {
+            // Could not restart (no proc_id / install error). Treat as
+            // give-up: disarm and record, rather than leave a daemon
+            // the scheduler thinks is alive.
+            // SAFETY: as above.
+            unsafe {
+                (*addr_of_mut!(SLOTS))[idx] = SlotState::Live {
+                    off,
+                    len,
+                    proc_id,
+                    grants,
+                    daemon: false,
+                    restarts_left: 0,
+                };
+            }
+            crate::runtime::events::emit(wari_events::EventKind::DaemonGaveUp, proc_id as u16, 0);
+            kprintln!("[modreg] daemon slot {} could not restart, gave up", idx);
+        }
+    }
 }
 
 /// The verified module bytes for a `Live` slot.
@@ -294,8 +460,9 @@ pub fn self_test_spawn() -> Result<u8, KernelError> {
     // trust-boundary feature ships WITH its attack, not before it).
     // Flip one bit in the payload region of a copy of the signed
     // envelope; spawn MUST refuse with BadWasm and register nothing.
-    // The corrupted slot deliberately stays Staged — reclamation is
-    // out of scope this slice — costing one of four demo slots.
+    // The rejected envelope's slot is freed by spawn (a bad upload
+    // must not hold a slot — see the verify-fail path), so this
+    // adversarial probe costs no demo capacity.
     {
         let good = crate::runtime::hello_signed_blob::HELLO_SIGNED;
         let mut tampered = [0u8; MAX_MODULE_BYTES / 32];
@@ -348,6 +515,21 @@ pub fn self_test_spawn() -> Result<u8, KernelError> {
     kprintln!(
         "[modreg] grant: pid {} requested EVENTLOG+NET, ceiling denied NET",
         greedy_pid,
+    );
+
+    // Daemon-lifecycle demo: spawn the hello binary as a daemon with a
+    // restart budget of 2. It is not actually a long-running service —
+    // it runs its lifecycle and exits — so the registry restarts it,
+    // twice, then gives up, exactly as it would for a real daemon that
+    // kept crashing. The guard prints the daemon-restarted records and
+    // the final DAEMON-GAVE-UP. (A real daemon like the guard blocks
+    // forever and never triggers this; the mechanism is what brings it
+    // back if it ever faults.)
+    let daemon_slot = stage(crate::runtime::hello_signed_blob::HELLO_SIGNED)?;
+    let daemon_pid = spawn_daemon(daemon_slot, GrantSpec::EMPTY, 2)?;
+    kprintln!(
+        "[modreg] daemon: pid {} spawned with restart budget 2",
+        daemon_pid,
     );
     Ok(pid)
 }

@@ -101,6 +101,8 @@ fn kind_name(kind: u16) -> &'static [u8] {
         Some(EventKind::TenantExited) => b"tenant-exited",
         Some(EventKind::TenantFaulted) => b"TENANT-FAULTED",
         Some(EventKind::GrantAttenuated) => b"GRANT-ATTENUATED",
+        Some(EventKind::DaemonRestarted) => b"daemon-restarted",
+        Some(EventKind::DaemonGaveUp) => b"DAEMON-GAVE-UP",
         None => b"unknown-kind",
     }
 }

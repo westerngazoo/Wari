@@ -246,6 +246,8 @@ pub fn boot_summary() {
             Some(EventKind::TenantExited) => "tenant-exited",
             Some(EventKind::TenantFaulted) => "TENANT-FAULTED",
             Some(EventKind::GrantAttenuated) => "GRANT-ATTENUATED",
+            Some(EventKind::DaemonRestarted) => "daemon-restarted",
+            Some(EventKind::DaemonGaveUp) => "DAEMON-GAVE-UP",
             None => "unknown-kind",
         };
         kprintln!("[events]   #{} {} a={} b={}", seq, kind_str, e.a, e.b);

@@ -255,11 +255,21 @@ pub fn run() -> Result<(), KernelError> {
             }
         };
         if let Some(state) = final_state {
-            let table = processes();
-            let proc = table[proc_id as usize]
-                .as_mut()
-                .ok_or(KernelError::NoSuchProcess)?;
-            proc.state = state;
+            let terminated = matches!(state, ProcessState::Exited(_) | ProcessState::Faulted);
+            {
+                let table = processes();
+                let proc = table[proc_id as usize]
+                    .as_mut()
+                    .ok_or(KernelError::NoSuchProcess)?;
+                proc.state = state;
+            }
+            // Restart the module if it is a daemon (borrow released
+            // above; runtime::modreg re-borrows the table/pool itself).
+            // Scheduler context, not a resumable frame — the restart's
+            // audit emit + wake is safe here, same as the exit emit.
+            if terminated {
+                runtime::modreg::on_tenant_terminated(proc_id);
+            }
         }
     }
 }
