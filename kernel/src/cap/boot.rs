@@ -52,6 +52,7 @@ use crate::error::KernelError;
 
 use super::cspace::CSpace;
 use super::objects::Endpoint;
+use super::grants::GrantSpec;
 use super::static_caps::{caps_for, ModuleId, Tier};
 use super::storage::{cspaces, object_pools};
 use super::types::{Cap, CapId, ObjectKind, CAP_RIGHT_READ, CAP_RIGHT_WRITE};
@@ -359,36 +360,30 @@ static mut BOOT_TIER1_EPS: Option<(u16, u16)> = None;
 /// - Errors: `KernelError::InvalidArgument` if `proc_id` is out of
 ///   range or boot cap-init has not run.
 /// - Panics: never.
-/// Install a **guard agent's** cap set: the minimal Tier-1 grants
-/// (stdout + exit) PLUS an `EventLog` READ cap at `SLOT_EVENTLOG`.
+/// Install a runtime-loaded module's cap set: the unconditional
+/// baseline (stdout + exit) plus exactly the optional authorities in
+/// `granted` — the **already-attenuated** result of the Supervisor's
+/// `requested & ceiling`. This function installs; it does not decide.
+/// The deciding — attenuation — happens in `modreg::spawn_with_grants`
+/// against `wari_cap::grants` and is host-tested there and in the
+/// pure crate; here we only wire the granted bits to CSpace slots.
 ///
-/// A guard is a dynamic tenant like any other — it earns exactly one
-/// authority beyond the default, and that authority is observation of
-/// the audit stream, nothing else. This dedicated installer is the
-/// stopgap until the Supervisor's manifest-driven grants land
-/// (agents brick 4): at that point a guard's `EventLog` cap comes
-/// from its signed manifest + a Supervisor decision, and this
-/// function folds into that path. Documented so the special-case is
-/// a decision, not a smell.
+/// This replaces the former `install_tier1_dynamic` /
+/// `install_tier1_guard` pair: a guard is no longer a hardcoded role,
+/// just a module whose `granted` set happens to include
+/// [`GrantSpec::EVENTLOG`].
 ///
-/// # Contract / Errors / Panics: as [`install_tier1_dynamic`].
-pub fn install_tier1_guard(proc_id: u8) -> Result<(), KernelError> {
-    install_tier1_dynamic(proc_id)?;
-    let cs = cspaces();
-    // EventLog is a singleton facility (one kernel ring), so the cap
-    // names authority, not a pool object: pool_index is unused, and
-    // `check_cap` validates kind + rights only.
-    install_root_cap(
-        &mut cs[proc_id as usize],
-        SLOT_EVENTLOG,
-        ObjectKind::EventLog,
-        0,
-        CAP_RIGHT_READ,
-    );
-    Ok(())
-}
-
-pub fn install_tier1_dynamic(proc_id: u8) -> Result<(), KernelError> {
+/// # Contract
+///
+/// - Precondition: `init_root_caps` has completed (records the
+///   endpoint indices this reads); `proc_id < MAX_PROCS`.
+/// - Postcondition: the CSpace at `proc_id` is cleared, then holds
+///   stdout + exit, plus an `EventLog` READ cap iff `granted`
+///   contains `EVENTLOG`. No authority outside `granted` is present.
+/// - Errors: `InvalidArgument` if `proc_id` is out of range or boot
+///   cap-init has not run.
+/// - Panics: never.
+pub fn install_tier1_grants(proc_id: u8, granted: GrantSpec) -> Result<(), KernelError> {
     if (proc_id as usize) >= super::cspace::MAX_PROCS {
         return Err(KernelError::InvalidArgument);
     }
@@ -402,8 +397,8 @@ pub fn install_tier1_dynamic(proc_id: u8) -> Result<(), KernelError> {
     // caps. `install_tier1_caps` writes only the slots it grants, so
     // without this a proc_id reused after a future reaper reclaims it
     // would inherit the PRIOR tenant's caps in the untouched slots —
-    // e.g. a guard's EventLog cap surviving into a plain tenant
-    // (found in adversarial review of this brick). No reaper recycles
+    // e.g. an EVENTLOG cap surviving into a plain tenant (found in the
+    // adversarial review of the guard brick). No reaper recycles
     // proc_ids today, so this is forward-safety; it makes the leak
     // structurally impossible rather than relying on nobody reusing a
     // slot. `check_cap` is generation-blind, so clearing at grant
@@ -411,6 +406,22 @@ pub fn install_tier1_dynamic(proc_id: u8) -> Result<(), KernelError> {
     cs[proc_id as usize] = super::cspace::CSpace::new();
     let tier1_caps = caps_for(Tier::One, ModuleId::Dynamic(0));
     install_tier1_caps(cs, proc_id, &tier1_caps, uart_ipc_ep, kernel_exit_ep);
+
+    if granted.contains(GrantSpec::EVENTLOG) {
+        // EventLog is a singleton facility (one kernel ring), so the
+        // cap names authority, not a pool object: pool_index is
+        // unused, and `check_cap` validates kind + rights only.
+        install_root_cap(
+            &mut cs[proc_id as usize],
+            SLOT_EVENTLOG,
+            ObjectKind::EventLog,
+            0,
+            CAP_RIGHT_READ,
+        );
+    }
+    // GrantSpec::NET is never in any current ceiling, so it is never
+    // present in `granted` — a dynamic Net-install path lands with the
+    // networked-module attestation brick, not here.
     Ok(())
 }
 

@@ -37,6 +37,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod cspace;
+pub mod grants;
 pub mod objects;
 pub mod pool;
 #[cfg(kani)]
