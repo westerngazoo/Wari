@@ -24,3 +24,10 @@ pub static UART_DRIVER_SIGNED: &[u8] =
 #[cfg(feature = "vf2")]
 pub static UART_DRIVER_SIGNED: &[u8] =
     include_bytes!("../../../build/drivers/uart-vf2.signed.wasm");
+
+/// R2S first-light is driver-less — the kernel's own `uart_ns16550`
+/// printk carries the banner, and no Tier-2 UART driver is built for the
+/// Ky X1 yet. Empty keeps `run_tier2_uart` compilable; never called on
+/// R2S (first-light halts first). See `docs/r2s-bringup.md`.
+#[cfg(feature = "r2s")]
+pub static UART_DRIVER_SIGNED: &[u8] = &[];

@@ -581,6 +581,13 @@ pub fn nic_attach_queue_impl<T>(
         let _ = (queue_idx, desc_pa, avail_pa, used_pa, queue_size);
         E_INVAL
     }
+    #[cfg(feature = "r2s")]
+    {
+        // R2S first-light is net-less — no Tier-2 net driver calls this;
+        // reject any caller until the Ky X1 NIC host-fn path exists.
+        let _ = (queue_idx, desc_pa, avail_pa, used_pa, queue_size);
+        E_INVAL
+    }
 }
 
 /// Helper: 32-bit MMIO write to `addr` via `VolatilePtr`. Mirrors
@@ -644,6 +651,12 @@ pub fn nic_queue_notify_impl(proc_id: u8, queue_idx: u32) -> i32 {
     }
     #[cfg(feature = "vf2")]
     {
+        let _ = queue_idx;
+        E_INVAL
+    }
+    #[cfg(feature = "r2s")]
+    {
+        // R2S first-light is net-less; no NIC notify path yet.
         let _ = queue_idx;
         E_INVAL
     }
