@@ -26,11 +26,11 @@
 //! function is required.
 //!
 //! The kernel MMU and validator already cover the full GMAC0+GMAC1
-//! window (`[0x16030000, 0x16050000)`, 128 KiB, built into
-//! `kernel/src/mem/kvm.rs::GMAC0_MMIO_LEN = 0x20000` and the matching
-//! `validate.rs::NET_MMIO_LEN`). All registers below are at
-//! `GMAC_BASE + offset` with `offset < 0x10000`, so no permission
-//! widening is needed.
+//! window (`[0x16030000, 0x16050000)`, 128 KiB — the first entry of
+//! `wari_validate::windows::vf2::MMIO_REGIONS`, which the kernel maps
+//! at boot, and the matching `NET_WINDOWS` cap-gate). All registers
+//! below are at `GMAC_BASE + offset` with `offset < 0x10000`, so no
+//! permission widening is needed.
 //!
 //! Gated behind the `net-diag` cargo feature — opt-in for diagnostic
 //! builds, default off for production.
