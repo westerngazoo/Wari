@@ -49,6 +49,7 @@ core::arch::global_asm!(include_str!("boot.S"));
 
 // Module skeleton — populated per the approved Phase-0 plan.
 mod abi;
+mod board;
 mod boot;
 mod cap;
 mod error;
@@ -108,11 +109,7 @@ pub static WARI_BUILD_TAG: [u8; 64] = {
 /// `hart 100000` at boot. We don't read the linker symbol itself
 /// because PC-relative addressing in the medany code model can't
 /// reach an absolute symbol at value 0/1 from the kernel base.
-#[cfg(feature = "vf2")]
-const BOOT_HART_ID: usize = 1;
-/// See [`BOOT_HART_ID`] — QEMU virt lands in S-mode on hart 0.
-#[cfg(feature = "qemu")]
-const BOOT_HART_ID: usize = 0;
+const BOOT_HART_ID: usize = board::BOARD.boot_hart_id;
 
 /// Kernel entry point, called from `boot.S` after OpenSBI hands
 /// control to S-mode and the boot stack is set up. Never returns.
