@@ -114,6 +114,42 @@ pub const VF2: BoardDescriptor = BoardDescriptor {
     dma_coherent: true,
 };
 
+/// Orange Pi R2S — Ky X1 / SpacemiT K1, RV64GCVB, Sv39 (roadmap p3b).
+///
+/// **Partial and provisional.** The board's own device tree is the
+/// final word; this record exists so the R2S build target compiles and
+/// so first-light can prove the *sourced* constants on silicon. Fields
+/// split into two classes:
+///
+/// - **Sourced** from mainline Linux `spacemit,k1` DT (pinned in
+///   [`tests`]): `uart_base`, `uart_stride`, `plic_base`, `timebase_hz`,
+///   `dram_origin`. R2S first-light exercises exactly these (banner +
+///   MMU) and nothing else.
+/// - **Sentinel / DT-blocked**: `plic_hart_context`, `uart_irq`,
+///   `net_windows`, `mmio_regions`, `dma_coherent` — deliberately
+///   invalid or empty until read from *this* board's `board.dts`. The
+///   kernel halts (`main.rs::r2s_first_light`) before any of them is
+///   touched, so a sentinel can never drive silicon wrongly.
+///
+/// See `docs/r2s-bringup.md`.
+pub const R2S: BoardDescriptor = BoardDescriptor {
+    name: "orangepi-r2s",
+    // ── Sourced from mainline spacemit,k1 DT (provisional) ──
+    uart_base: 0xd401_7000,   // serial@d4017000, "spacemit,k1-uart"
+    uart_stride: 4,           // reg-shift=<2>, reg-io-width=<4> (DW8250 family)
+    plic_base: 0xe000_0000,   // plic@e0000000, "sifive,plic-1.0.0", ndev=159
+    dram_origin: 0x0020_0000, // DRAM base 0x0 + 2 MiB (VF2 convention); linker ORIGIN cross-check
+    timebase_hz: 24_000_000,  // timebase-frequency=<24000000>
+    // ── DT-blocked: read from board.dts before first-light goes past
+    //    the banner. See `r2s_dt_blocked_fields_are_sentinels`. ──
+    boot_hart_id: 0,          // provisional banner label; first-light prints the LIVE boot hart
+    plic_hart_context: usize::MAX, // SENTINEL — K1 pattern 2*hart+1; exact value from board.dts
+    uart_irq: u32::MAX,       // SENTINEL — uart0 `interrupts=<N>` from board.dts
+    net_windows: crate::windows::r2s::NET_WINDOWS,   // empty until DT names the MAC
+    mmio_regions: crate::windows::r2s::MMIO_REGIONS, // empty: UART+PLIC map from scalars
+    dma_coherent: false,      // UNKNOWN — conservative default; set by bring-up experiment
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,7 +261,9 @@ mod tests {
                 .iter()
                 .any(|r| w.base >= r.base && w.base + w.len <= r.base + r.len)
         }
-        for b in [QEMU, VF2] {
+        // R2S included: both its tables are empty, so the invariant
+        // holds vacuously — and stays checked the moment the DT fills them.
+        for b in [QEMU, VF2, R2S] {
             for w in b.net_windows {
                 assert!(
                     covered(w, b.mmio_regions),
@@ -235,5 +273,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn r2s_sourced_fields_from_spacemit_k1_dt() {
+        // Sourced from mainline Linux `spacemit,k1` device tree —
+        // provisional until this board's own DT confirms them, pinned so
+        // an accidental drift is caught. These are the ONLY fields R2S
+        // first-light exercises (banner + MMU). See docs/r2s-bringup.md.
+        assert_eq!(R2S.uart_base, 0xd401_7000);
+        assert_eq!(R2S.uart_stride, 4);
+        assert_eq!(R2S.plic_base, 0xe000_0000);
+        assert_eq!(R2S.timebase_hz, 24_000_000);
+        assert_eq!(R2S.dram_origin, 0x0020_0000);
+        // R2S diverges from both existing boards on every one of these —
+        // the whole reason B3 made them per-board data.
+        assert_ne!(R2S.uart_base, VF2.uart_base);
+        assert_ne!(R2S.plic_base, VF2.plic_base);
+        assert_ne!(R2S.timebase_hz, VF2.timebase_hz);
+    }
+
+    #[test]
+    fn r2s_dt_blocked_fields_are_sentinels() {
+        // These are DELIBERATELY not-real: they must be read from the
+        // board's device tree. When you fill them, THIS TEST FAILING is
+        // the reminder to also let first-light proceed past the banner
+        // (kernel/src/main.rs::r2s_first_light). See docs/r2s-bringup.md.
+        assert_eq!(R2S.plic_hart_context, usize::MAX);
+        assert_eq!(R2S.uart_irq, u32::MAX);
+        assert!(R2S.net_windows.is_empty());
+        assert!(R2S.mmio_regions.is_empty());
+        assert!(!R2S.dma_coherent);
     }
 }

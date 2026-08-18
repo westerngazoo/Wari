@@ -28,16 +28,20 @@
 // This matters most for the next board. A third platform that forgets
 // to add its arm somewhere should fail to compile, loudly, at the line
 // that forgot — not boot into a subtly wrong configuration.
-#[cfg(not(any(feature = "qemu", feature = "vf2")))]
+#[cfg(not(any(feature = "qemu", feature = "vf2", feature = "r2s")))]
 compile_error!(
-    "no platform feature selected: build with --features qemu or --features vf2 \
-     (scripts/build.sh sets this per profile). A featureless build would silently \
-     take the QEMU arm of every cfg and produce a kernel with the wrong UART \
-     stride, linker script, and driver blob."
+    "no platform feature selected: build with --features qemu, vf2, or r2s \
+     (scripts/build.sh / make set this per target). A featureless build would \
+     silently take the QEMU arm of every cfg and produce a kernel with the wrong \
+     UART stride, linker script, and driver blob."
 );
-#[cfg(all(feature = "qemu", feature = "vf2"))]
+#[cfg(any(
+    all(feature = "qemu", feature = "vf2"),
+    all(feature = "qemu", feature = "r2s"),
+    all(feature = "vf2", feature = "r2s")
+))]
 compile_error!(
-    "qemu and vf2 are mutually exclusive: exactly one platform per kernel image."
+    "qemu, vf2, and r2s are mutually exclusive: exactly one platform per kernel image."
 );
 
 use core::panic::PanicInfo;
@@ -111,6 +115,32 @@ pub static WARI_BUILD_TAG: [u8; 64] = {
 /// reach an absolute symbol at value 0/1 from the kernel base.
 const BOOT_HART_ID: usize = board::BOARD.boot_hart_id;
 
+/// Orange Pi R2S first-light halt (roadmap p3b, `docs/r2s-bringup.md`).
+///
+/// `kmain` calls this immediately after `mem::kvm::init`, having run
+/// only code that depends on the board-descriptor fields **sourced**
+/// from the mainline `spacemit,k1` device tree (UART base + stride,
+/// PLIC base, DRAM origin, Sv39). A clean banner plus these lines on a
+/// real R2S therefore proves those constants. We halt here because every
+/// field the next boot step needs — `plic_hart_context`, the NIC
+/// windows, the Tier-2 driver blobs — is a SENTINEL in
+/// `wari_validate::board::R2S`, DT-blocked until this board's own device
+/// tree is read. Printing the live boot hart also captures one of those
+/// blocked values (`boot_hart_id`) for the operator.
+#[cfg(feature = "r2s")]
+fn r2s_first_light(hart_id: usize) -> ! {
+    kprintln!("[r2s] first-light OK: UART + DRAM + Sv39 MMU proven (sourced K1 constants).");
+    kprintln!("[r2s] booted on hart {} — record this as boot_hart_id.", hart_id);
+    kprintln!("[r2s] halting before PLIC + drivers (device-tree-blocked). Capture");
+    kprintln!("[r2s] boot.log + board.dts next; see docs/r2s-bringup.md.");
+    loop {
+        // SAFETY: INV-7 — wfi is an S-mode instruction in S-mode.
+        unsafe {
+            core::arch::asm!("wfi");
+        }
+    }
+}
+
 /// Kernel entry point, called from `boot.S` after OpenSBI hands
 /// control to S-mode and the boot stack is set up. Never returns.
 ///
@@ -120,6 +150,10 @@ const BOOT_HART_ID: usize = board::BOARD.boot_hart_id;
 /// off, only the kernel image mapped. `.bss` has already been zeroed
 /// by `boot.S`.
 #[no_mangle]
+// `r2s` diverges early via `r2s_first_light` (defined above), so the
+// full boot stack after the halt is intentionally unreachable on that
+// platform only.
+#[cfg_attr(feature = "r2s", allow(unreachable_code))]
 pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
     mmio::uart_ns16550::init();
     boot::stage_banner(BUILD, BOOT_HART_ID);
@@ -133,6 +167,16 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
             }
         }
     }
+
+    // R2S first-light halt (roadmap p3b). Everything above uses ONLY the
+    // board-descriptor fields sourced from the `spacemit,k1` device tree
+    // (UART base/stride, PLIC base, DRAM origin, Sv39). We stop here —
+    // before `plic::init` (needs the DT-blocked `plic_hart_context`) and
+    // the Tier-2 drivers (none exist for the Ky X1 yet). See
+    // `r2s_first_light` and `docs/r2s-bringup.md`.
+    #[cfg(feature = "r2s")]
+    r2s_first_light(_hart_id); // diverges; the boot stack below is unreachable on r2s
+
     trap::install();
     mmio::plic::init();
     kprintln!("mmu OK, traps installed, plic up");

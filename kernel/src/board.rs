@@ -20,3 +20,9 @@ pub const BOARD: BoardDescriptor = wari_validate::board::QEMU;
 /// See [`BOARD`].
 #[cfg(feature = "vf2")]
 pub const BOARD: BoardDescriptor = wari_validate::board::VF2;
+/// See [`BOARD`]. Orange Pi R2S first-light (roadmap p3b) — partial /
+/// provisional descriptor; the DT-blocked fields are sentinels the
+/// kernel never reaches before its first-light halt. See
+/// `docs/r2s-bringup.md`.
+#[cfg(feature = "r2s")]
+pub const BOARD: BoardDescriptor = wari_validate::board::R2S;

@@ -222,6 +222,30 @@ pub mod windows {
         }];
     }
 
+    /// Orange Pi R2S (Ky X1 / SpacemiT K1) platform windows.
+    ///
+    /// Both tables are **empty on purpose** and stay that way until the
+    /// board's own device tree is read. The R2S NIC complex (2×2.5GbE +
+    /// 2×GbE) is not the JH7110 GMAC, so no window can be transcribed
+    /// from another board — `addr_in_windows` over an empty table
+    /// refuses every address (refuse-by-default), which is exactly the
+    /// right posture for a NIC we cannot yet name. See
+    /// `docs/r2s-bringup.md` §4 and `board::R2S`.
+    pub mod r2s {
+        use super::MmioWindow;
+
+        /// NIC MMIO windows the Tier-2 driver may touch (INV-20). Empty
+        /// until `board.dts` names the MAC IP; R2S first-light is
+        /// net-less, so nothing consults this yet.
+        pub const NET_WINDOWS: &[MmioWindow] = &[];
+
+        /// Device regions the kernel identity-maps at boot. Empty for
+        /// first-light: UART + PLIC are mapped from the descriptor's
+        /// scalar bases, and no other device is touched before the
+        /// DT-blocked halt.
+        pub const MMIO_REGIONS: &[MmioWindow] = &[];
+    }
+
     /// StarFive VisionFive 2 (JH7110) platform windows.
     pub mod vf2 {
         use super::MmioWindow;

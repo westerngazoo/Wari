@@ -171,6 +171,10 @@ pub fn debug_lsr_snapshot() -> (u8, u32) {
     let l32 = unsafe { VolatilePtr::<u32>::new(reg_addr(LSR_REG) as *mut u32).read() };
     #[cfg(feature = "qemu")]
     let l32 = l8 as u32;
+    // R2S: debug aid only, called from the idle loop that first-light
+    // never reaches. Mirror the scalar path so it compiles.
+    #[cfg(feature = "r2s")]
+    let l32 = l8 as u32;
     (l8, l32)
 }
 
