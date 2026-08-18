@@ -821,6 +821,18 @@ name = "wari-abi"
 version = "0.0.1"
 
 [[package]]
+name = "wari-aot"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "target-lexicon",
+ "wari-wnm",
+ "wasmparser",
+]
+
+[[package]]
 name = "wari-aot-spike"
 version = "0.0.1"
 dependencies = [
