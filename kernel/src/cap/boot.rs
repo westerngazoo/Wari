@@ -216,6 +216,11 @@ pub fn init_root_caps() -> Result<(), KernelError> {
     let nic_kind = 0u8;
     #[cfg(feature = "vf2")]
     let nic_kind = 1u8;
+    // R2S first-light never reaches init_root_caps (kmain halts before
+    // it), but this must compile. The Ky X1 NIC is not yet named; 0 is a
+    // placeholder that is never observed.
+    #[cfg(feature = "r2s")]
+    let nic_kind = 0u8;
     let net_pool_idx = pools.nets.alloc(super::objects::Net::new(nic_kind))?;
     if let Some(net) = pools.nets.get_mut(net_pool_idx) {
         // 3 caps reference this Net: the driver's root cap (slot 0)

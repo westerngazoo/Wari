@@ -17,6 +17,9 @@
 enum Platform {
     Qemu,
     Vf2,
+    /// Orange Pi R2S (Ky X1). Net-less first-light — no signed driver
+    /// blob is embedded, so the stale-driver guard is skipped for it.
+    R2s,
 }
 
 /// Resolve the platform from cargo's feature env vars, refusing to
@@ -35,15 +38,17 @@ enum Platform {
 fn platform() -> Platform {
     let qemu = std::env::var("CARGO_FEATURE_QEMU").is_ok();
     let vf2 = std::env::var("CARGO_FEATURE_VF2").is_ok();
-    match (qemu, vf2) {
-        (true, false) => Platform::Qemu,
-        (false, true) => Platform::Vf2,
-        (false, false) => panic!(
-            "no platform feature: build with --features qemu or --features vf2. \
+    let r2s = std::env::var("CARGO_FEATURE_R2S").is_ok();
+    match (qemu, vf2, r2s) {
+        (true, false, false) => Platform::Qemu,
+        (false, true, false) => Platform::Vf2,
+        (false, false, true) => Platform::R2s,
+        (false, false, false) => panic!(
+            "no platform feature: build with --features qemu, vf2, or r2s. \
              Guessing here would link the wrong address and embed the wrong \
              driver blob, and neither failure prints anything."
         ),
-        (true, true) => panic!("qemu and vf2 are mutually exclusive"),
+        _ => panic!("qemu, vf2, and r2s are mutually exclusive"),
     }
 }
 
@@ -54,10 +59,12 @@ fn main() {
     let script = match platform() {
         Platform::Vf2 => "linker-vf2.ld",
         Platform::Qemu => "linker.ld",
+        Platform::R2s => "linker-r2s.ld",
     };
     println!("cargo:rustc-link-arg=-T{}/{}", dir, script);
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rerun-if-changed=linker-vf2.ld");
+    println!("cargo:rerun-if-changed=linker-r2s.ld");
     println!("cargo:rerun-if-changed=src/boot.S");
     // CRITICAL: without this, cargo's incremental build cache does
     // NOT detect WARI_BUILD changes, and the kernel binary embeds
@@ -100,9 +107,17 @@ fn check_driver_blob_freshness(kernel_dir: &str) {
     let Ok(want) = std::env::var("WARI_BUILD") else {
         return;
     };
-    let blob = match platform() {
+    let plat = platform();
+    if matches!(plat, Platform::R2s) {
+        // R2S first-light is net-less — no signed driver blob is
+        // embedded (net_blob/uart_blob resolve to empty slices), so
+        // there is nothing to check for staleness.
+        return;
+    }
+    let blob = match plat {
         Platform::Vf2 => format!("{}/../build/drivers/net-vf2.signed.wasm", kernel_dir),
         Platform::Qemu => format!("{}/../build/drivers/net-qemu.signed.wasm", kernel_dir),
+        Platform::R2s => unreachable!("handled by the early return above"),
     };
     let bytes = match std::fs::read(&blob) {
         Ok(b) => b,
