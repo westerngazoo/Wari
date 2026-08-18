@@ -23,9 +23,8 @@ use wari_mem::page_table::{
     make_satp, va_parts, Pte, PteFlags, KERNEL_RO, KERNEL_RW, KERNEL_RX, PT_ENTRIES,
 };
 
-/// QEMU `virt` NS16550 UART base. Matches `mmio::uart_ns16550::UART_BASE`.
-/// Hardcoded here because Phase 0 has no `platform::` module yet (lands in
-/// Phase 1 alongside VF2 support).
+/// Console UART base, from the active board descriptor (B3) — the same
+/// value `mmio::uart_ns16550` reads. Mapped as one RW page below.
 const UART_MMIO_BASE: usize = crate::board::BOARD.uart_base;
 
 /// PLIC MMIO base — Platform-Level Interrupt Controller. Standard
@@ -38,75 +37,12 @@ const UART_MMIO_BASE: usize = crate::board::BOARD.uart_base;
 const PLIC_MMIO_BASE: usize = crate::board::BOARD.plic_base;
 const PLIC_MMIO_LEN: usize = 0x40_0000;
 
-/// VirtIO MMIO transport range on QEMU virt — `0x10001000..0x10009000`,
-/// 8 transport slots × 0x1000 each. The Phase-1b net driver uses the
-/// 4th slot at `0x10008000`. Cfg-gated since VF2 has no VirtIO MMIO.
-/// Added in PR Net-3 fix (deferred mapping).
-#[cfg(feature = "qemu")]
-const VIRTIO_MMIO_BASE: usize = 0x1000_1000;
-#[cfg(feature = "qemu")]
-const VIRTIO_MMIO_LEN: usize = 0x8000;
-
-/// JH7110 GMAC register window — 128 KiB at 0x16030000 covers
-/// both GMAC0 (0x16030000) and GMAC1 (0x16040000). Phase-1c-11
-/// widened from 64 KiB so the `gmac1` cargo feature path can read
-/// `GMAC1_BASE + 0x110` (version) without a Load Page Fault.
-/// Each MAC's 64 KiB register window covers MAC config, MMC
-/// counters, MTL queues, and DMA channel-N descriptors. vf2-only.
-#[cfg(feature = "vf2")]
-const GMAC0_MMIO_BASE: usize = 0x1603_0000;
-#[cfg(feature = "vf2")]
-const GMAC0_MMIO_LEN: usize = 0x2_0000;
-
-/// JH7110 STG clock + reset generator (STGCRG). 64 KiB at
-/// 0x10230000. Owns GMAC0_AHB / _AXI / _PTP / _TX / _RX clocks
-/// and the GMAC0 reset bit. Phase-1c-3 deasserts the reset and
-/// enables these clocks before reading the GMAC version register.
-#[cfg(feature = "vf2")]
-const STGCRG_MMIO_BASE: usize = 0x1023_0000;
-#[cfg(feature = "vf2")]
-const STGCRG_MMIO_LEN: usize = 0x1_0000;
-
-/// JH7110 SYS clock + reset generator (SYSCRG). 64 KiB at
-/// 0x13020000. Owns the NOC_BUS_STG_AXI clock that the GMAC0
-/// AXI port depends on; without it the GMAC's MMIO is alive but
-/// register reads return zeros (the bus to the IP block is gated).
-/// Phase-1c-11: also owns the GMAC1_* clock+gate cluster
-/// (+0x184..+0x1AC) and the GMAC1 reset register (+0x300).
-#[cfg(feature = "vf2")]
-const SYSCRG_MMIO_BASE: usize = 0x1302_0000;
-#[cfg(feature = "vf2")]
-const SYSCRG_MMIO_LEN: usize = 0x1_0000;
-
-/// JH7110 SYS syscon. 4 KiB at 0x13030000 — separate from SYSCRG.
-/// Holds the GMAC1 phy-interface-mode select field (offset 0x90,
-/// bits 4:2), the SYS-side equivalent of AON_SYSCON +0x0C for
-/// GMAC0. Required by Phase-1c-11 (gmac1 cargo feature).
-#[cfg(feature = "vf2")]
-const SYS_SYSCON_MMIO_BASE: usize = 0x1303_0000;
-#[cfg(feature = "vf2")]
-const SYS_SYSCON_MMIO_LEN: usize = 0x1000;
-
-/// JH7110 always-on clock + reset generator (AONCRG). 64 KiB at
-/// 0x17000000. Phase-1c maps this for completeness; the actual
-/// AON-domain clocks the GMAC needs are minimal (most are STG/SYS),
-/// but the driver may eventually want to read the AON syscon for
-/// chip-state diagnostics.
-#[cfg(feature = "vf2")]
-const AONCRG_MMIO_BASE: usize = 0x1700_0000;
-#[cfg(feature = "vf2")]
-const AONCRG_MMIO_LEN: usize = 0x1_0000;
-
-/// JH7110 always-on syscon. 4 KiB at 0x17010000 — separate from
-/// AON CRG. Holds the GMAC0 phy-interface-mode select field
-/// (offset 0x0C, bits 20:18), which routes the RGMII RX clock
-/// from the PHY pad into the AON CRG. Without this set, the
-/// gmac0_rx gate at AONCRG+0x1C silently rejects the enable
-/// bit because its parent (gmac0_rgmii_rxin) is not toggling.
-#[cfg(feature = "vf2")]
-const AON_SYSCON_MMIO_BASE: usize = 0x1701_0000;
-#[cfg(feature = "vf2")]
-const AON_SYSCON_MMIO_LEN: usize = 0x1000;
+// The per-board device MMIO regions the kernel identity-maps at boot
+// (VirtIO on QEMU; the JH7110 GMAC + clock/reset/syscon windows on VF2)
+// are no longer cfg-gated constants here. They are data on the active
+// board descriptor — `board::BOARD.mmio_regions` — with each window's
+// per-register rationale in `wari_validate::windows::{qemu,vf2}`, and
+// `init()` maps whatever the board lists (B3 slice 3).
 
 // ── Linker symbol accessors ─────────────────────────────────────
 
@@ -238,51 +174,16 @@ pub fn init() -> Result<(), KernelError> {
         PLIC_MMIO_BASE + PLIC_MMIO_LEN,
         KERNEL_RW,
     )?;
-    #[cfg(feature = "qemu")]
-    map_range(
-        root,
-        VIRTIO_MMIO_BASE,
-        VIRTIO_MMIO_BASE + VIRTIO_MMIO_LEN,
-        KERNEL_RW,
-    )?;
-    #[cfg(feature = "vf2")]
-    {
-        map_range(
-            root,
-            GMAC0_MMIO_BASE,
-            GMAC0_MMIO_BASE + GMAC0_MMIO_LEN,
-            KERNEL_RW,
-        )?;
-        map_range(
-            root,
-            STGCRG_MMIO_BASE,
-            STGCRG_MMIO_BASE + STGCRG_MMIO_LEN,
-            KERNEL_RW,
-        )?;
-        map_range(
-            root,
-            SYSCRG_MMIO_BASE,
-            SYSCRG_MMIO_BASE + SYSCRG_MMIO_LEN,
-            KERNEL_RW,
-        )?;
-        map_range(
-            root,
-            SYS_SYSCON_MMIO_BASE,
-            SYS_SYSCON_MMIO_BASE + SYS_SYSCON_MMIO_LEN,
-            KERNEL_RW,
-        )?;
-        map_range(
-            root,
-            AONCRG_MMIO_BASE,
-            AONCRG_MMIO_BASE + AONCRG_MMIO_LEN,
-            KERNEL_RW,
-        )?;
-        map_range(
-            root,
-            AON_SYSCON_MMIO_BASE,
-            AON_SYSCON_MMIO_BASE + AON_SYSCON_MMIO_LEN,
-            KERNEL_RW,
-        )?;
+
+    // Per-board device MMIO regions (NIC + its clock/reset/syscon
+    // windows), identity-mapped RW. The set is board data (B3 slice 3):
+    // the kernel maps whatever the active descriptor lists. This is a
+    // superset of the net-driver cap-gate (`board::BOARD.net_windows`) —
+    // the kernel maps a region so the driver can reach it; the cap-gate
+    // narrows what it may touch. `wari_validate::board`'s host test
+    // proves every licensed window lies inside a mapped region.
+    for region in crate::board::BOARD.mmio_regions {
+        map_range(root, region.base, region.base + region.len, KERNEL_RW)?;
     }
 
     kprintln!("  [kvm] root pt at {:#x}", root);
