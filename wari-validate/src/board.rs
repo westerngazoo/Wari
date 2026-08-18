@@ -68,6 +68,13 @@ pub struct BoardDescriptor {
     /// The NIC MMIO windows the Tier-2 net driver is licensed to touch
     /// (INV-20). Reuses the existing per-platform window tables.
     pub net_windows: &'static [MmioWindow],
+    /// The device MMIO regions the kernel identity-maps RW at boot,
+    /// beyond UART and PLIC (which map from their own scalar fields).
+    /// A *superset* of [`net_windows`]: the kernel maps a region so the
+    /// driver can reach it; `net_windows` is the narrower INV-20 cap-gate
+    /// for what it may touch. They coincide on VF2 and differ on QEMU
+    /// (mapped `0x8000` ⊋ licensed `0x200`), so this is its own field.
+    pub mmio_regions: &'static [MmioWindow],
     /// Is the NIC's DMA master cache-coherent with the CPU on this SoC?
     /// `true` on JH7110 (proven) and QEMU; a third board decides this
     /// by experiment. When `false`, the net driver's (future) CMO hooks
@@ -87,6 +94,7 @@ pub const QEMU: BoardDescriptor = BoardDescriptor {
     timebase_hz: 10_000_000,
     uart_irq: 10,
     net_windows: crate::windows::qemu::NET_WINDOWS,
+    mmio_regions: crate::windows::qemu::MMIO_REGIONS,
     dma_coherent: true,
 };
 
@@ -102,6 +110,7 @@ pub const VF2: BoardDescriptor = BoardDescriptor {
     timebase_hz: 4_000_000,
     uart_irq: 32,
     net_windows: crate::windows::vf2::NET_WINDOWS,
+    mmio_regions: crate::windows::vf2::MMIO_REGIONS,
     dma_coherent: true,
 };
 
@@ -175,5 +184,56 @@ mod tests {
         assert_eq!(QEMU.net_windows, crate::windows::qemu::NET_WINDOWS);
         assert_eq!(VF2.net_windows, crate::windows::vf2::NET_WINDOWS);
         assert!(!VF2.net_windows.is_empty());
+    }
+
+    #[test]
+    fn mmio_regions_are_the_existing_tables() {
+        assert_eq!(QEMU.mmio_regions, crate::windows::qemu::MMIO_REGIONS);
+        assert_eq!(VF2.mmio_regions, crate::windows::vf2::MMIO_REGIONS);
+        // kernel/src/mem/kvm.rs mapped VirtIO 0x10001000..0x10009000.
+        assert_eq!(QEMU.mmio_regions.len(), 1);
+        assert_eq!(QEMU.mmio_regions[0].base, 0x1000_1000);
+        assert_eq!(QEMU.mmio_regions[0].len, 0x8000);
+        // kernel/src/mem/kvm.rs mapped these 6 JH7110 device windows,
+        // in this order. Pin every (base, len) — not just the count —
+        // so a silently enlarged or shifted region (one that still
+        // covers net_windows, hence invisible to the coverage test)
+        // fails HERE instead of changing the boot-time map set unseen.
+        let vf2_expected: [(usize, usize); 6] = [
+            (0x1603_0000, 0x2_0000), // GMAC0 + GMAC1
+            (0x1023_0000, 0x1_0000), // STGCRG
+            (0x1302_0000, 0x1_0000), // SYSCRG
+            (0x1303_0000, 0x1000),   // SYS syscon
+            (0x1700_0000, 0x1_0000), // AONCRG
+            (0x1701_0000, 0x1000),   // AON syscon
+        ];
+        assert_eq!(VF2.mmio_regions.len(), vf2_expected.len());
+        for (r, (base, len)) in VF2.mmio_regions.iter().zip(vf2_expected) {
+            assert_eq!((r.base, r.len), (base, len));
+        }
+    }
+
+    /// The safety invariant slice 3 turns from a coincidence into a
+    /// checked fact: every window the net driver is *licensed* to touch
+    /// (INV-20 cap-gate) must lie inside a region the kernel actually
+    /// *maps*, or a licensed access page-faults. `mmio_regions` is thus
+    /// a superset of `net_windows` on every board.
+    #[test]
+    fn mmio_regions_cover_every_licensed_net_window() {
+        fn covered(w: &MmioWindow, regions: &[MmioWindow]) -> bool {
+            regions
+                .iter()
+                .any(|r| w.base >= r.base && w.base + w.len <= r.base + r.len)
+        }
+        for b in [QEMU, VF2] {
+            for w in b.net_windows {
+                assert!(
+                    covered(w, b.mmio_regions),
+                    "{}: licensed net window {:#x?} is not inside any mapped region",
+                    b.name,
+                    w
+                );
+            }
+        }
     }
 }

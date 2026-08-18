@@ -9,27 +9,21 @@
 //!
 //! 1. the re-export shim so call sites using `crate::validate::*`
 //!    keep compiling unchanged (the `mem/page_alloc.rs` pattern), and
-//! 2. the `#[cfg(feature)]` choice of which platform's window table
-//!    is live — platform features belong to the kernel, so the pure
-//!    crate holds windows for both platforms as data and the
-//!    selection happens here.
+//! 2. the live NIC MMIO window table, now taken from the active board
+//!    descriptor (`board::BOARD.net_windows`, B3) — the platform choice
+//!    is the descriptor's single `cfg`, so this module no longer carries
+//!    its own. The pure crate still holds both platforms' tables as data
+//!    and host-tests them.
 
 #![allow(dead_code)]
 
 #[allow(unused_imports)]
 pub use wari_validate::*;
 
-/// NIC MMIO window table for the active platform — see
-/// `wari_validate::windows` for the tables themselves (and the
-/// per-window rationale comments).
-#[cfg(feature = "qemu")]
-pub const NET_MMIO_WINDOWS: &[MmioWindow] = wari_validate::windows::qemu::NET_WINDOWS;
-
-/// NIC MMIO window table for the active platform — see
-/// `wari_validate::windows` for the tables themselves (and the
-/// per-window rationale comments).
-#[cfg(feature = "vf2")]
-pub const NET_MMIO_WINDOWS: &[MmioWindow] = wari_validate::windows::vf2::NET_WINDOWS;
+/// NIC MMIO window table for the active platform, from the board
+/// descriptor — see `wari_validate::windows` for the tables themselves
+/// (and the per-window rationale comments).
+pub const NET_MMIO_WINDOWS: &[MmioWindow] = crate::board::BOARD.net_windows;
 
 /// Is `addr` inside the NIC register window set for the active
 /// platform?
