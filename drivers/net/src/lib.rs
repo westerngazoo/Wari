@@ -1553,6 +1553,11 @@ pub mod vf2_phy {
             unsafe {
                 vf2_state::C_RECEIVE_CALLS = vf2_state::C_RECEIVE_CALLS.wrapping_add(1);
                 vf2_state::RX_CALL_COUNT = vf2_state::RX_CALL_COUNT.wrapping_add(1);
+                // net-diag only: the periodic counter dump is high-volume;
+                // on a release console its 115200-baud I/O stalls the poll
+                // loop and the RX ring overflows (RBU), dropping packets
+                // invisibly. See docs/net-driver-vf2.md / the build-156 loss.
+                #[cfg(feature = "net-diag")]
                 if vf2_state::RX_CALL_COUNT & 0xFFFF == 0 {
                     let _ = super::wari_drv_log_u32(0x5374_5263, vf2_state::C_RECEIVE_CALLS);
                     let _ = super::wari_drv_log_u32(0x5374_5266, vf2_state::C_FRAMES_FOUND);
@@ -1627,7 +1632,9 @@ pub mod vf2_phy {
                         // aliased pairs of slots (e.g. idx 0 & 2 both
                         // logged as 0x72 because 0x72 already had bit
                         // 1 set). See docs/diagnostic-tags.md.
+                        #[cfg(feature = "net-diag")]
                         let val = ((i as u32) << 24) | (rdes3 & 0x00FF_FFFF);
+                        #[cfg(feature = "net-diag")]
                         let _ = super::wari_drv_trace_u32(0x7258_4672, val);
                         vf2_state::C_FRAMES_FOUND = vf2_state::C_FRAMES_FOUND.wrapping_add(1);
                         // Build-129 net-diag: one-shot deep dump at the
@@ -1808,8 +1815,10 @@ pub mod vf2_phy {
             let rx_tail_pa: u32 = (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
             let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
             // tag = 'rXTl' — RX tail doorbell write.
+            #[cfg(feature = "net-diag")]
             let _ = super::wari_drv_trace_u32(0x7258_546C, rx_tail_pa);
             // tag = 'rXCn' — descriptor re-armed. val = slot idx.
+            #[cfg(feature = "net-diag")]
             let _ = super::wari_drv_trace_u32(0x7258_434E, idx as u32);
         }
     }
@@ -1825,6 +1834,7 @@ pub mod vf2_phy {
             // frame rather than silently leaking the token.
             unsafe {
                 vf2_state::C_CONSUME_CALLS = vf2_state::C_CONSUME_CALLS.wrapping_add(1);
+                #[cfg(feature = "net-diag")]
                 let _ = super::wari_drv_trace_u32(0x7258_4365, self.idx as u32);
             }
             // SAFETY: single-threaded driver; this slot's buffer is
@@ -1852,6 +1862,7 @@ pub mod vf2_phy {
             // already-consumed case where idx == usize::MAX.
             unsafe {
                 vf2_state::C_DROP_CALLS = vf2_state::C_DROP_CALLS.wrapping_add(1);
+                #[cfg(feature = "net-diag")]
                 let _ = super::wari_drv_trace_u32(0x7258_4472, self.idx as u32);
             }
             if self.idx != usize::MAX {
@@ -1916,7 +1927,9 @@ pub mod vf2_phy {
             // for the periodic StTx stat dump.
             unsafe {
                 vf2_state::C_TX_SENT = vf2_state::C_TX_SENT.wrapping_add(1);
+                #[cfg(feature = "net-diag")]
                 let val = ((i as u32) << 24) | ((len as u32) & 0x00FF_FFFF);
+                #[cfg(feature = "net-diag")]
                 let _ = super::wari_drv_trace_u32(0x7458_5472, val);
             }
 
