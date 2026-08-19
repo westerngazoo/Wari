@@ -3565,6 +3565,13 @@ mod vf2_keep_imports {
     static E: unsafe extern "C" fn(u32) -> i32 = wari_nic_queue_notify;
     #[used]
     static F: unsafe extern "C" fn() -> u64 = wari_lin_mem_base;
+    // `drv_trace_u32`: the per-frame trace call sites are now gated behind
+    // `net-diag` (a release console stays quiet), so a release vf2 build
+    // has no live call site to retain the import. Pin it here — same
+    // idiom as the others — so the manifest's bidirectional check still
+    // passes. A net-diag build additionally calls it for real.
+    #[used]
+    static G: unsafe extern "C" fn(u32, u32) -> i32 = wari_drv_trace_u32;
 }
 
 // Mirror image of vf2_keep_imports: the per-frame trace call sites
