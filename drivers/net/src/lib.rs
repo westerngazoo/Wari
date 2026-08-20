@@ -510,6 +510,15 @@ pub mod vf2_state {
     pub static mut C_RX_KICKS: u32 = 0;
     /// Rate limiter for the stall telemetry snapshot.
     pub static mut STALL_SNAPS: u32 = 0;
+    /// Times the watchdog performed a full RX-channel recovery — a
+    /// Start-Receive restart of a wedged, RBU-CLEAR engine that the RBU
+    /// kick cannot reach. See docs/rx-stall-investigation.md §6.1.
+    pub static mut C_RX_RECOVERS: u32 = 0;
+    /// Snapshots to wait before the next recovery attempt (0 = ready).
+    /// Prevents a persistent/unrecoverable wedge from thrashing the ring
+    /// or flooding the recovery log; reset to 0 whenever a frame is found
+    /// so the first recovery after healthy RX is prompt.
+    pub static mut RECOVER_COOLDOWN: u32 = 0;
 }
 
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
@@ -1553,6 +1562,11 @@ pub mod vf2_phy {
             unsafe {
                 vf2_state::C_RECEIVE_CALLS = vf2_state::C_RECEIVE_CALLS.wrapping_add(1);
                 vf2_state::RX_CALL_COUNT = vf2_state::RX_CALL_COUNT.wrapping_add(1);
+                // net-diag only: the periodic counter dump is high-volume;
+                // on a release console its 115200-baud I/O stalls the poll
+                // loop and the RX ring overflows (RBU), dropping packets
+                // invisibly. See docs/net-driver-vf2.md / the build-156 loss.
+                #[cfg(feature = "net-diag")]
                 if vf2_state::RX_CALL_COUNT & 0xFFFF == 0 {
                     let _ = super::wari_drv_log_u32(0x5374_5263, vf2_state::C_RECEIVE_CALLS);
                     let _ = super::wari_drv_log_u32(0x5374_5266, vf2_state::C_FRAMES_FOUND);
@@ -1627,9 +1641,14 @@ pub mod vf2_phy {
                         // aliased pairs of slots (e.g. idx 0 & 2 both
                         // logged as 0x72 because 0x72 already had bit
                         // 1 set). See docs/diagnostic-tags.md.
+                        #[cfg(feature = "net-diag")]
                         let val = ((i as u32) << 24) | (rdes3 & 0x00FF_FFFF);
+                        #[cfg(feature = "net-diag")]
                         let _ = super::wari_drv_trace_u32(0x7258_4672, val);
                         vf2_state::C_FRAMES_FOUND = vf2_state::C_FRAMES_FOUND.wrapping_add(1);
+                        // RX is healthy — clear any pending recovery cooldown
+                        // so the first recovery after a future wedge is prompt.
+                        vf2_state::RECOVER_COOLDOWN = 0;
                         // Build-129 net-diag: one-shot deep dump at the
                         // critical 0→1 frame-found transition. Internal
                         // guard makes subsequent calls no-ops.
@@ -1710,6 +1729,53 @@ pub mod vf2_phy {
                         let own =
                             super::desc_rd(core::ptr::addr_of!(VF2_RX_RING), vf2_state::RX_NEXT, 3);
                         let _ = super::wari_drv_log_u32(0x524F_776E, own); // 'ROwn'
+
+                        // ── Wedge detect + recovery (rx-stall-investigation
+                        //    §6.1 + §7). MTL_RXQ0_MISSED counts frames the
+                        //    MTL RX queue dropped for lack of a descriptor:
+                        //    nonzero => frames ARE arriving but the DMA is
+                        //    not draining (a wedge). That separates a wedge
+                        //    from an idle ring (MISSED stays 0) and from
+                        //    PHY/link loss (no frames to miss) — the datum
+                        //    §7 needs, and the trigger §6.1 needs. NOTE:
+                        //    verify these offsets against the JH7110 dwmac4
+                        //    map; both are reads, and recovery is guarded, so
+                        //    a wrong offset is low-harm.
+                        const MTL_RXQ0_MISSED: u32 = 0x0D34;
+                        const MMC_RX_FIFO_OVERFLOW: u32 = 0x07D4;
+                        let missed = wari_net_mmio_read32(GMAC_BASE + MTL_RXQ0_MISSED);
+                        let fifo_ovf = wari_net_mmio_read32(GMAC_BASE + MMC_RX_FIFO_OVERFLOW);
+                        let _ = super::wari_drv_log_u32(0x4D52_784D, missed); // 'MRxM'
+                        let _ = super::wari_drv_log_u32(0x5278_4F66, fifo_ovf); // 'RxOf'
+                        // §7 discriminators: RX_CONTROL.SR (bit0) — is the
+                        // engine even started? — and MAC_PHYIF link status,
+                        // to rule PHY/link in or out at the freeze.
+                        let rxctrl = wari_net_mmio_read32(GMAC_BASE + 0x1108);
+                        let phyif = wari_net_mmio_read32(GMAC_BASE + 0x00F8);
+                        let _ = super::wari_drv_log_u32(0x5258_5372, rxctrl); // 'RXSr'
+                        let _ = super::wari_drv_log_u32(0x5048_5966, phyif); // 'PHYf'
+
+                        // Recover a STOPPED engine (RBU CLEAR) the RBU kick
+                        // below cannot reach: full ring re-arm + Start-
+                        // Receive restart. Only when frames are being
+                        // dropped (a true wedge), with a cooldown so a
+                        // persistent/unrecoverable wedge cannot thrash the
+                        // ring or flood the recovery log.
+                        if missed != 0
+                            && st & DMA_STATUS_RBU == 0
+                            && vf2_state::RECOVER_COOLDOWN == 0
+                        {
+                            vf2_rx_channel_recover();
+                            vf2_state::C_RX_RECOVERS =
+                                vf2_state::C_RX_RECOVERS.wrapping_add(1);
+                            vf2_state::RECOVER_COOLDOWN = 16;
+                            // tag 'RXrc' — a full RX-channel recovery ran.
+                            let _ =
+                                super::wari_drv_log_u32(0x5258_7263, vf2_state::C_RX_RECOVERS);
+                        } else {
+                            vf2_state::RECOVER_COOLDOWN =
+                                vf2_state::RECOVER_COOLDOWN.saturating_sub(1);
+                        }
                     }
 
                     if st & DMA_STATUS_RBU != 0 {
@@ -1808,9 +1874,78 @@ pub mod vf2_phy {
             let rx_tail_pa: u32 = (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
             let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
             // tag = 'rXTl' — RX tail doorbell write.
+            #[cfg(feature = "net-diag")]
             let _ = super::wari_drv_trace_u32(0x7258_546C, rx_tail_pa);
             // tag = 'rXCn' — descriptor re-armed. val = slot idx.
+            #[cfg(feature = "net-diag")]
             let _ = super::wari_drv_trace_u32(0x7258_434E, idx as u32);
+        }
+    }
+
+    /// Full RX-channel recovery for a wedged engine the RBU kick cannot
+    /// reach (RBU clear while the MTL RX queue drops frames). Re-arms all
+    /// 16 descriptors exactly as [`vf2_rx_rearm`] does, resets the ring
+    /// cursor, and — the step the RBU kick omits — toggles Start-Receive
+    /// (`DMA_CH0_RX_CONTROL.SR`) to restart a STOPPED DMA. It mirrors
+    /// `driver_start`'s proven RX bring-up, so it issues only the register
+    /// sequence already known to work on this silicon. See
+    /// docs/rx-stall-investigation.md §6.1.
+    ///
+    /// Called only from the RX watchdog when the poll found no frame, so
+    /// no smoltcp `RxToken` is outstanding and rewriting the whole ring is
+    /// safe (INV-1 single-threaded; nothing is mid-consume).
+    fn vf2_rx_channel_recover() {
+        // SAFETY: INV-1 single-threaded driver; the RX ring is not being
+        // walked by software here. Every MMIO write goes through the
+        // fenced host fn (kernel host_fns.rs `fence w,o`), which orders the
+        // descriptor stores below ahead of the SR/tail device writes.
+        unsafe {
+            const RXCTRL: u32 = 0x1108;
+            const RXTAIL: u32 = 0x1128;
+            const DMA_CH0_STATUS: u32 = 0x1160;
+            const DMA_STATUS_RBU: u32 = 1 << 7;
+            // RX_CONTROL word: RXPBL(bit16) | RBSZ(1536<<1) | SR(bit0),
+            // identical to driver_start; the "stop" form drops SR.
+            const RXCTRL_RUN: u32 = 0x0001_0000 | (1536 << 1) | 0x1;
+            const RXCTRL_STOP: u32 = 0x0001_0000 | (1536 << 1);
+
+            // 1. Stop the RX DMA.
+            let _ = wari_net_mmio_write32(GMAC_BASE + RXCTRL, RXCTRL_STOP);
+
+            // 2. Re-arm every descriptor (same words as vf2_rx_rearm) and
+            //    reset the software cursor to the head of the ring.
+            let r = core::ptr::addr_of_mut!(VF2_RX_RING);
+            for idx in 0..16usize {
+                let bp: u64 = vf2_state::LIN_BASE
+                    + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
+                super::desc_wr(r, idx, 0, bp as u32);
+                super::desc_wr(r, idx, 1, (bp >> 32) as u32);
+                super::desc_wr(r, idx, 2, 0);
+                super::desc_wr(r, idx, 3, 0xC100_0000); // OWN | IOC | BUF1V
+            }
+            vf2_state::RX_NEXT = 0;
+
+            // 3. Reset the DMA descriptor pointer to the ring head
+            //    (RXDESC_LIST_ADDRESS) so on restart the engine resumes at
+            //    slot 0, matching RX_NEXT=0. WITHOUT this the DMA resumes at
+            //    wherever CUR_RXDESC stopped and desyncs from software — the
+            //    next frame lands in a slot the poll loop isn't watching, so
+            //    RX still looks stalled. Hi-then-lo per the databook latch
+            //    order; ring length N-1=15. Safe: SR is clear here (step 1).
+            //    Mirrors driver_start (0x1118/0x111C/0x1130).
+            let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
+            let rx_pa: u64 = vf2_state::LIN_BASE + rx_ring_off as u64;
+            let _ = wari_net_mmio_write32(GMAC_BASE + 0x1118, (rx_pa >> 32) as u32);
+            let _ = wari_net_mmio_write32(GMAC_BASE + 0x111C, rx_pa as u32);
+            let _ = wari_net_mmio_write32(GMAC_BASE + 0x1130, 15);
+
+            // 4. Clear any sticky RBU, then restart the RX DMA (SR=1).
+            let _ = wari_net_mmio_write32(GMAC_BASE + DMA_CH0_STATUS, DMA_STATUS_RBU);
+            let _ = wari_net_mmio_write32(GMAC_BASE + RXCTRL, RXCTRL_RUN);
+
+            // 5. Re-ring the tail so the engine walks all 16 armed descs.
+            let rx_tail_pa: u32 = (rx_pa + 16 * 16) as u32;
+            let _ = wari_net_mmio_write32(GMAC_BASE + RXTAIL, rx_tail_pa);
         }
     }
 
@@ -1825,6 +1960,7 @@ pub mod vf2_phy {
             // frame rather than silently leaking the token.
             unsafe {
                 vf2_state::C_CONSUME_CALLS = vf2_state::C_CONSUME_CALLS.wrapping_add(1);
+                #[cfg(feature = "net-diag")]
                 let _ = super::wari_drv_trace_u32(0x7258_4365, self.idx as u32);
             }
             // SAFETY: single-threaded driver; this slot's buffer is
@@ -1852,6 +1988,7 @@ pub mod vf2_phy {
             // already-consumed case where idx == usize::MAX.
             unsafe {
                 vf2_state::C_DROP_CALLS = vf2_state::C_DROP_CALLS.wrapping_add(1);
+                #[cfg(feature = "net-diag")]
                 let _ = super::wari_drv_trace_u32(0x7258_4472, self.idx as u32);
             }
             if self.idx != usize::MAX {
@@ -1916,7 +2053,9 @@ pub mod vf2_phy {
             // for the periodic StTx stat dump.
             unsafe {
                 vf2_state::C_TX_SENT = vf2_state::C_TX_SENT.wrapping_add(1);
+                #[cfg(feature = "net-diag")]
                 let val = ((i as u32) << 24) | ((len as u32) & 0x00FF_FFFF);
+                #[cfg(feature = "net-diag")]
                 let _ = super::wari_drv_trace_u32(0x7458_5472, val);
             }
 
@@ -3552,6 +3691,13 @@ mod vf2_keep_imports {
     static E: unsafe extern "C" fn(u32) -> i32 = wari_nic_queue_notify;
     #[used]
     static F: unsafe extern "C" fn() -> u64 = wari_lin_mem_base;
+    // `drv_trace_u32`: the per-frame trace call sites are now gated behind
+    // `net-diag` (a release console stays quiet), so a release vf2 build
+    // has no live call site to retain the import. Pin it here — same
+    // idiom as the others — so the manifest's bidirectional check still
+    // passes. A net-diag build additionally calls it for real.
+    #[used]
+    static G: unsafe extern "C" fn(u32, u32) -> i32 = wari_drv_trace_u32;
 }
 
 // Mirror image of vf2_keep_imports: the per-frame trace call sites
