@@ -66,6 +66,9 @@ fn main() {
     // Diagnosed May 2026 after VF2 stayed at "build 19" across ~10
     // deploys despite local + origin showing later numbers.
     println!("cargo:rerun-if-env-changed=WARI_BUILD");
+    // Same reason for the branch-carrying build id — a changed branch (or
+    // number) must re-embed the banner/id-tag, not reuse a cached build.
+    println!("cargo:rerun-if-env-changed=WARI_BUILD_ID");
 
     // ── Stale-driver guard ────────────────────────────────────────
     //

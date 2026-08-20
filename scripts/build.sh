@@ -181,7 +181,7 @@ cargo run --quiet --manifest-path scripts/Cargo.toml --bin sign-module -- \
 # ── 5. kernel ───────────────────────────────────────────────────
 STEP="kernel"
 echo "--- [5/7] Kernel [$KRN_FEATURES]"
-( cd kernel && WARI_BUILD=$NEXT_BUILD \
+( cd kernel && WARI_BUILD=$NEXT_BUILD WARI_BUILD_ID="${NEXT_BUILD}-${BRANCH_SLUG}" \
     cargo build --release --features "$KRN_FEATURES" --no-default-features )
 "$OBJCOPY" -O binary target/riscv64gc-unknown-none-elf/release/wari build/wari.bin
 
