@@ -28,3 +28,11 @@ pub static NET_DRIVER_SIGNED: &[u8] = include_bytes!("../../../build/drivers/net
 
 #[cfg(feature = "vf2")]
 pub static NET_DRIVER_SIGNED: &[u8] = include_bytes!("../../../build/drivers/net-vf2.signed.wasm");
+
+/// R2S first-light is **net-less** — no Tier-2 net driver exists for the
+/// Ky X1 yet (its NIC complex differs from the JH7110 GMAC). An empty
+/// slice keeps `run_tier2_net` compilable; it is never *called* on R2S,
+/// because `kmain` halts at first-light before the Tier-2 stage. See
+/// `docs/r2s-bringup.md` §4.
+#[cfg(feature = "r2s")]
+pub static NET_DRIVER_SIGNED: &[u8] = &[];

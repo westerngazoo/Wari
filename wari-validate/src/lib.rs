@@ -204,6 +204,46 @@ pub mod windows {
             base: 0x1000_8000,
             len: 0x200,
         }];
+
+        /// Device MMIO regions the kernel identity-maps RW at boot (B3).
+        ///
+        /// The full VirtIO MMIO transport range on QEMU virt —
+        /// `0x10001000..0x10009000`, 8 transport slots × 0x1000. The
+        /// Phase-1b net driver uses the 4th slot at `0x10008000`; the
+        /// kernel maps all eight, and the driver's cap-gate
+        /// ([`NET_WINDOWS`]) still narrows what it may *touch* to
+        /// `0x10008000/0x200`. This is exactly why `MMIO_REGIONS` is a
+        /// distinct, wider table than `NET_WINDOWS` on QEMU: the kernel
+        /// maps a region so the driver can reach it; the cap-gate is the
+        /// separate INV-20 decision about what it is licensed to touch.
+        pub const MMIO_REGIONS: &[MmioWindow] = &[MmioWindow {
+            base: 0x1000_1000,
+            len: 0x8000,
+        }];
+    }
+
+    /// Orange Pi R2S (Ky X1 / SpacemiT K1) platform windows.
+    ///
+    /// Both tables are **empty on purpose** and stay that way until the
+    /// board's own device tree is read. The R2S NIC complex (2×2.5GbE +
+    /// 2×GbE) is not the JH7110 GMAC, so no window can be transcribed
+    /// from another board — `addr_in_windows` over an empty table
+    /// refuses every address (refuse-by-default), which is exactly the
+    /// right posture for a NIC we cannot yet name. See
+    /// `docs/r2s-bringup.md` §4 and `board::R2S`.
+    pub mod r2s {
+        use super::MmioWindow;
+
+        /// NIC MMIO windows the Tier-2 driver may touch (INV-20). Empty
+        /// until `board.dts` names the MAC IP; R2S first-light is
+        /// net-less, so nothing consults this yet.
+        pub const NET_WINDOWS: &[MmioWindow] = &[];
+
+        /// Device regions the kernel identity-maps at boot. Empty for
+        /// first-light: UART + PLIC are mapped from the descriptor's
+        /// scalar bases, and no other device is touched before the
+        /// DT-blocked halt.
+        pub const MMIO_REGIONS: &[MmioWindow] = &[];
     }
 
     /// StarFive VisionFive 2 (JH7110) platform windows.
@@ -253,6 +293,52 @@ pub mod windows {
             },
             // AON SYSCON — phy-interface-select for GMAC0
             // (Phase-1c-6L).
+            MmioWindow {
+                base: 0x1701_0000,
+                len: 0x1000,
+            },
+        ];
+
+        /// Device MMIO regions the kernel identity-maps RW at boot (B3).
+        ///
+        /// The JH7110 GMAC register window plus the clock/reset/syscon
+        /// windows the net driver must reach to bring the MAC out of
+        /// idle. On VF2 this set is byte-identical to [`NET_WINDOWS`] —
+        /// every window the driver is licensed to touch is a window the
+        /// kernel maps — but the two are kept as separate fields because
+        /// the relationship is *subset*, not identity (it is proper
+        /// superset on QEMU), and each is its own per-board decision. The
+        /// `vf2_mmio_regions_cover_net_windows` host test guards that the
+        /// mapped set always covers the licensed set, so a licensed
+        /// access can never page-fault on an unmapped region.
+        pub const MMIO_REGIONS: &[MmioWindow] = &[
+            // GMAC0 (0x16030000) + GMAC1 (0x16040000), 128 KiB.
+            MmioWindow {
+                base: 0x1603_0000,
+                len: 0x2_0000,
+            },
+            // STGCRG — STG-domain GMAC0 reset bit + bus clocks.
+            MmioWindow {
+                base: 0x1023_0000,
+                len: 0x1_0000,
+            },
+            // SYSCRG — NOC_BUS_STG_AXI (GMAC0 AXI parent) + GMAC0/1
+            // clock gates and the GMAC1 reset register.
+            MmioWindow {
+                base: 0x1302_0000,
+                len: 0x1_0000,
+            },
+            // SYS syscon — GMAC1 phy-interface-mode select (+0x90).
+            MmioWindow {
+                base: 0x1303_0000,
+                len: 0x1000,
+            },
+            // AONCRG — AON-domain clocks + GMAC0 rx gate (diagnostics).
+            MmioWindow {
+                base: 0x1700_0000,
+                len: 0x1_0000,
+            },
+            // AON syscon — GMAC0 phy-interface-mode select (+0x0C).
             MmioWindow {
                 base: 0x1701_0000,
                 len: 0x1000,
