@@ -519,6 +519,21 @@ pub mod vf2_state {
     /// or flooding the recovery log; reset to 0 whenever a frame is found
     /// so the first recovery after healthy RX is prompt.
     pub static mut RECOVER_COOLDOWN: u32 = 0;
+    /// Last `MRxF` (MMC RX frame count, 0x0780) seen at a stall snapshot.
+    /// The recovery trigger compares against it: unchanged across
+    /// snapshots = the MAC's own frame counter is frozen = RX wedged.
+    /// This is the reliable wedge signal — `MTL_RXQ0_MISSED` reads 0 on
+    /// this SoC (0x0D34 wrong or not incremented), which left the
+    /// build-157 recovery inert (RXrc stayed 0 through a full stall).
+    pub static mut LAST_MRXF: u32 = 0;
+    /// Consecutive stall snapshots over which `MRxF` has not advanced.
+    /// The recovery fires only once this reaches a threshold, not on a
+    /// single frozen snapshot: one snapshot with no new frame is normal
+    /// under light traffic (a 1/sec ping need not land inside one
+    /// ~sub-second snapshot window). A genuine wedge never advances
+    /// `MRxF` and trips the streak within a second or two of fast empty
+    /// polls; any real frame resets it to 0.
+    pub static mut MRXF_STALL_STREAK: u32 = 0;
 }
 
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
@@ -1754,14 +1769,63 @@ pub mod vf2_phy {
                         let phyif = wari_net_mmio_read32(GMAC_BASE + 0x00F8);
                         let _ = super::wari_drv_log_u32(0x5258_5372, rxctrl); // 'RXSr'
                         let _ = super::wari_drv_log_u32(0x5048_5966, phyif); // 'PHYf'
+                        // MTL_RXQ0_DEBUG — the H1/H2 discriminator, and the
+                        // one datum that tells us WHY MRxF freezes rather
+                        // than only that it does. RXQSTS (bits 5:4) is the
+                        // queue fill: 00 empty, 11 full; PRXQ (bits 29:16)
+                        // is the packet count sitting in the queue.
+                        //
+                        //   full / PRXQ > 0 while MRxF is frozen
+                        //     => frames DID arrive and the DMA is not
+                        //        draining them; the MAC is backpressuring
+                        //        the link partner, and the frozen MAC
+                        //        counter is a CONSEQUENCE of the DMA stall.
+                        //        A channel restart is then the right fix.
+                        //   empty / PRXQ == 0 while MRxF is frozen
+                        //     => nothing is reaching the MAC receiver at
+                        //        all (PHY / RGMII / RX clock). No amount of
+                        //        descriptor or DMA work can fix that, and
+                        //        the next step is a MAC-level reset.
+                        const MTL_RXQ0_DEBUG: u32 = 0x0D38;
+                        let rxq_dbg = wari_net_mmio_read32(GMAC_BASE + MTL_RXQ0_DEBUG);
+                        let _ = super::wari_drv_log_u32(0x5251_4462, rxq_dbg); // 'RQDb'
 
                         // Recover a STOPPED engine (RBU CLEAR) the RBU kick
                         // below cannot reach: full ring re-arm + Start-
-                        // Receive restart. Only when frames are being
-                        // dropped (a true wedge), with a cooldown so a
+                        // Receive restart, with a cooldown so a
                         // persistent/unrecoverable wedge cannot thrash the
                         // ring or flood the recovery log.
-                        if missed != 0
+                        //
+                        // The trigger is MRxF standing still. Build 157
+                        // gated this on `missed != 0` and the recovery
+                        // NEVER RAN (RXrc stayed 0 across a full wedge:
+                        // MRxF froze at 66, MRxM read 0x0 at every one of
+                        // 20 snapshots) — MTL_RXQ0_MISSED is simply not
+                        // maintained on this SoC, so that build was a
+                        // no-op, not a regression. MRxF is the counter we
+                        // have watched move on this silicon, so it is the
+                        // signal we key on.
+                        //
+                        // Frozen-for-a-streak, not frozen-once: under
+                        // light traffic a single snapshot with no new
+                        // frame is normal, and a spurious recovery would
+                        // stop/restart a HEALTHY engine. Idle traffic
+                        // still trips the streak eventually and recovers
+                        // a NIC that was fine — accepted for now: this is
+                        // the first build in which the recovery actually
+                        // executes, and a periodic retry is what tells us
+                        // whether a channel restart clears the wedge at
+                        // all. Tighten once that is known.
+                        const MRXF_FROZEN_SNAPS: u32 = 8;
+                        if rx_frames != 0 && rx_frames == vf2_state::LAST_MRXF {
+                            vf2_state::MRXF_STALL_STREAK =
+                                vf2_state::MRXF_STALL_STREAK.wrapping_add(1);
+                        } else {
+                            vf2_state::MRXF_STALL_STREAK = 0;
+                        }
+                        vf2_state::LAST_MRXF = rx_frames;
+
+                        if vf2_state::MRXF_STALL_STREAK >= MRXF_FROZEN_SNAPS
                             && st & DMA_STATUS_RBU == 0
                             && vf2_state::RECOVER_COOLDOWN == 0
                         {
@@ -1769,6 +1833,7 @@ pub mod vf2_phy {
                             vf2_state::C_RX_RECOVERS =
                                 vf2_state::C_RX_RECOVERS.wrapping_add(1);
                             vf2_state::RECOVER_COOLDOWN = 16;
+                            vf2_state::MRXF_STALL_STREAK = 0;
                             // tag 'RXrc' — a full RX-channel recovery ran.
                             let _ =
                                 super::wari_drv_log_u32(0x5258_7263, vf2_state::C_RX_RECOVERS);
