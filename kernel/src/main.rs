@@ -70,6 +70,18 @@ const BUILD: &str = match option_env!("WARI_BUILD") {
     None => "dev",
 };
 
+/// Full, self-identifying build id — `<number>-<branch-slug>`, e.g.
+/// `157-phase-2-net-quiet-release-console`. Distinct across branches, so
+/// the boot banner is unambiguous even when two branches reach the same
+/// numeric build (the bare number collides — this is the fix). Set by the
+/// build scripts alongside `WARI_BUILD`; falls back to the bare number for
+/// ad-hoc `cargo build`. The numeric `BUILD` still drives the
+/// release-verify / stale-driver guard, which grep an exact number.
+const BUILD_ID: &str = match option_env!("WARI_BUILD_ID") {
+    Some(s) => s,
+    None => BUILD,
+};
+
 /// Greppable build tag baked into the kernel ELF so `wari status`
 /// (and any external tooling) can extract the actual build number
 /// the binary was compiled with — independent of `.build_number`,
@@ -84,6 +96,30 @@ pub static WARI_BUILD_TAG: [u8; 64] = {
     let mut buf = [0u8; 64];
     let prefix = b"WARI-BUILD-TAG-";
     let suffix = BUILD.as_bytes();
+    let mut i = 0;
+    while i < prefix.len() {
+        buf[i] = prefix[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < suffix.len() && i < buf.len() - 1 {
+        buf[i] = suffix[j];
+        i += 1;
+        j += 1;
+    }
+    buf
+};
+
+/// Greppable full build id — `WARI-BUILD-ID-<number>-<branch-slug>` — so
+/// tooling (and `strings`) can extract the exact build, branch included,
+/// distinct from the numeric `WARI-BUILD-TAG` the release-verify greps.
+/// Buffer is larger because the branch slug can be long.
+#[used]
+#[no_mangle]
+pub static WARI_BUILD_ID_TAG: [u8; 96] = {
+    let mut buf = [0u8; 96];
+    let prefix = b"WARI-BUILD-ID-";
+    let suffix = BUILD_ID.as_bytes();
     let mut i = 0;
     while i < prefix.len() {
         buf[i] = prefix[i];
@@ -125,7 +161,7 @@ const BOOT_HART_ID: usize = 0;
 #[no_mangle]
 pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
     mmio::uart_ns16550::init();
-    boot::stage_banner(BUILD, BOOT_HART_ID);
+    boot::stage_banner(BUILD_ID, BOOT_HART_ID);
 
     if let Err(e) = mem::kvm::init() {
         kprintln!("MMU init failed: {:?}", e);
