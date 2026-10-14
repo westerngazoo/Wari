@@ -205,6 +205,8 @@ non-trivial.
 * \[ ] `cargo clippy -- -D warnings` clean
 * \[ ] `cargo test` passes (host tests)
 * \[ ] QEMU integration passes (if applicable)
+* \[ ] Silicon run passes on the VF2 (required for driver / boot / MMIO
+  / DMA / timing changes; QEMU alone does not clear these)
 * \[ ] `docs/invariants.md` updated if new unsafe landed
 * \[ ] Local verification commands reproduce claimed output
 
@@ -229,14 +231,28 @@ Test coverage grows **with** the code, not after it. Every phase
 milestone has test gates that must pass before the milestone is
 considered done.
 
-### The four test layers
+### The five test layers
 
 |Layer|Tool|Runs on|Gate|
 |-|-|-|-|
 |**Unit**|`cargo test` (host)|Pure-logic modules|Every PR|
 |**Integration**|QEMU `virt` RV64|Full kernel boot + WASM execution|Every PR that touches kernel or runtime|
+|**Silicon (field)**|VisionFive 2 (JH7110); Orange Pi R2S as it lands|Full boot + net on real hardware|Every PR touching drivers, boot, MMIO, DMA or timing|
 |**Security (adversarial)**|WASM modules designed to fail|QEMU|Every PR that touches trust boundary|
 |**Fuzz**|cargo-fuzz + wasmi's validator|Host|Periodic (weekly) + pre-release|
+
+**QEMU and silicon are two different tests, and neither substitutes for
+the other.** QEMU is deterministic and proves logic: it will reproduce a
+scheduler bug or a bad PTE every time. It models none of the things that
+have actually cost us weeks — DMA/cache coherence, descriptor writeback
+visibility, PHY/RGMII behaviour, real interrupt latency, MMC counters.
+The intermittent GMAC RX wedge is the canonical example: it is invisible
+in QEMU and swings 0–57% boot-to-boot on the VF2. A green QEMU run is
+necessary and not sufficient for anything that touches hardware.
+
+Building is always `make` (see the build-pipeline section above). There
+is no mvn/gradle/container step anywhere in this project, and nothing in
+this repo is gated on an external code-quality service.
 
 ### Unit-testable modules (the pure-logic discipline)
 
