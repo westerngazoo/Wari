@@ -1,5 +1,10 @@
 # CLAUDE.md — 和力 · Wari
 
+*Contributors working inside HappyDev also follow an internal process
+(tickets, branches, review) kept in an untracked `CLAUDE.local.md` and in
+the team vault. It is deliberately not part of this repository — everything
+here is public.*
+
 > \*\*Mission:\*\* A world-class, formally-verifiable, WASM-native operating
 > system for RISC-V targeting sovereign cloud infrastructure in Latin
 > America. Every decision optimizes for \*\*correctness, security, and size\*\*

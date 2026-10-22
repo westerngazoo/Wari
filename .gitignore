@@ -9,6 +9,12 @@
 # rustc crash dumps — R8 says reproducible builds, ICE dumps are not
 rustc-ice-*.txt
 
+# HappyDev-internal process notes. Deliberately NOT tracked: this repo is
+# AGPL and mirrored publicly, and that file names internal hosts, vault
+# paths and the credentials file. The vault is its authority; this is a
+# local convenience copy so the agent loads it automatically.
+CLAUDE.local.md
+
 # Editor / OS noise
 .vscode/
 .idea/
