@@ -2,8 +2,9 @@
 # Wari — VisionFive 2 Bringup
 
 This is the one-time setup to make a VF2 board ready to receive Wari
-deploys. After this, every kernel update is `make deploy` on the dev
-machine + `wari go` on the VF2.
+deploys. After this, every kernel update is `scripts/build.sh
+<profile> --publish` + a push on the dev machine, and `wari go` on the
+VF2. The build side is documented in `docs/build-workflow.md`.
 
 ## Prerequisites
 - VF2 booted into Debian Bookworm/Sid (the default StarFive image works)
@@ -16,31 +17,40 @@ machine + `wari go` on the VF2.
 ```bash
 cd /root
 git clone https://github.com/westerngazoo/Wari.git wari
-cp wari/scripts/wari-upgrade.sh /root/
-echo 'source /root/wari-upgrade.sh' >> /root/.bashrc
+echo 'source /root/wari/scripts/wari-upgrade.sh' >> /root/.bashrc
 source /root/.bashrc
 wari status                  # smoke-check
 ```
 
-Expected `wari status` output: build number, last 5 commits, and
-`/boot/kernel.bin` size.
+Source the script from the repo, never from a frozen copy: when a pull
+ships a new `wari-upgrade.sh`, `wari go` re-sources it and re-runs
+under the new logic.
+
+Expected `wari status` output: branch, local HEAD vs `origin/main`,
+the embedded build tag and md5 of both `build/wari.bin` and
+`/boot/kernel.bin`, and the last 5 commits.
 
 ## Per-deploy flow
 
 On the dev machine:
 
 ```bash
-make deploy                  # builds wari.bin, commits, pushes to GitHub
+scripts/build.sh release --publish    # builds, verifies, publishes the release
+git add build/wari.release .build_number
+git commit -m "Build N [release]: <what changed>"
+git push origin <branch>
 ```
 
 On the VF2:
 
 ```bash
-wari go                      # git pull + cp to /boot/kernel.bin + reboot
+wari go                      # main: pull + fetch release + flash /boot/kernel.bin + reboot
+wari go-branch <branch>      # same, for a testing branch
 ```
 
 The board reboots into Wari. Watch the COM7 serial console for the
-Phase-0 demo banner:
+Phase-0 demo banner, and check that `build N` is the build you just
+published:
 
 ```
 Wari v0 build N boot OK, hart 1
@@ -56,13 +66,14 @@ Hello from Wari
 If the user kept goose-os's previous kernel as `/boot/kernel.bin.bak`,
 restoring it (`cp /boot/kernel.bin.bak /boot/kernel.bin && reboot`) brings
 Debian back. Otherwise re-flash the StarFive Debian image to the SD
-card. A full recovery doc lands in Phase-1b at `docs/vf2-recovery.md`.
+card. A dedicated recovery doc has not been written yet.
 
 ## Subnet caveat
 
 If the dev machine and VF2 are on different subnets (common with DHCP),
 direct SSH from dev to VF2 won't work. The deploy flow is intentionally
-GitHub-mediated: `make deploy` pushes to GitHub; the VF2 pulls. Both
-sides need internet only, no host-to-host routing. As a side benefit,
-every flashed kernel is a git commit — R8 reproducibility extends from
-the dev machine to the device.
+GitHub-mediated: the dev machine pushes the branch and publishes the
+release; the VF2 pulls the branch and downloads the binary. Both sides
+need internet only, no host-to-host routing. As a side benefit, every
+flashed kernel maps to a git commit and a release tag — R8
+reproducibility extends from the dev machine to the device.

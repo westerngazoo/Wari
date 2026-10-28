@@ -65,7 +65,7 @@ reasoning before executing. Gustavo may overrule; Claude complies.
 The kernel `include_bytes!`s pre-built, signed Tier-2 driver wasm
 blobs (`build/drivers/net-{qemu,vf2}.signed.wasm`). Those wasm blobs
 are produced from `drivers/net/src/` — a **separate cargo crate**
-targeting `wasm32-unknown-unknown`. If you bypass `make` and run
+targeting `wasm32-unknown-unknown`. If you bypass `scripts/build.sh` and run
 `cd kernel && cargo build` directly after editing driver source,
 cargo will happily embed the **last-known-good** driver blob,
 which may be many builds stale.
@@ -76,18 +76,18 @@ silently reused the build-106 artifact while the kernel banner read
 "build 114". Every diagnostic added to the driver during that window
 was a no-op because the kernel wasn't running our updated code.
 
-**Always build via `make`:**
+**Always build via `scripts/build.sh`** (see `docs/build-workflow.md`):
 
 ```bash
-make kernel-vf2     # rebuilds drivers/net wasm32 → signs → links kernel
-make build          # same flow for the QEMU variant
+scripts/build.sh release    # VF2: test gate → drivers wasm32 → sign → kernel → verify tags
+scripts/build.sh qemu       # same flow for the QEMU variant
 ```
 
 **Never run `cd kernel && cargo build` after touching driver code.**
 The kernel's `build.rs` now contains a stale-driver guard that greps
 the embedded signed wasm for a `WARI-DRV-BUILD-TAG-N` rodata string
 and fails the build if `N != WARI_BUILD`. If that check ever fires,
-run `make` and don't try to "fix" it by editing `build.rs`.
+run `scripts/build.sh` and don't try to "fix" it by editing `build.rs`.
 
 When adding new driver code, **double-check it compiles to wasm32**.
 No inline asm. No RISC-V intrinsics. No `core::arch::asm!`. MMIO goes

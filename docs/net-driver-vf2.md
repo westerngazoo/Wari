@@ -202,8 +202,8 @@ NOT currently dropping frames, kept here for the day symptoms change:
 
 ```bash
 # Dev machine — build (see build-workflow.md for profiles):
-scripts/build.sh trace          # or release / debug / qemu
-git add build/wari.bin .build_number && git commit && git push
+scripts/build.sh trace --publish   # or release / debug / qemu
+git add build/wari.release .build_number && git commit && git push
 
 # VF2 (Debian side):
 sudo ip route del default via 192.168.50.1 dev end1   # OpenWrt has no WAN
