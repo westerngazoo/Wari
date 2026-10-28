@@ -107,26 +107,37 @@ asset.
 bash scripts/wari-build.sh <branch> [release|debug|trace]   # default: main release
 
 # On the VF2 (Debian):
-wari flash <N>                        # -y skips the reboot prompt
+wari go --build <branch>.<N>          # -y skips the reboot prompt
+wari upgrade --build <branch>.<N>     # flash only; reboot later with `wari reboot`
 ```
 
-`wari-build.sh` fast-forwards the branch from Gitea, pushes it to the
-GitHub mirror, runs `build.sh <profile> --publish`, puts
+`wari-build.sh` fast-forwards the branch from Gitea, pushes it and `main` to
+the GitHub mirror (fast-forward only; a divergence stops the script),
+runs `build.sh <profile> --publish`, puts
 `.build_number` and `build/wari.release` back (nothing to commit) and
-prints the `wari flash` line.
+prints the `wari go --build` line.
 
-`wari flash <N>` needs no git on the board side: it finds the release
-tag `build-<N>-*` on GitHub, downloads its `wari.bin`, checks it
+Nothing else mirrors Gitea to GitHub. A Gitea push-mirror is not used
+because it pushes `--mirror`, which would prune the branches and the
+`build-*` release tags that exist only on GitHub.
+
+A build is named `<branch>.<N>` (e.g. `main.163`,
+`phase-2/net-quiet-release-console.158`): it maps to the release tag
+`build-<N>-<branch-slug>`, the slug being the branch with `/` turned
+into `-`. N alone is globally unique; the branch is a cross-check
+against a typo in N, and it disambiguates the numbers published before
+the global numbering, which collide across branches.
+
+`--build` needs no git on the board side: it finds that release tag on
+GitHub (if the tag is missing it says which branch N belongs to),
+downloads its `wari.bin`, checks it
 against the sha256 in the release notes and checks that the embedded
 `WARI-BUILD-TAG` is N, then copies it to `/boot/kernel.bin` with an
-md5 check and an atomic rename and asks before rebooting. Numbers
-published before the global numbering collide across branches; for
-those it lists the candidates and takes the full tag
-(`wari flash build-155-main`).
+md5 check and an atomic rename; `go` then asks before rebooting.
 
 `wari go` / `go-branch` (pull the branch, read `build/wari.release`,
 download, flash) still work for branches whose pointer is committed,
-but need that pointer commit on the branch; prefer `wari flash`.
+but need that pointer commit on the branch; prefer `--build`.
 
 The Makefile's `kernel-vf2`, `deploy` and `flash-sd` targets and
 `deploy.bat` predate this flow (they commit and push the binary and

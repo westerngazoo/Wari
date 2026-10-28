@@ -4,19 +4,22 @@
 #
 # Mirrors a branch to GitHub, builds the VF2 kernel for it, and
 # publishes wari.bin + signed driver blobs as the GitHub Release
-# build-<N>-<branch>. N is globally unique (build.sh --publish), so
-# the board needs nothing but the number.
+# build-<N>-<branch>. N is globally unique (build.sh --publish); the
+# board names the build as <branch>.<N>.
 #
 #   Usage:  bash scripts/wari-build.sh [branch] [profile]
 #           branch  default: main
 #           profile default: release (or debug / trace)
 #
 #   Then on the VF2 (its Debian console — the "pull side"):
-#       wari flash <N> -y
+#       wari go --build <branch>.<N> -y
 #
 # Why GitHub: the VF2 downloads releases from the public GitHub repo,
-# while day-to-day pushes go to Gitea (origin). The mirror push keeps
-# the source of every published binary reachable next to it.
+# while day-to-day pushes go to Gitea (origin). Nothing mirrors Gitea
+# to GitHub on its own, so this script is the mirror: every run pushes
+# the built branch and main. A Gitea push-mirror was rejected because it
+# pushes --mirror, which would prune the branches and build-* release
+# tags that exist only on GitHub.
 set -euo pipefail
 
 BRANCH="${1:-main}"
@@ -45,6 +48,9 @@ git merge --ff-only "origin/$BRANCH"
 # before the publish. A non-fast-forward here means the mirror
 # diverged from Gitea: stop and look, never force it.
 git push github "$BRANCH"
+# main too, so the public mirror follows merges without a manual push.
+git fetch origin main
+git push github "refs/remotes/origin/main:refs/heads/main"
 
 # build.sh is not chmod +x, so it is invoked through bash on purpose.
 bash scripts/build.sh "$PROFILE" --publish
@@ -58,4 +64,4 @@ git checkout -- .build_number build/wari.release
 
 echo ""
 echo "=== done: build $N published — on the VF2 run: ==="
-echo "        wari flash $N -y"
+echo "        wari go --build $BRANCH.$N -y"

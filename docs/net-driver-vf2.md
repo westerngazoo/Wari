@@ -205,7 +205,7 @@ NOT currently dropping frames, kept here for the day symptoms change:
 bash scripts/wari-build.sh <branch> trace   # or release / debug; prints N
 
 # VF2 (Debian side):
-wari flash <N> -y               # drops the end1 default route itself
+wari go --build <branch>.<N> -y   # drops the end1 default route itself
 
 # Laptop:
 arp -d * && ping -t 192.168.50.10

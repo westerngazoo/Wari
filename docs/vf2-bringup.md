@@ -3,7 +3,7 @@
 
 This is the one-time setup to make a VF2 board ready to receive Wari
 deploys. After this, every kernel update is `scripts/wari-build.sh
-<branch>` on the dev machine and `wari flash <N>` on the VF2. The build side is documented in `docs/build-workflow.md`.
+<branch>` on the dev machine and `wari go --build <branch>.<N>` on the VF2. The build side is documented in `docs/build-workflow.md`.
 
 ## Prerequisites
 - VF2 booted into Debian Bookworm/Sid (the default StarFive image works)
@@ -40,7 +40,7 @@ bash scripts/wari-build.sh <branch>   # mirror to GitHub, build, publish; prints
 On the VF2:
 
 ```bash
-wari flash <N>               # download build N's release, verify, flash, reboot
+wari go --build <branch>.<N>   # download build N's release, verify, flash, reboot
 ```
 
 The board reboots into Wari. Watch the COM7 serial console for the

@@ -42,8 +42,9 @@
 #   --publish        create the GitHub Release build-<N>-<branch-slug>.
 #                    N is then GLOBAL: one past the highest published
 #                    build on any branch, so it names exactly one binary
-#                    (the board flashes it with `wari flash <N>`). The
-#                    commit must already be pushed to GitHub.
+#                    (the board flashes it with
+#                    `wari go --build <branch>.<N>`). The commit
+#                    must already be pushed to GitHub.
 #
 # OUTPUTS
 #   Canonical (what the kernel embeds / wari-upgrade flashes — committed):
@@ -287,6 +288,8 @@ echo "=== BUILD $NEXT_BUILD OK ($PROFILE) ==="
 echo "    canonical: build/wari.bin (embedded tag WARI-BUILD-TAG-$NEXT_BUILD)"
 echo "    archive:   $OUT/"
 echo ""
-echo "    To deploy: build with --publish, then git add build/wari.release .build_number && git commit && git push"
-echo "    On VF2:    wari upgrade && wari go -y      (flashes main)"
-echo "               wari go-branch $BRANCH          (flashes this branch)"
+if [ "$PUBLISH" = "1" ]; then
+    echo "    On VF2:    wari go --build $BRANCH.$NEXT_BUILD -y"
+else
+    echo "    To deploy: scripts/wari-build.sh $BRANCH   (mirror + build + publish)"
+fi

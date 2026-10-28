@@ -41,7 +41,7 @@ _wari_embedded_build() {
 #
 # The bound is offline and trust-free: HEAD's commit timestamp is a
 # hard lower bound on "now", and right after a pull it is within hours
-# of it in practice (`wari flash` does not pull, so there it is only
+# of it in practice (`--build` does not pull, so there it is only
 # as fresh as the last pull). Only ever moves the clock
 # FORWARD, and only when it is behind that bound. NTP would be
 # tighter but needs a route+port the isolated test net may not
@@ -290,44 +290,46 @@ _wari_countdown_and_reboot() {
 
 # Internal: download a published build straight from its GitHub
 # Release into $WARI_DIR/build/wari.bin — no pull, no branch checkout.
-# Since PM-48 build.sh gives every published build a globally unique
-# number, so "163" names one release; a full tag ("build-155-main")
-# is also accepted for the older numbers that collide across branches.
-# Returns 0 and sets BUILD_NUM + EXPECTED_MD5 for _wari_flash_and_verify.
+#
+# $1 — build id "<branch>.<N>", e.g. "PM-48-build-unico-wari-flash.163"
+#      or "phase-2/net-quiet-release-console.158". It names the release
+#      tag build-<N>-<branch-slug> (slug: '/' -> '-'), which is what
+#      build.sh --publish creates. Since PM-48 N alone is globally
+#      unique; the branch is a cross-check against flashing the wrong
+#      build by a typo in N, and it also disambiguates the pre-PM-48
+#      numbers that collide across branches.
+# Returns 0 and sets BUILD_NUM + EXPECTED_MD5 for _wari_flash_and_verify;
+# 1 with the reason printed otherwise.
 WARI_GH_REPO="${WARI_GH_REPO:-westerngazoo/Wari}"
 _wari_fetch_release() {
-    local want="$1" num tags count tag base notes want_sha got_sha got_build
-    case "$want" in
-        build-[0-9]*-*) num="${want#build-}"; num="${num%%-*}" ;;
-        *[!0-9]*|"")    echo "ERROR: expected a build number or a build-<N>-<branch> tag, got '$want'"; return 1 ;;
-        *)              num="$want" ;;
+    local id="$1" branch num tag others base notes want_sha got_sha got_build
+    branch="${id%.*}"; num="${id##*.}"
+    case "$num" in
+        ""|*[!0-9]*) num="" ;;
     esac
+    if [ -z "$num" ] || [ -z "$branch" ] || [ "$branch" = "$id" ]; then
+        echo "ERROR: expected <branch>.<build-number>, got '$id'"
+        echo "       Example: wari go --build main.163 -y"
+        return 1
+    fi
+    tag="build-$num-$(printf '%s' "$branch" | tr '/' '-')"
     cd "$WARI_DIR" || { echo "ERROR: $WARI_DIR not found"; return 1; }
     _wari_clear_test_net_default_route
     _wari_fix_clock
 
     # Release tags are git tags, so ls-remote finds them without the
     # GitHub API (no JSON parsing, no rate limit).
-    if [ "$want" = "$num" ]; then
-        tags=$(git ls-remote --tags "https://github.com/$WARI_GH_REPO.git" "build-$num-*" \
-               | sed 's|.*refs/tags/||' | grep -v '\^{}$')
-    else
-        tags=$(git ls-remote --tags "https://github.com/$WARI_GH_REPO.git" "$want" \
-               | sed 's|.*refs/tags/||' | grep -v '\^{}$')
-    fi
-    count=$(printf '%s\n' "$tags" | grep -c . || true)
-    if [ "$count" -eq 0 ]; then
-        echo "ERROR: no published release for '$want' on $WARI_GH_REPO"
-        echo "       Was it built with 'scripts/build.sh <profile> --publish'?"
+    if [ -z "$(git ls-remote --tags "https://github.com/$WARI_GH_REPO.git" "refs/tags/$tag")" ]; then
+        echo "ERROR: no published release $tag on $WARI_GH_REPO"
+        others=$(git ls-remote --tags "https://github.com/$WARI_GH_REPO.git" "build-$num-*" \
+                 | sed 's|.*refs/tags/build-[0-9]*-||' | grep -v '\^{}$' | tr '\n' ' ')
+        if [ -n "$others" ]; then
+            echo "       Build $num belongs to branch: $others"
+        else
+            echo "       Was it built with 'scripts/build.sh <profile> --publish'?"
+        fi
         return 1
     fi
-    if [ "$count" -gt 1 ]; then
-        echo "ERROR: build $num was published by more than one branch (pre-PM-48 numbering):"
-        printf '%s\n' "$tags" | sed 's/^/         /'
-        echo "       Flash one of them by its full tag: wari flash <tag>"
-        return 1
-    fi
-    tag="$tags"
 
     base="https://github.com/$WARI_GH_REPO/releases/download/$tag"
     echo "Fetching $tag ..."
@@ -361,6 +363,17 @@ _wari_fetch_release() {
 wari() {
     case "${1:-help}" in
         upgrade|up)
+            # --build <branch>.<N>: flash that published build, no git.
+            if [ "${2:-}" = "--build" ]; then
+                echo "=== Wari Upgrade: build ${3:-} ==="
+                _wari_fetch_release "${3:-}" || return 1
+                _wari_flash_and_verify || return 1
+                echo ""
+                echo "  Build $BUILD_NUM ready in $WARI_KERNEL"
+                echo "  Run 'wari reboot' to boot into it"
+                echo ""
+                return 0
+            fi
             echo "=== Wari Upgrade (main) ==="
             _wari_pull_and_verify main
             local rc_up=$?
@@ -386,21 +399,29 @@ wari() {
             ;;
         go)
             # Pull origin/main, flash, confirm, reboot. -y skips confirm.
+            # --build <branch>.<N> flashes that published build instead,
+            # with no git pull or checkout.
             local skip_confirm=""
-            [ "${2:-}" = "-y" ] && skip_confirm=1
-            echo "=== Wari Go (main) ==="
-            _wari_pull_and_verify main
-            local rc_go=$?
-            # Reload-FIRST (see upgrade case for the why).
-            if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
-                echo "  script updated in this pull — re-sourcing and re-running..."
-                unset WARI_SCRIPT_CHANGED
-                # shellcheck source=/dev/null
-                source "$WARI_DIR/scripts/wari-upgrade.sh"
-                wari "$@"
-                return $?
+            if [ "${2:-}" = "--build" ]; then
+                [ "${4:-}" = "-y" ] && skip_confirm=1
+                echo "=== Wari Go: build ${3:-} ==="
+                _wari_fetch_release "${3:-}" || return 1
+            else
+                [ "${2:-}" = "-y" ] && skip_confirm=1
+                echo "=== Wari Go (main) ==="
+                _wari_pull_and_verify main
+                local rc_go=$?
+                # Reload-FIRST (see upgrade case for the why).
+                if [ "${WARI_SCRIPT_CHANGED:-}" = "1" ]; then
+                    echo "  script updated in this pull — re-sourcing and re-running..."
+                    unset WARI_SCRIPT_CHANGED
+                    # shellcheck source=/dev/null
+                    source "$WARI_DIR/scripts/wari-upgrade.sh"
+                    wari "$@"
+                    return $?
+                fi
+                [ "$rc_go" -eq 0 ] || return 1
             fi
-            [ "$rc_go" -eq 0 ] || return 1
             _wari_flash_and_verify || return 1
             echo ""
             local flashed_build_after
@@ -466,28 +487,6 @@ wari() {
             if [ "$flashed_build_after" != "$BUILD_NUM" ] && [ "$BUILD_NUM" != "?" ]; then
                 echo "WARNING: embedded ($flashed_build_after) != .build_number ($BUILD_NUM)"
             fi
-            if [ -z "$skip_confirm" ]; then
-                read -r -p "Reboot now? [y/N] " ans </dev/tty
-                case "$ans" in
-                    y|Y|yes|YES) ;;
-                    *) echo "Aborted. Run 'wari reboot' when ready."; return 0 ;;
-                esac
-            fi
-            _wari_countdown_and_reboot 5
-            ;;
-        flash)
-            # Flash a published build by number, no git involved.
-            # Usage: wari flash <N|build-N-branch> [-y]
-            local skip_confirm=""
-            [ "${3:-}" = "-y" ] && skip_confirm=1
-            [ -n "${2:-}" ] || { echo "ERROR: usage: wari flash <build-number> [-y]"; return 1; }
-            echo "=== Wari Flash: build $2 ==="
-            _wari_fetch_release "$2" || return 1
-            _wari_flash_and_verify || return 1
-            echo "========================================"
-            echo "  READY TO REBOOT  [build $BUILD_NUM]"
-            echo "    md5: $EXPECTED_MD5"
-            echo "========================================"
             if [ -z "$skip_confirm" ]; then
                 read -r -p "Reboot now? [y/N] " ans </dev/tty
                 case "$ans" in
@@ -580,8 +579,10 @@ wari() {
             echo "  go [-y]                Upgrade (main) + confirm + reboot. -y skips confirm."
             echo "  go-branch <br> [-y]   Pull a feature branch, flash, confirm, reboot."
             echo "                          Example: wari go-branch phase-1c/net-6d-http-demo"
-            echo "  flash <N> [-y]         Download published build N from GitHub, verify, flash,"
-            echo "                          confirm, reboot. No git pull or branch checkout."
+            echo "  upgrade --build <br>.<N>       Download published build N of branch <br> from"
+            echo "                          GitHub, verify sha256 + embedded tag, flash. No git."
+            echo "  go --build <br>.<N> [-y]       Same, then confirm + reboot."
+            echo "                          Example: wari go --build main.163 -y"
             echo "  reboot   (rb)          Sanity-check flashed md5 vs repo, then reboot."
             echo "  status   (st)          Show repo HEAD vs origin, flashed md5 vs repo md5."
             echo "  demo                   Status + reboot (no pull) — for presentations."

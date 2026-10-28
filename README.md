@@ -159,7 +159,7 @@ TCP socket layer queued for Net-6c. The complete phase ladder lives in
 bash scripts/wari-build.sh <branch>   # mirror, test gate, drivers, sign, kernel, verify, release N
 
 # Then on the VF2:
-wari flash <N>               # download release N, verify, flash /boot/kernel.bin, reboot
+wari go --build <branch>.<N>  # download release N, verify, flash /boot/kernel.bin, reboot
 ```
 
 Profiles and the release flow are documented in
