@@ -38,7 +38,10 @@ scripts/build.sh <profile> [--programs a,b,c] [--no-bump] [--publish]
   incrementing (for clean-rebuilds of identical source).
 - `--publish` — create the GitHub Release `build-<N>-<branch-slug>`
   carrying `wari.bin` and both signed net-driver wasms (needs an
-  authenticated `gh`). Without it only the release pointer is written.
+  authenticated `gh`, and the commit already pushed to GitHub: the tag
+  is pinned to it). With `--publish`, N is **global** — one past the
+  highest build published from any branch. Without it only the
+  release pointer is written and N is the local count.
 
 ## What one invocation always does
 
@@ -101,23 +104,29 @@ asset.
 ## Deploying
 
 ```bash
-scripts/build.sh release --publish    # or debug / trace
-git add build/wari.release .build_number
-git commit -m "Build N [<profile>]: <what changed>"
-git push origin <branch>
+bash scripts/wari-build.sh <branch> [release|debug|trace]   # default: main release
 
 # On the VF2 (Debian):
-wari go                               # flashes main (repo must be on main)
-wari go-branch <branch>               # flashes a testing branch
+wari flash <N>                        # -y skips the reboot prompt
 ```
 
-`wari go` pulls the branch, reads `build/wari.release`, downloads that
-release's `wari.bin` when the local copy's embedded tag differs,
-checks the embedded tag against `.build_number`, copies it to
-`/boot/kernel.bin` with an md5 check and an atomic rename, then asks
-before rebooting (`-y` skips the prompt). `wari upgrade` does the same
-without rebooting. A missing release fails the download with
-"Was this build published?".
+`wari-build.sh` fast-forwards the branch from Gitea, pushes it to the
+GitHub mirror, runs `build.sh <profile> --publish`, puts
+`.build_number` and `build/wari.release` back (nothing to commit) and
+prints the `wari flash` line.
+
+`wari flash <N>` needs no git on the board side: it finds the release
+tag `build-<N>-*` on GitHub, downloads its `wari.bin`, checks it
+against the sha256 in the release notes and checks that the embedded
+`WARI-BUILD-TAG` is N, then copies it to `/boot/kernel.bin` with an
+md5 check and an atomic rename and asks before rebooting. Numbers
+published before the global numbering collide across branches; for
+those it lists the candidates and takes the full tag
+(`wari flash build-155-main`).
+
+`wari go` / `go-branch` (pull the branch, read `build/wari.release`,
+download, flash) still work for branches whose pointer is committed,
+but need that pointer commit on the branch; prefer `wari flash`.
 
 The Makefile's `kernel-vf2`, `deploy` and `flash-sd` targets and
 `deploy.bat` predate this flow (they commit and push the binary and
@@ -125,10 +134,17 @@ carry fixed lab addresses); don't use them for deployable builds.
 
 ## Build-number semantics
 
-The number is monotonic **per branch lineage**, not globally unique —
-parallel branches can both mint "build 135". Identity of any binary is
-the triple (branch, sha, embedded tag), all recorded in
-`build-info.txt` and recoverable from a flashed binary via
+A **published** build's number is globally unique: `build.sh
+--publish` takes one past the highest `build-<N>-*` release on GitHub,
+whatever branch it came from. That is what lets the board flash by
+number. Releases before this rule reused numbers per branch (three
+branches each published a "build 155"); they stay addressable by
+their full tag. Unpublished local builds keep counting from
+`.build_number` and never reach the board.
+
+The full identity of a binary is still the triple (branch, sha,
+embedded tag): it is in the release name and notes, in
+`build-info.txt`, and recoverable from a flashed binary via
 `strings kernel.bin | grep WARI-BUILD-TAG`.
 
 ## Rules

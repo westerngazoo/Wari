@@ -2,9 +2,8 @@
 # Wari — VisionFive 2 Bringup
 
 This is the one-time setup to make a VF2 board ready to receive Wari
-deploys. After this, every kernel update is `scripts/build.sh
-<profile> --publish` + a push on the dev machine, and `wari go` on the
-VF2. The build side is documented in `docs/build-workflow.md`.
+deploys. After this, every kernel update is `scripts/wari-build.sh
+<branch>` on the dev machine and `wari flash <N>` on the VF2. The build side is documented in `docs/build-workflow.md`.
 
 ## Prerequisites
 - VF2 booted into Debian Bookworm/Sid (the default StarFive image works)
@@ -35,17 +34,13 @@ the embedded build tag and md5 of both `build/wari.bin` and
 On the dev machine:
 
 ```bash
-scripts/build.sh release --publish    # builds, verifies, publishes the release
-git add build/wari.release .build_number
-git commit -m "Build N [release]: <what changed>"
-git push origin <branch>
+bash scripts/wari-build.sh <branch>   # mirror to GitHub, build, publish; prints N
 ```
 
 On the VF2:
 
 ```bash
-wari go                      # main: pull + fetch release + flash /boot/kernel.bin + reboot
-wari go-branch <branch>      # same, for a testing branch
+wari flash <N>               # download build N's release, verify, flash, reboot
 ```
 
 The board reboots into Wari. Watch the COM7 serial console for the

@@ -202,13 +202,10 @@ NOT currently dropping frames, kept here for the day symptoms change:
 
 ```bash
 # Dev machine — build (see build-workflow.md for profiles):
-scripts/build.sh trace --publish   # or release / debug / qemu
-git add build/wari.release .build_number && git commit && git push
+bash scripts/wari-build.sh <branch> trace   # or release / debug; prints N
 
 # VF2 (Debian side):
-sudo ip route del default via 192.168.50.1 dev end1   # OpenWrt has no WAN
-wari upgrade && wari go -y      # flash main
-wari go-branch <branch>         # or flash a testing branch
+wari flash <N> -y               # drops the end1 default route itself
 
 # Laptop:
 arp -d * && ping -t 192.168.50.10

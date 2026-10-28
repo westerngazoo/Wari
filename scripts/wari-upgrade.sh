@@ -29,6 +29,37 @@ _wari_embedded_build() {
     fi
 }
 
+# The VF2 has no battery-backed RTC: every cold boot the clock
+# restarts near the last-known/epoch time. When it lands BEFORE
+# the TLS cert's notBefore, curl aborts with "certificate is not
+# yet valid" and the flash fails for a reason that has nothing to
+# do with the build (observed 2026-08-13: board at Jul 25 vs a
+# freshly-rotated GitHub cert). Fix the clock instead of teaching
+# the operator a --insecure workaround: dropping cert validation
+# on the binary-download path is exactly the wrong trade for a
+# kernel image.
+#
+# The bound is offline and trust-free: HEAD's commit timestamp is a
+# hard lower bound on "now", and right after a pull it is within hours
+# of it in practice (`wari flash` does not pull, so there it is only
+# as fresh as the last pull). Only ever moves the clock
+# FORWARD, and only when it is behind that bound. NTP would be
+# tighter but needs a route+port the isolated test net may not
+# have; this needs nothing beyond the pull that already happened.
+_wari_fix_clock() {
+    local floor now
+    floor=$(git -C "$WARI_DIR" log -1 --format=%ct HEAD 2>/dev/null) || return 0
+    [ -n "$floor" ] || return 0
+    now=$(date +%s)
+    if [ "$now" -lt "$floor" ]; then
+        echo "  clock: $(date -u '+%Y-%m-%d %H:%M UTC') is before HEAD's commit"
+        echo "         (no RTC battery) — advancing to avoid a TLS date failure"
+        date -u -s "@$floor" >/dev/null 2>&1 \
+            && echo "  clock: now $(date -u '+%Y-%m-%d %H:%M UTC')" \
+            || echo "  clock: WARNING could not set (not root?) — TLS may fail"
+    fi
+}
+
 # Internal: pull a branch and verify the resulting wari.bin. Returns:
 #   0  + sets BUILD_NUM + EXPECTED_MD5      — repo is at latest
 #   1                                        — abort with reason already printed
@@ -153,36 +184,6 @@ _wari_pull_and_verify() {
         fi
     fi
 
-    # The VF2 has no battery-backed RTC: every cold boot the clock
-    # restarts near the last-known/epoch time. When it lands BEFORE
-    # the TLS cert's notBefore, curl aborts with "certificate is not
-    # yet valid" and the flash fails for a reason that has nothing to
-    # do with the build (observed 2026-08-13: board at Jul 25 vs a
-    # freshly-rotated GitHub cert). Fix the clock instead of teaching
-    # the operator a --insecure workaround: dropping cert validation
-    # on the binary-download path is exactly the wrong trade for a
-    # kernel image.
-    #
-    # The bound is offline and trust-free: HEAD was just fetched from
-    # origin, so its commit timestamp is a hard lower bound on "now"
-    # and is within hours of it in practice. Only ever moves the clock
-    # FORWARD, and only when it is behind that bound. NTP would be
-    # tighter but needs a route+port the isolated test net may not
-    # have; this needs nothing beyond the pull that already happened.
-    _wari_fix_clock() {
-        local floor now
-        floor=$(git log -1 --format=%ct HEAD 2>/dev/null) || return 0
-        [ -n "$floor" ] || return 0
-        now=$(date +%s)
-        if [ "$now" -lt "$floor" ]; then
-            echo "  clock: $(date -u '+%Y-%m-%d %H:%M UTC') is before HEAD's commit"
-            echo "         (no RTC battery) — advancing to avoid a TLS date failure"
-            date -u -s "@$floor" >/dev/null 2>&1 \
-                && echo "  clock: now $(date -u '+%Y-%m-%d %H:%M UTC')" \
-                || echo "  clock: WARNING could not set (not root?) — TLS may fail"
-        fi
-    }
-
     # Artifact-release flow: wari.bin is no longer tracked by git
     # (binary artifacts made every parallel branch conflict on an
     # unmergeable file). The repo tracks build/wari.release — a
@@ -285,6 +286,76 @@ _wari_countdown_and_reboot() {
     done
     printf "\rRebooting now...                  \n"
     reboot
+}
+
+# Internal: download a published build straight from its GitHub
+# Release into $WARI_DIR/build/wari.bin — no pull, no branch checkout.
+# Since PM-48 build.sh gives every published build a globally unique
+# number, so "163" names one release; a full tag ("build-155-main")
+# is also accepted for the older numbers that collide across branches.
+# Returns 0 and sets BUILD_NUM + EXPECTED_MD5 for _wari_flash_and_verify.
+WARI_GH_REPO="${WARI_GH_REPO:-westerngazoo/Wari}"
+_wari_fetch_release() {
+    local want="$1" num tags count tag base notes want_sha got_sha got_build
+    case "$want" in
+        build-[0-9]*-*) num="${want#build-}"; num="${num%%-*}" ;;
+        *[!0-9]*|"")    echo "ERROR: expected a build number or a build-<N>-<branch> tag, got '$want'"; return 1 ;;
+        *)              num="$want" ;;
+    esac
+    cd "$WARI_DIR" || { echo "ERROR: $WARI_DIR not found"; return 1; }
+    _wari_clear_test_net_default_route
+    _wari_fix_clock
+
+    # Release tags are git tags, so ls-remote finds them without the
+    # GitHub API (no JSON parsing, no rate limit).
+    if [ "$want" = "$num" ]; then
+        tags=$(git ls-remote --tags "https://github.com/$WARI_GH_REPO.git" "build-$num-*" \
+               | sed 's|.*refs/tags/||' | grep -v '\^{}$')
+    else
+        tags=$(git ls-remote --tags "https://github.com/$WARI_GH_REPO.git" "$want" \
+               | sed 's|.*refs/tags/||' | grep -v '\^{}$')
+    fi
+    count=$(printf '%s\n' "$tags" | grep -c . || true)
+    if [ "$count" -eq 0 ]; then
+        echo "ERROR: no published release for '$want' on $WARI_GH_REPO"
+        echo "       Was it built with 'scripts/build.sh <profile> --publish'?"
+        return 1
+    fi
+    if [ "$count" -gt 1 ]; then
+        echo "ERROR: build $num was published by more than one branch (pre-PM-48 numbering):"
+        printf '%s\n' "$tags" | sed 's/^/         /'
+        echo "       Flash one of them by its full tag: wari flash <tag>"
+        return 1
+    fi
+    tag="$tags"
+
+    base="https://github.com/$WARI_GH_REPO/releases/download/$tag"
+    echo "Fetching $tag ..."
+    curl -fSL --retry 3 -o build/wari.bin.tmp "$base/wari.bin" || {
+        echo "ERROR: download failed: $base/wari.bin"; rm -f build/wari.bin.tmp; return 1; }
+
+    # build.sh writes the sha256 of every asset into the release notes.
+    notes=$(curl -fsSL "https://api.github.com/repos/$WARI_GH_REPO/releases/tags/$tag" || true)
+    want_sha=$(printf '%s' "$notes" | grep -o '[0-9a-f]\{64\}  build/wari.bin' | head -1 | cut -c1-64)
+    got_sha=$(sha256sum build/wari.bin.tmp | awk '{print $1}')
+    if [ -z "$want_sha" ]; then
+        echo "  WARNING: no sha256 for wari.bin in the release notes — relying on the embedded tag"
+    elif [ "$want_sha" != "$got_sha" ]; then
+        echo "ERROR: sha256 mismatch: notes=$want_sha downloaded=$got_sha"
+        rm -f build/wari.bin.tmp; return 1
+    else
+        echo "  sha256 matches the release notes"
+    fi
+
+    got_build=$(_wari_embedded_build build/wari.bin.tmp)
+    if [ "$got_build" != "$num" ]; then
+        echo "ERROR: $tag carries embedded build '$got_build', expected $num"
+        rm -f build/wari.bin.tmp; return 1
+    fi
+    mv build/wari.bin.tmp build/wari.bin
+    BUILD_NUM="$num"
+    EXPECTED_MD5=$(md5sum build/wari.bin | awk '{print $1}')
+    return 0
 }
 
 wari() {
@@ -404,6 +475,28 @@ wari() {
             fi
             _wari_countdown_and_reboot 5
             ;;
+        flash)
+            # Flash a published build by number, no git involved.
+            # Usage: wari flash <N|build-N-branch> [-y]
+            local skip_confirm=""
+            [ "${3:-}" = "-y" ] && skip_confirm=1
+            [ -n "${2:-}" ] || { echo "ERROR: usage: wari flash <build-number> [-y]"; return 1; }
+            echo "=== Wari Flash: build $2 ==="
+            _wari_fetch_release "$2" || return 1
+            _wari_flash_and_verify || return 1
+            echo "========================================"
+            echo "  READY TO REBOOT  [build $BUILD_NUM]"
+            echo "    md5: $EXPECTED_MD5"
+            echo "========================================"
+            if [ -z "$skip_confirm" ]; then
+                read -r -p "Reboot now? [y/N] " ans </dev/tty
+                case "$ans" in
+                    y|Y|yes|YES) ;;
+                    *) echo "Aborted. Run 'wari reboot' when ready."; return 0 ;;
+                esac
+            fi
+            _wari_countdown_and_reboot 5
+            ;;
         reboot|rb)
             # Verify what's flashed is actually our latest before
             # we reboot — protects against a hand-edited /boot.
@@ -487,6 +580,8 @@ wari() {
             echo "  go [-y]                Upgrade (main) + confirm + reboot. -y skips confirm."
             echo "  go-branch <br> [-y]   Pull a feature branch, flash, confirm, reboot."
             echo "                          Example: wari go-branch phase-1c/net-6d-http-demo"
+            echo "  flash <N> [-y]         Download published build N from GitHub, verify, flash,"
+            echo "                          confirm, reboot. No git pull or branch checkout."
             echo "  reboot   (rb)          Sanity-check flashed md5 vs repo, then reboot."
             echo "  status   (st)          Show repo HEAD vs origin, flashed md5 vs repo md5."
             echo "  demo                   Status + reboot (no pull) — for presentations."
