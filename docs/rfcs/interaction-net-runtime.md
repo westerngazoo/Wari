@@ -9,9 +9,11 @@
 >
 > **Origin**: a feasibility study of GC-free memory management for Wari
 > (Perceus, linear/quantitative types, regions, interaction nets, an
-> FPGA reduction unit, analog Geometry of Interaction). This RFC keeps
-> the parts that fit Wari's architecture and records why the rest does
-> not.
+> FPGA reduction unit, analog Geometry of Interaction), kept as written
+> in Spanish in
+> [`docs/Viabilidad Arquitectonica - Memoria Lambda WASM y Hardware (Wari OS).md`](../Viabilidad%20Arquitectonica%20-%20Memoria%20Lambda%20WASM%20y%20Hardware%20(Wari%20OS).md).
+> This RFC keeps the parts that fit Wari's architecture and records why
+> the rest does not.
 
 ---
 
