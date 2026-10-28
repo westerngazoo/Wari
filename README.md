@@ -156,13 +156,16 @@ TCP socket layer queued for Net-6c. The complete phase ladder lives in
 
 ```bash
 # Dev machine
-make kernel-vf2              # build kernel + driver wasm, sign, verify
-make verify                  # confirm all artifacts at the same build tag
+scripts/build.sh release --publish   # test gate, drivers, sign, kernel, verify, release
+git add build/wari.release .build_number && git commit && git push
 
-# Push, then on the VF2:
-wari upgrade                 # pull origin, flash /boot/kernel.bin, verify md5
-wari go -y                   # countdown + reboot into Wari
+# Then on the VF2:
+wari go                      # pull, fetch the release, flash /boot/kernel.bin, reboot
+wari go-branch <branch>      # same, for a testing branch
 ```
+
+Profiles and the release flow are documented in
+[`docs/build-workflow.md`](docs/build-workflow.md).
 
 Initial bring-up (cloning the repository on the device and installing
 the `wari` shell function) is documented in
