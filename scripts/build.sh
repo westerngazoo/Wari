@@ -24,7 +24,7 @@
 #
 # USAGE
 # -----
-#   scripts/build.sh <profile> [--programs a,b,c] [--no-bump]
+#   scripts/build.sh <profile> [--programs a,b,c] [--no-bump] [--publish]
 #
 # PROFILES
 #   release   VF2 hardware, production features        (vf2 gmac1)
@@ -39,6 +39,12 @@
 #                    wari_<name>.wasm -> build/apps/<name>.wasm
 #   --no-bump        rebuild at the CURRENT .build_number (no increment).
 #                    For rebuilding identical sources after a clean.
+#   --publish        create the GitHub Release build-<N>-<branch-slug>.
+#                    N is then GLOBAL: one past the highest published
+#                    build on any branch, so it names exactly one binary
+#                    (the board flashes it with
+#                    `wari go --build <branch>.<N>`). The commit
+#                    must already be pushed to GitHub.
 #
 # OUTPUTS
 #   Canonical (what the kernel embeds / wari-upgrade flashes — committed):
@@ -86,7 +92,7 @@ case "$PROFILE" in
     debug)   DRV_FEATURES="vf2 gmac1";          KRN_FEATURES="vf2,debug-kernel"; PLATFORM="vf2"  ;;
     trace)   DRV_FEATURES="vf2 gmac1 net-diag"; KRN_FEATURES="vf2";              PLATFORM="vf2"  ;;
     qemu)    DRV_FEATURES="qemu";               KRN_FEATURES="qemu";             PLATFORM="qemu" ;;
-    *) echo "usage: scripts/build.sh <release|debug|trace|qemu> [--programs a,b] [--no-bump]"; exit 2 ;;
+    *) echo "usage: scripts/build.sh <release|debug|trace|qemu> [--programs a,b] [--no-bump] [--publish]"; exit 2 ;;
 esac
 
 # ── build number (read now, written only after verify) ──────────
@@ -96,6 +102,21 @@ if [ "$BUMP" = "1" ]; then
     NEXT_BUILD=$(( CUR_BUILD + 1 ))
 else
     NEXT_BUILD=$CUR_BUILD
+fi
+
+# Build numbers used to be monotonic per branch and collided across
+# branches (three branches each published a "build 155"), so a number
+# alone could not name a binary. A publish takes the next number after
+# every release already on GitHub instead, which makes N unique. An
+# unpublished build never reaches the board and keeps the local count.
+GH_REPO="westerngazoo/Wari"
+if [ "$BUMP" = "1" ] && [ "$PUBLISH" = "1" ]; then
+    STEP="global-build-number"
+    MAX_PUBLISHED="$(gh release list -R "$GH_REPO" --limit 1000 --json tagName --jq '.[].tagName' \
+        | sed -n 's/^build-\([0-9][0-9]*\)-.*/\1/p' | sort -n | tail -1)"
+    if [ "${MAX_PUBLISHED:-0}" -ge "$NEXT_BUILD" ]; then
+        NEXT_BUILD=$(( MAX_PUBLISHED + 1 ))
+    fi
 fi
 
 BRANCH="$(git branch --show-current 2>/dev/null || true)"
@@ -247,7 +268,9 @@ if [ "$PUBLISH" = "1" ]; then
         shasum -a 256 build/wari.bin build/drivers/net-vf2.signed.wasm build/drivers/net-qemu.signed.wasm 2>/dev/null \
           || sha256sum build/wari.bin build/drivers/net-vf2.signed.wasm build/drivers/net-qemu.signed.wasm
     } > /tmp/wari-release-notes.txt
-    gh release create "$REL_TAG" \
+    # --target pins the tag to the commit that was built; without it gh
+    # tags the default branch's HEAD, whatever branch was built.
+    gh release create "$REL_TAG" -R "$GH_REPO" --target "$(git rev-parse HEAD)" \
         build/wari.bin \
         build/drivers/net-vf2.signed.wasm \
         build/drivers/net-qemu.signed.wasm \
@@ -265,6 +288,8 @@ echo "=== BUILD $NEXT_BUILD OK ($PROFILE) ==="
 echo "    canonical: build/wari.bin (embedded tag WARI-BUILD-TAG-$NEXT_BUILD)"
 echo "    archive:   $OUT/"
 echo ""
-echo "    To deploy: build with --publish, then git add build/wari.release .build_number && git commit && git push"
-echo "    On VF2:    wari upgrade && wari go -y      (flashes main)"
-echo "               wari go-branch $BRANCH          (flashes this branch)"
+if [ "$PUBLISH" = "1" ]; then
+    echo "    On VF2:    wari go --build $BRANCH.$NEXT_BUILD -y"
+else
+    echo "    To deploy: scripts/wari-build.sh $BRANCH   (mirror + build + publish)"
+fi

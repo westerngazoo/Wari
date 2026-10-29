@@ -2,9 +2,8 @@
 # Wari — VisionFive 2 Bringup
 
 This is the one-time setup to make a VF2 board ready to receive Wari
-deploys. After this, every kernel update is `scripts/build.sh
-<profile> --publish` + a push on the dev machine, and `wari go` on the
-VF2. The build side is documented in `docs/build-workflow.md`.
+deploys. After this, every kernel update is `scripts/wari-build.sh
+<branch>` on the dev machine and `wari go --build <branch>.<N>` on the VF2. The build side is documented in `docs/build-workflow.md`.
 
 ## Prerequisites
 - VF2 booted into Debian Bookworm/Sid (the default StarFive image works)
@@ -35,17 +34,13 @@ the embedded build tag and md5 of both `build/wari.bin` and
 On the dev machine:
 
 ```bash
-scripts/build.sh release --publish    # builds, verifies, publishes the release
-git add build/wari.release .build_number
-git commit -m "Build N [release]: <what changed>"
-git push origin <branch>
+bash scripts/wari-build.sh <branch>   # mirror to GitHub, build, publish; prints N
 ```
 
 On the VF2:
 
 ```bash
-wari go                      # main: pull + fetch release + flash /boot/kernel.bin + reboot
-wari go-branch <branch>      # same, for a testing branch
+wari go --build <branch>.<N>   # download build N's release, verify, flash, reboot
 ```
 
 The board reboots into Wari. Watch the COM7 serial console for the
@@ -60,6 +55,24 @@ tier-2 uart driver loaded
 Hello from Wari
 [hello] exit(0)
 ```
+
+## Getting into Debian
+
+U-Boot's default `bootcmd` boots Wari (`/boot/kernel.bin`), so an
+unattended power-on always lands in Wari. To reach Debian, which is
+where `wari go --build` runs:
+
+1. Reset the board (Ctrl-R on the Wari console, the reset button, or a
+   power cycle) with the serial console open at 115200.
+2. Press any key while U-Boot counts down (`Hit any key to stop
+   autoboot`) to get the `StarFive #` prompt.
+3. Boot Debian through U-Boot's distro boot:
+
+   ```
+   run bootcmd_distro
+   ```
+
+The next reset without interrupting the countdown boots Wari again.
 
 ## Recovery: boot back into Debian
 
