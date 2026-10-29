@@ -49,7 +49,15 @@ use core::panic::PanicInfo;
 // Assemble boot.S into the crate. Keeps the build single-step (no
 // build.rs, no cc crate). The linker script's `KEEP(*(.text.entry))`
 // places the resulting `_start` at the load address.
+// qemu + vf2 use boot.S: park every hart whose id != the linker's
+// `_boot_hart_id` (a known constant on those boards). r2s uses a
+// bring-up variant that ELECTS the boot hart at runtime — its boot hart
+// is not yet known, and guessing wrong makes boot.S silently park the
+// real one (no banner). See boot-r2s.S and docs/r2s-bringup.md.
+#[cfg(not(feature = "r2s"))]
 core::arch::global_asm!(include_str!("boot.S"));
+#[cfg(feature = "r2s")]
+core::arch::global_asm!(include_str!("boot-r2s.S"));
 
 // Module skeleton — populated per the approved Phase-0 plan.
 mod abi;

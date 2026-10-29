@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
 /* Wari kernel linker script — Orange Pi R2S (Ky X1 / SpacemiT K1).
  *
- * ⚠ PROVISIONAL. ORIGIN and `_boot_hart_id` below are DT-blocked
- * bring-up values, not confirmed against this board's OpenSBI/U-Boot
- * handoff yet — see docs/r2s-bringup.md. They are correct enough to
- * LINK (which is what the first-light scaffold proves); the values that
- * make it actually BOOT come from the board's boot.log + board.dts.
+ * ⚠ PROVISIONAL. ORIGIN below is a DT-blocked bring-up value, not
+ * confirmed against this board's OpenSBI/U-Boot handoff yet — see
+ * docs/r2s-bringup.md. It is correct enough to LINK (which is what the
+ * first-light scaffold proves); the value that makes it actually BOOT
+ * comes from the board's boot.log + board.dts.
  *
  *   ORIGIN 0x00200000 — DRAM base 0x0 + 2 MiB, mirroring the VF2/QEMU
  *   "+2 MiB above DRAM base" convention. The K1's DRAM base is 0x0
@@ -13,10 +13,11 @@
  *   register block, NOT DRAM — do not load there. Cross-check the real
  *   handoff address from the U-Boot banner in boot.log before trusting.
  *
- *   _boot_hart_id 0 — provisional. boot.S parks every hart whose id
- *   != this symbol, so if first-light shows a silent board (no banner),
- *   the OpenSBI handoff hart is not 0: read the live hart id that
- *   r2s_first_light prints and set this to match.
+ *   Boot hart: NOT a linker symbol here — boot-r2s.S elects it at
+ *   runtime (first hart to claim wins), because the R2S boot hart is
+ *   unknown and guessing wrong would make the shared boot.S silently
+ *   park the real one (no banner). r2s_first_light prints the elected
+ *   hart so it can be recorded.
  *
  * Symbol layout is identical to linker.ld / linker-vf2.ld so kvm.rs's
  * identity-map arithmetic and the page allocator's [_end, _heap_end)
@@ -86,8 +87,11 @@ SECTIONS {
     . += 0x1000000;
     _runtime_heap_end = .;
 
-    /* PROVISIONAL — see header. boot.S parks every hart != this id. */
-    _boot_hart_id = 0;
+    /* No `_boot_hart_id`: boot-r2s.S elects the boot hart at runtime
+     * (first-hart-wins), so there is no compile-time hart to park on —
+     * that is the whole point of the bring-up boot. If this build is
+     * later switched back to the shared boot.S (once the boot hart is
+     * known), restore `_boot_hart_id = <hart>` here. */
 
     /DISCARD/ : {
         *(.eh_frame)
