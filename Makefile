@@ -37,6 +37,13 @@ OBJCOPY := $(shell find $${HOME}/.rustup -name llvm-objcopy -type f 2>/dev/null 
 BUILD_FILE := .build_number
 BUILD_NUM  := $(shell cat $(BUILD_FILE) 2>/dev/null || echo 0)
 NEXT_BUILD := $(shell echo $$(($(BUILD_NUM) + 1)))
+# Branch slug for the self-identifying build id (`<num>-<slug>`), so the
+# boot banner is unambiguous across branches that share a build number.
+# Exported (not set per-recipe) so every kernel `cargo build` inherits it
+# without threading it through each target; only the kernel reads it.
+BRANCH_SLUG := $(shell git branch --show-current 2>/dev/null | tr '/' '-')
+WARI_BUILD_ID := $(NEXT_BUILD)-$(BRANCH_SLUG)
+export WARI_BUILD_ID
 
 # VF2 deploy target (IP of VisionFive 2 on local network — inherited from goose-os)
 VF2_IP ?= 192.168.86.236
