@@ -113,10 +113,7 @@ static mut ACCEPT_EXPIRED_LOGGED: [bool; ACCEPT_TRACK_SLOTS] = [false; ACCEPT_TR
 /// RISC-V `time` CSR frequency. JH7110's CLINT timebase runs at
 /// 4 MHz (Linux dts `timebase-frequency = <4000000>`); QEMU virt
 /// uses 10 MHz.
-#[cfg(feature = "vf2")]
-const TIMEBASE_HZ: u64 = 4_000_000;
-#[cfg(feature = "qemu")]
-const TIMEBASE_HZ: u64 = 10_000_000;
+const TIMEBASE_HZ: u64 = crate::board::BOARD.timebase_hz;
 
 /// Real monotonic milliseconds from the RISC-V `time` CSR.
 ///

@@ -253,6 +253,21 @@ kernel-vf2: sign-uart-driver sign-net-driver build-hello
 	@ls -lh $(KERNEL_BIN)
 	@echo ">>> $(KERNEL_BIN) ready — build $(NEXT_BUILD)"
 
+# Orange Pi R2S (Ky X1 / SpacemiT K1) — first-light scaffold (roadmap
+# p3b). Net-less: no signed driver blobs, no Tier-1 hello — the kernel
+# boots to banner + MMU on the sourced K1 constants, then halts before
+# any device-tree-blocked field (see docs/r2s-bringup.md). Hence NO
+# sign-*-driver / build-hello prerequisites.
+kernel-r2s:
+	@echo "  [build] kernel: R2S first-light (entry 0x00200000; net-less; DT-blocked halt)"
+	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
+	  cargo build --release --features r2s --no-default-features
+	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+	@echo $(NEXT_BUILD) > $(BUILD_FILE)
+	@echo "  [build] kernel: build $(NEXT_BUILD), R2S first-light"
+	@ls -lh $(KERNEL_BIN)
+	@echo ">>> $(KERNEL_BIN) ready — build $(NEXT_BUILD) (R2S first-light, provisional)"
+
 # End-to-end build-coherence check. Greps the embedded WARI-*-BUILD-TAG
 # strings out of every artifact and compares them to .build_number.
 # If any mismatch → ABORT before flash. This is the operator-visible
