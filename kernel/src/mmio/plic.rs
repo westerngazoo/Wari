@@ -61,7 +61,7 @@ use crate::mmio::volatile::VolatilePtr;
 // ─────────────────────────────────────────────────────────────────
 
 /// PLIC MMIO base address. Standard RV64 (QEMU virt + JH7110 both).
-pub const PLIC_BASE: usize = 0x0c00_0000;
+pub const PLIC_BASE: usize = crate::board::BOARD.plic_base;
 
 /// Maximum number of IRQ sources Phase 1b binds. PLIC supports up to
 /// 1023 sources; we cap our binding table at 64 to keep static
@@ -93,11 +93,7 @@ pub const MAX_BOUND_IRQS: usize = 64;
 /// latent bug surfaced immediately: Ctrl-R via the PLIC worked in
 /// QEMU and did nothing on the VF2. The original comment said
 /// "verify on first VF2 net bring-up" — this is that verification.
-#[cfg(feature = "qemu")]
-const HART_CONTEXT: usize = 1;
-/// See [`HART_CONTEXT`] on QEMU — VF2 boots on hart 1 (U74 #0).
-#[cfg(feature = "vf2")]
-const HART_CONTEXT: usize = 2;
+const HART_CONTEXT: usize = crate::board::BOARD.plic_hart_context;
 
 /// PLIC source number for UART0 — the console the operator types into.
 ///
@@ -106,11 +102,7 @@ const HART_CONTEXT: usize = 2;
 ///   the `interrupts = <32>` property on `uart0` in the vendor DT).
 ///
 /// Both are below [`MAX_BOUND_IRQS`], so `enable_irq` accepts them.
-#[cfg(feature = "qemu")]
-const UART_IRQ: u32 = 10;
-/// See [`UART_IRQ`].
-#[cfg(feature = "vf2")]
-const UART_IRQ: u32 = 32;
+const UART_IRQ: u32 = crate::board::BOARD.uart_irq;
 
 /// ASCII DC2 — the Ctrl-R the operator presses to reboot.
 const CTRL_R: u8 = 0x12;

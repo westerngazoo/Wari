@@ -49,6 +49,10 @@ default = []
 # Platform selection — exactly one must be active at build time.
 qemu = []
 vf2  = []
+# Orange Pi R2S (Ky X1 / SpacemiT K1) — first-light scaffold (B3/p3b).
+# Net-less: boots to banner + MMU on the sourced K1 constants, then
+# halts before any device-tree-blocked field. See docs/r2s-bringup.md.
+r2s  = []
 # Diagnostic mode — `kdebug!(subsys, ...)` macro emits subsystem-
 # tagged lines on the kernel console. Compiled out otherwise. Use
 # for high-level flow visibility (host fn entry, cap-check decision,
