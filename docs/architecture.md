@@ -4,9 +4,10 @@
 > `book/part-1-architecture/` for that), not the roadmap (see
 > `../CLAUDE.md` §Roadmap). Only what's true *right now*.
 
-**Status**: Phase 1c — silicon bring-up. Phases 0/1a/1b shipped; the
-Tier-2 network driver is in progress. Booting on QEMU `virt` and on the
-StarFive VisionFive 2.
+**Status**: Phases 0, 1a, 1b and 1c shipped (1c closed 2026-08-15);
+Phase 2 open. Booting on QEMU `virt` and on the StarFive VisionFive 2.
+What isolates tenants today, and what does not yet:
+[`security-model.md`](security-model.md).
 
 ---
 
@@ -14,7 +15,7 @@ StarFive VisionFive 2.
 
 ```mermaid
 graph TB
-    subgraph T1["Tier 1 — Customer WASM  (U-mode, MMU + WASM sandbox)"]
+    subgraph T1["Tier 1 — Customer WASM  (S-mode inside wasmi, WASM sandbox only; U-mode + MMU planned)"]
         A1[app A<br/>.wasm]
         A2[app B<br/>.wasm]
         AN[... 50k instances target]
@@ -47,10 +48,10 @@ graph TB
     A2 -- "WASI host fn" --> K4
     AN -- "WASI host fn" --> K4
 
-    K4 -- "cap-gated IPC" --> D1
-    K4 -- "cap-gated IPC" --> D2
-    K4 -- "cap-gated IPC" --> D3
-    K4 -- "cap-gated IPC" --> D4
+    K4 -- "cap-gated host fn calls driver export" --> D1
+    K4 -- "cap-gated host fn calls driver export" --> D2
+    K4 -- "cap-gated host fn calls driver export" --> D3
+    K4 -- "cap-gated host fn calls driver export" --> D4
 
     D1 -- "typed MMIO" --> H1
     D2 -- "typed MMIO" --> H1
@@ -81,17 +82,28 @@ sequenceDiagram
     App->>WR: fd_write(1, buf, len)
     WR->>K: host_fn_fd_write(stdout, buf, len)
     K->>K: validate caller's stdout cap
-    K->>D: IPC CALL (write, buf_copy, len)
+    K->>D: call driver `write` export (buf_copy, len)
     D->>D: wasmi executes driver module
-    D->>HW: typed volatile store to THR
+    D->>HW: mmio_write8 host fn → typed volatile store to THR
     HW-->>D: (bytes out the wire)
-    D-->>K: IPC REPLY (bytes_written)
+    D-->>K: return bytes_written
     K-->>WR: return n
     WR-->>App: a0 = n
 ```
 
-Two WASM sandbox crossings (Tier 1 → Tier 2), two kernel dispatches,
-zero process-level context switches. Every crossing is capability-gated.
+Two WASM sandbox crossings (Tier 1 → Tier 2), zero process-level
+context switches, every crossing capability-gated. The Tier-1 → Tier-2
+hop is **not** IPC: `host_fd_write` (`runtime/wasi.rs`) calls the
+driver's export directly through `tier2_uart::write`, synchronously,
+on the same kernel stack. Drivers are loaded as libraries, not
+scheduled, so a driver that stalls stalls its caller and the kernel
+with it. Synchronous IPC between Tier-1 instances
+(`cap/objects.rs` + `runtime/tier1_pool.rs`) is a separate mechanism.
+
+All of this runs in S-mode in one identity-mapped address space: there
+is no U-mode and no per-instance page table yet, so the MMU separates
+nothing between tenants (see `security-model.md` §"What Layer 2 is
+today").
 
 ## Subsystem state
 
@@ -109,7 +121,10 @@ zero process-level context switches. Every crossing is capability-gated.
 | Tier 1 hello     | Done (Phase 1a) | `apps/hello/` — runs on VF2 silicon                |
 | Capability system | Done (Phase 1b) | `kernel/src/cap/`                                |
 | Tier-2 UART driver | Done | `drivers/uart/`, `kernel/src/runtime/tier2_uart.rs`       |
-| Tier-2 net driver | In progress (Phase 1c) | `drivers/net/`, `kernel/src/runtime/tier2_net.rs` — GMAC0 + smoltcp wired, ARP/ICMP under calibration |
+| Tier-2 net driver | Done (Phase 1c) | `drivers/net/`, `kernel/src/runtime/tier2_net.rs` — JH7110 GMAC1 on the VF2, virtio-net on QEMU, smoltcp, TCP sockets; 0% ping loss on silicon (build 162). DMA addresses are driver-computed and unchecked — see `security-model.md` §"DMA" |
+| Tier-1 U-mode + per-instance page tables | **Not implemented** | One S-mode, identity-mapped address space (`kernel/src/mem/kvm.rs`, `kernel/src/trap.S`) |
+| Fuel / preemption | **Not implemented** | Run-to-completion (`kernel/src/sched/mod.rs`); the wasmi `Engine` is built without fuel |
+| Kernel heap | Bump allocator, no free (Phase-0 design, INV-12) | `kernel/src/runtime/heap.rs` — memory from every instantiation is kept until reset |
 
 ## Design decisions settled since Phase 0
 
