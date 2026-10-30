@@ -468,7 +468,8 @@ list-address registers; `net_mmio_write32` checks the register, not
 the value. The GMAC has no IOMMU. A driver that violates this half of
 the invariant can make the device read or write any physical address,
 kernel memory included. See `security-model.md` §"DMA" for the threat
-and the required fix (kernel-owned DMA addressing).
+and the required fix (kernel-owned DMA addressing), decided in
+`adr/ADR-002-network-layering.md` step 1.
 
 ### INV-24 · Wire-Format Literals Are Derived, Never Transcribed *(Phase 1c)*
 
