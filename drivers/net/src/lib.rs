@@ -999,12 +999,6 @@ mod nic_iface {
     /// by socket_listen). 0 = unbound.
     static mut SOCKET_BOUND_PORT: [u16; SOCKET_BACKING_LEN] = [0u16; SOCKET_BACKING_LEN];
 
-    /// Monotonic counter used as smoltcp timestamp. Incremented on
-    /// every poll() call so TCP retry timers advance even without a
-    /// real wall-clock source. Not wall-clock accurate — sufficient
-    /// for the Phase-1c demo where ARP/SYN latency << retry window.
-    static mut POLL_TICK: u64 = 0;
-
     /// Allocate a TCP smoltcp socket. Returns the raw
     /// `SocketHandle` value as i32 on success, negative errno on
     /// failure (`-3` = E_NOMEM if the buffer pool is exhausted).
@@ -1107,17 +1101,11 @@ mod nic_iface {
     pub fn socket_poll_accept(raw_handle: u32) -> i32 {
         use smoltcp::socket::tcp;
         // SAFETY: single-thread driver (INV-1 generalized).
+        // No poll here: the kernel's `tier2_net::socket_accept` polls
+        // with its rdtime clock right before this call. A second clock
+        // fed to the same Interface corrupts smoltcp's ARP cache
+        // expiry and rate limit (PM-57: ping loss on the VF2).
         unsafe {
-            // Drive smoltcp before inspecting socket state. Without this
-            // poll, the stack never processes incoming ARP or TCP SYNs —
-            // the socket stays in Listen forever even when the peer has
-            // already sent a SYN. POLL_TICK is a monotonic counter that
-            // serves as the smoltcp timestamp; TCP retry timers advance
-            // proportionally to poll rate rather than wall clock, which is
-            // sufficient for the Phase-1c demo.
-            POLL_TICK = POLL_TICK.wrapping_add(1);
-            poll(POLL_TICK);
-
             let sockets = match &mut *addr_of_mut!(SOCKETS) {
                 Some(s) => s,
                 None => return -2,
@@ -1197,11 +1185,9 @@ mod nic_iface {
             // Signal end-of-response so smoltcp emits FIN after the
             // reply drains. The remote sees a clean close.
             socket.close();
-            // Poll immediately so the queued reply + FIN are handed to
-            // the NIC DMA in this same call, rather than waiting for the
-            // next accept-loop iteration.
-            POLL_TICK = POLL_TICK.wrapping_add(1);
-            poll(POLL_TICK);
+            // The kernel's `tier2_net::socket_send_canned` polls right
+            // after this call, so the reply + FIN reach the NIC on the
+            // same kernel hop.
             queued
         }
     }
@@ -1275,10 +1261,11 @@ mod nic_iface {
         Ok(())
     }
 
-    /// Advance smoltcp's poll cycle once. `timestamp_ms` is a
-    /// logical monotonic counter from the kernel idle loop; not
-    /// wall-clock-aligned, but smoltcp only requires monotonicity
-    /// for retransmit decisions.
+    /// Advance smoltcp's poll cycle once. `timestamp_ms` is the
+    /// kernel's rdtime-derived millisecond clock
+    /// (`tier2_net::next_tick`), and it must be the only clock this
+    /// Interface ever sees: smoltcp compares ARP-cache expiry and the
+    /// ARP rate limit against it across calls (PM-57).
     ///
     /// Returns `true` if any state changed (incoming packet
     /// processed, outgoing packet emitted, ARP entry updated).
