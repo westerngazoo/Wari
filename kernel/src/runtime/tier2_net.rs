@@ -187,9 +187,9 @@ pub unsafe fn install(handle: Tier2NetHandle) {
 /// `KernelError::DriverError` if the call traps.
 ///
 /// Phase-1b kmain idle loop calls this in a `wfi`-paced loop.
-/// `timestamp_ms` is a logical monotonic counter (NOT wall-clock);
-/// smoltcp uses it for retransmit interval decisions, which still
-/// work correctly as long as the counter advances monotonically.
+/// `timestamp_ms` must come from [`next_tick`] (rdtime milliseconds)
+/// on every call: smoltcp stores ARP-cache expiry, the ARP rate
+/// limit and TCP timers against it, so a second clock corrupts them.
 ///
 /// # Safety
 ///
