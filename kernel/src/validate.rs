@@ -50,3 +50,20 @@ pub const fn is_net_mmio_addr(addr: usize) -> bool {
 pub const fn is_net_mmio_access(addr: usize, width: usize) -> bool {
     wari_validate::access_in_windows(addr, width, NET_MMIO_WINDOWS)
 }
+
+/// NIC registers that take a DMA address on the active platform,
+/// from the board descriptor. See `BoardDescriptor::dma_addr_regs`.
+pub const DMA_ADDR_REGS: &[MmioWindow] = crate::board::BOARD.dma_addr_regs;
+
+/// Does a `width`-byte access at `addr` touch a register that takes
+/// a DMA address?
+///
+/// Such registers are inside the licensed NIC window, so
+/// [`is_net_mmio_access`] passes them; this predicate is the extra
+/// gate `net_mmio_write32` applies so the driver cannot aim the DMA
+/// engine itself. The kernel programs these registers from validated
+/// linear-memory offsets (INV-25; `cap::dma`).
+#[inline]
+pub const fn is_dma_addr_register(addr: usize, width: usize) -> bool {
+    wari_validate::access_in_windows(addr, width, DMA_ADDR_REGS)
+}

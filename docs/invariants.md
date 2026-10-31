@@ -471,6 +471,19 @@ kernel memory included. See `security-model.md` §"DMA" for the threat
 and the required fix (kernel-owned DMA addressing), decided in
 `adr/ADR-002-network-layering.md` step 1.
 
+*Status of that fix.* **VirtIO (QEMU): enforced.** The driver names a
+buffer by linear-memory offset through `wari::nic_dma_set_buf`;
+`cap::dma::nic_dma_set_buf_impl` checks the span and the descriptor
+index (`wari_validate::dma`, host-tested) and writes the physical
+address into the descriptor itself. `nic_attach_queue` records each
+ring; `net_mmio_write32` refuses the VirtIO queue-address registers
+(`BoardDescriptor::dma_addr_regs`). The driver's INV-25 self-check at
+init makes two calls that must be refused and will not bring the
+device up if either is accepted (`tests/security/tests/dma_escape.rs`).
+**GMAC (VF2): not yet.** The driver still forms ring and buffer
+addresses from `lin_mem_base`; the VF2 follow-up moves them into the
+kernel and fills `dma_addr_regs` for the DWMAC list/tail registers.
+
 ### INV-24 · Wire-Format Literals Are Derived, Never Transcribed *(Phase 1c)*
 
 > Any byte sequence a driver places on a physical medium is

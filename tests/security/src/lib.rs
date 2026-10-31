@@ -50,6 +50,30 @@ pub fn workspace_root() -> PathBuf {
 /// - The QEMU child is killed at the end of the budget — no
 ///   indefinite hangs.
 pub fn boot_kernel_capture(wallclock: Duration) -> String {
+    boot_capture(wallclock, &[])
+}
+
+/// QEMU device arguments that give the guest a VirtIO-net NIC on the
+/// same subnet `make run` uses (`Makefile` `QEMU_ARGS`), minus the
+/// host port forward so parallel test binaries never contend for a
+/// host port. Without a NIC the Tier-2 net driver's VirtIO init fails
+/// at the magic-value read and nothing past it runs.
+const NET_DEVICE_ARGS: &[&str] = &[
+    "-global",
+    "virtio-mmio.force-legacy=false",
+    "-netdev",
+    "user,id=net0,net=192.168.50.0/24,host=192.168.50.2",
+    "-device",
+    "virtio-net-device,netdev=net0",
+];
+
+/// [`boot_kernel_capture`] with a VirtIO-net device attached, for
+/// tests whose property lives in the net driver's init path.
+pub fn boot_kernel_capture_with_net(wallclock: Duration) -> String {
+    boot_capture(wallclock, NET_DEVICE_ARGS)
+}
+
+fn boot_capture(wallclock: Duration, extra_args: &[&str]) -> String {
     let root = workspace_root();
     let kernel = root.join(KERNEL_ELF_REL);
     assert!(
@@ -59,14 +83,9 @@ pub fn boot_kernel_capture(wallclock: Duration) -> String {
     );
 
     let mut child = Command::new("qemu-system-riscv64")
-        .args([
-            "-machine",
-            "virt",
-            "-nographic",
-            "-bios",
-            "default",
-            "-kernel",
-        ])
+        .args(["-machine", "virt", "-nographic", "-bios", "default"])
+        .args(extra_args)
+        .arg("-kernel")
         .arg(&kernel)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -113,4 +132,10 @@ pub mod markers {
     /// Printed by the kernel boot banner. Always expected — its
     /// absence indicates the kernel did not even boot.
     pub const BOOT_BANNER: &str = "Wari v0 build";
+
+    /// Printed by the kernel once the Tier-2 net driver's smoltcp
+    /// interface is up (`runtime::run_tier2_net`). Absent if VirtIO
+    /// init failed — including when the driver's INV-25 self-check
+    /// refused to proceed (`dma_escape.rs`).
+    pub const NET_UP: &str = "[net] smoltcp interface up";
 }

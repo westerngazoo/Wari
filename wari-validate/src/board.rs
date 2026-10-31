@@ -75,6 +75,12 @@ pub struct BoardDescriptor {
     /// for what it may touch. They coincide on VF2 and differ on QEMU
     /// (mapped `0x8000` ⊋ licensed `0x200`), so this is its own field.
     pub mmio_regions: &'static [MmioWindow],
+    /// NIC registers that take a DMA *address*. A *subset* of
+    /// [`net_windows`]: the driver may touch the window, but these
+    /// registers are written only by the kernel, from offsets it has
+    /// validated against the driver's linear memory (INV-25, ADR-002
+    /// step 1). `net_mmio_write32` refuses them.
+    pub dma_addr_regs: &'static [MmioWindow],
     /// Is the NIC's DMA master cache-coherent with the CPU on this SoC?
     /// `true` on JH7110 (proven) and QEMU; a third board decides this
     /// by experiment. When `false`, the net driver's (future) CMO hooks
@@ -95,6 +101,7 @@ pub const QEMU: BoardDescriptor = BoardDescriptor {
     uart_irq: 10,
     net_windows: crate::windows::qemu::NET_WINDOWS,
     mmio_regions: crate::windows::qemu::MMIO_REGIONS,
+    dma_addr_regs: crate::windows::qemu::DMA_ADDR_REGS,
     dma_coherent: true,
 };
 
@@ -111,6 +118,7 @@ pub const VF2: BoardDescriptor = BoardDescriptor {
     uart_irq: 32,
     net_windows: crate::windows::vf2::NET_WINDOWS,
     mmio_regions: crate::windows::vf2::MMIO_REGIONS,
+    dma_addr_regs: crate::windows::vf2::DMA_ADDR_REGS,
     dma_coherent: true,
 };
 
@@ -147,6 +155,7 @@ pub const R2S: BoardDescriptor = BoardDescriptor {
     uart_irq: u32::MAX,       // SENTINEL — uart0 `interrupts=<N>` from board.dts
     net_windows: crate::windows::r2s::NET_WINDOWS,   // empty until DT names the MAC
     mmio_regions: crate::windows::r2s::MMIO_REGIONS, // empty: UART+PLIC map from scalars
+    dma_addr_regs: crate::windows::r2s::DMA_ADDR_REGS, // empty until DT names the MAC
     dma_coherent: false,      // UNKNOWN — conservative default; set by bring-up experiment
 };
 
@@ -220,6 +229,37 @@ mod tests {
         assert_eq!(QEMU.net_windows, crate::windows::qemu::NET_WINDOWS);
         assert_eq!(VF2.net_windows, crate::windows::vf2::NET_WINDOWS);
         assert!(!VF2.net_windows.is_empty());
+    }
+
+    #[test]
+    fn dma_addr_regs_sit_inside_net_windows() {
+        // The kernel refuses driver writes to these registers but
+        // writes them itself, so each must lie inside a window the
+        // kernel maps and the driver is licensed to reach; a register
+        // outside `net_windows` would be one the kernel cannot program.
+        for board in [QEMU, VF2, R2S] {
+            for reg in board.dma_addr_regs {
+                assert!(
+                    crate::access_in_windows(reg.base, 4, board.net_windows)
+                        && crate::access_in_windows(reg.base + reg.len - 4, 4, board.net_windows),
+                    "{}: DMA address register {:#x}/{:#x} outside net_windows",
+                    board.name,
+                    reg.base,
+                    reg.len
+                );
+            }
+        }
+        // QEMU: the three VirtIO queue address pairs (VirtIO 1.2 §4.2.2).
+        let regs = QEMU.dma_addr_regs;
+        assert_eq!(regs.len(), 3);
+        // QueueDescLow (0x080) and QueueDeviceHigh (0x0a4) are refused.
+        assert!(crate::access_in_windows(0x1000_8080, 4, regs));
+        assert!(crate::access_in_windows(0x1000_80a4, 4, regs));
+        // QueueNotify (0x050) stays writable by the driver.
+        assert!(!crate::access_in_windows(0x1000_8050, 4, regs));
+        // VF2 is filled by the GMAC PR; until then the driver programs
+        // the DWMAC list/tail registers itself (see windows::vf2).
+        assert!(VF2.dma_addr_regs.is_empty());
     }
 
     #[test]

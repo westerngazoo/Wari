@@ -35,9 +35,11 @@
 use core::ptr::addr_of_mut;
 
 use super::cspace::{CSpace, MAX_PROCS};
+use super::dma::RINGS_PER_PROC;
 use super::objects::ObjectPools;
 use super::reg::RegTable;
 use super::ring_drain::RingDesc;
+use wari_validate::dma::DmaRing;
 
 // ─────────────────────────────────────────────────────────────────
 // Statics
@@ -67,6 +69,13 @@ static mut REG_TABLES: [RegTable; MAX_PROCS] = [const { RegTable::new() }; MAX_P
 /// each process's SQ/CQ ring lives in its linear memory. Indexed by
 /// process id; `active=false`-initialized at boot via `const fn`.
 static mut RING_DESCRIPTORS: [RingDesc; MAX_PROCS] = [const { RingDesc::empty() }; MAX_PROCS];
+
+/// Per-process NIC DMA descriptor rings the kernel has been told
+/// about (ADR-002 step 1): RX and TX per driver, recorded by the
+/// queue-attach host fns and consulted by `nic_dma_set_buf`. Indexed
+/// by process id; `entries = 0`-initialized at boot via `const fn`.
+static mut DMA_RINGS: [[DmaRing; RINGS_PER_PROC]; MAX_PROCS] =
+    [[DmaRing::empty(); RINGS_PER_PROC]; MAX_PROCS];
 
 // ─────────────────────────────────────────────────────────────────
 // Accessors
@@ -127,6 +136,18 @@ pub fn reg_tables() -> &'static mut [RegTable; MAX_PROCS] {
 pub fn ring_descriptors() -> &'static mut [RingDesc; MAX_PROCS] {
     // SAFETY: INV-1 + INV-8 — single-hart, statically initialized.
     unsafe { &mut *addr_of_mut!(RING_DESCRIPTORS) }
+}
+
+/// Return a mutable reference to the per-process NIC DMA ring table.
+///
+/// # Safety contract
+///
+/// Same as `cspaces()`: single-hart (INV-1), statically initialized via
+/// `const fn` (INV-8). Callers must not hold the returned reference across
+/// another call to this function.
+pub fn dma_rings() -> &'static mut [[DmaRing; RINGS_PER_PROC]; MAX_PROCS] {
+    // SAFETY: INV-1 + INV-8 — single-hart, statically initialized.
+    unsafe { &mut *addr_of_mut!(DMA_RINGS) }
 }
 
 // ─────────────────────────────────────────────────────────────────
