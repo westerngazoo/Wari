@@ -105,7 +105,10 @@ smoltcp CVE, neither at the network-namespace level nor, until the
 DMA gap below is closed, at the kernel boundary. Mitigation: close
 the DMA gap first; then dedicated smoltcp fuzzing, fast operator
 patch cadence, multi-NIC + per-NIC driver instantiation if/when the
-platform supports it (Phase 2+ multi-board work).
+platform supports it (Phase 2+ multi-board work). The decision and
+its order of work are in `adr/ADR-002-network-layering.md`: DMA
+addressing moves into the kernel, then the stack leaves the driver
+into a Tier-2 module with no device capability.
 
 ### DMA — the driver programs physical addresses
 
