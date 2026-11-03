@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Runtime smoke test — Phase 0 PR 4.
+//! Tier-1 hello smoke test (`docs/testing.md`, Phase-0 list).
 //!
-//! Boots the kernel under QEMU virt RV64 and asserts the post-runtime
-//! marker `"wasmi OK"` shows up on the console within the wall-clock
-//! budget. If the marker appears, the bump allocator initialized, the
-//! wasmi engine linked, and the noop module instantiated cleanly.
+//! Boots the kernel under QEMU virt RV64 and asserts that a Tier-1
+//! instance ran under wasmi: `Hello from Wari` reached the UART via
+//! WASI `fd_write`, and the scheduler logged that instance's
+//! `[t1:<proc_id>] exit(0)` (`kernel/src/runtime/tier1_pool.rs`).
+//! The boot-time noop instantiation this file used to watch for
+//! (`wasmi OK`) no longer exists: the scheduler runs the real Tier-1
+//! pool instead, so the proof that the engine links and instantiates
+//! is the hello instance itself.
 //!
-//! Mirrors the pattern in `mmu_smoke.rs`; only the marker and the
+//! Mirrors the pattern in `mmu_smoke.rs`; only the markers and the
 //! deadline differ.
 //!
 //! Failure modes the test catches:
-//!   - wasmi failed to validate the noop blob → `wasmi runtime failed`
-//!     line appears instead of `wasmi OK`
-//!   - bump allocator OOM mid-instantiate → same
+//!   - wasmi failed to validate or link the hello blob → the
+//!     scheduler reports the instance faulted, no `Hello from Wari`
+//!   - `fd_write` or `proc_exit` unbound or mis-typed → no exit line
 //!   - kernel hangs in trap → no marker, timeout
 //!   - kernel panics → no marker, possible panic banner
 
@@ -24,13 +28,14 @@ use std::time::{Duration, Instant};
 
 const KERNEL_ELF_REL: &str = "target/riscv64gc-unknown-none-elf/release/wari";
 
-/// Deadline for the marker to appear. Wasmi instantiation is allowed
-/// more headroom than MMU init because module parse/validate runs
-/// against the bump allocator.
-const MARKER_DEADLINE: Duration = Duration::from_secs(5);
+/// Deadline for the markers to appear. The hello instance only starts
+/// after both Tier-2 drivers load and the module registry stages its
+/// daemons, so it gets more headroom than the MMU marker; 8 s matches
+/// `tests/security`'s `DEFAULT_WALLCLOCK` for the same boot.
+const MARKER_DEADLINE: Duration = Duration::from_secs(8);
 
 /// Hard cap on QEMU lifetime.
-const QEMU_WALLCLOCK: Duration = Duration::from_secs(7);
+const QEMU_WALLCLOCK: Duration = Duration::from_secs(10);
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -40,7 +45,7 @@ fn workspace_root() -> PathBuf {
 }
 
 #[test]
-fn kernel_runs_wasmi_noop() {
+fn tier1_hello_runs_under_wasmi() {
     let root = workspace_root();
     let kernel = root.join(KERNEL_ELF_REL);
     assert!(
@@ -89,8 +94,19 @@ fn kernel_runs_wasmi_noop() {
     let text = String::from_utf8_lossy(&captured);
 
     assert!(
-        text.contains("wasmi OK"),
-        "wasmi runtime marker not found in QEMU stdout:\n--- begin ---\n{}\n--- end ---",
+        text.contains("Hello from Wari"),
+        "Tier-1 hello output not found in QEMU stdout:\n--- begin ---\n{}\n--- end ---",
+        text,
+    );
+
+    // The proc id is assigned at boot, so match the shape of the
+    // line rather than a literal.
+    let exited_zero = text
+        .lines()
+        .any(|line| line.starts_with("[t1:") && line.ends_with("] exit(0)"));
+    assert!(
+        exited_zero,
+        "no `[t1:<n>] exit(0)` line in QEMU stdout:\n--- begin ---\n{}\n--- end ---",
         text,
     );
 }
