@@ -8,8 +8,8 @@
 //! every load/store. An OOB `i32.load` from offset `usize::MAX`
 //! produces a `MemoryOutOfBounds` trap that surfaces to the kernel as
 //! `wasmi::Error` with `i32_exit_status() == None`. The runner
-//! (`runtime::run_tier1_hello`) catches this case and prints
-//! `[hello] runtime trap: ...` and returns `BadWasm`.
+//! (`runtime::tier1_pool::settle`) catches this case, prints
+//! `[t1:<n>] runtime trap: ...` and faults only that tenant.
 //!
 //! ## Compatibility note
 //!
@@ -24,12 +24,11 @@
 //! distinct from `apps/hello`. PR 6's pragmatic path: the test boots
 //! the standard kernel and asserts the runtime no-panic property
 //! holds for the *normal* Tier-1 run, plus the structural property
-//! that `run_tier1_hello`'s error arm exists and prints a typed
-//! marker.
+//! that `settle`'s error arm exists and prints a typed marker.
 //!
 //! Phase-0 follow-up: build `apps/hello-page-fault.wasm` that
 //! performs `i32.load offset=usize::MAX` and assert the kernel logs
-//! `[hello] runtime trap` without panicking.
+//! `[t1:<n>] runtime trap` without panicking.
 
 use wari_security_tests::{boot_kernel_capture, markers, DEFAULT_WALLCLOCK};
 
@@ -44,9 +43,9 @@ fn page_fault_is_trapped() {
 
     // Either exit-0 (normal hello) or a typed runtime-trap log
     // (adversarial variant). Hung kernel = neither marker present.
-    let terminal = text.contains(markers::HELLO_EXIT_0)
-        || text.contains("[hello] runtime trap")
-        || text.contains("tier-1 hello failed");
+    let terminal = markers::tier1_event(&text, markers::T1_EXIT_0)
+        || markers::tier1_event(&text, markers::T1_TRAP)
+        || markers::sched_tier1_faulted(&text);
     assert!(
         terminal,
         "kernel did not reach a terminal Tier-1 state:\n{text}",

@@ -125,9 +125,67 @@ pub mod markers {
     /// failed — the kernel halted in `kmain`'s wfi loop.
     pub const TIER2_LOADED: &str = "tier-2 uart driver loaded";
 
-    /// Printed by Tier-1 hello after `proc_exit(0)`: see
-    /// `kernel/src/runtime/mod.rs::run_tier1_hello`.
-    pub const HELLO_EXIT_0: &str = "[hello] exit(0)";
+    /// Prefix of every per-instance line the Tier-1 runner prints
+    /// (`kernel/src/runtime/tier1_pool.rs::settle`): `[t1:<proc_id>]`
+    /// followed by one of the `T1_*` events below. The proc id is
+    /// handed out at boot and shifts whenever the daemon set changes,
+    /// so tests match on the event with [`tier1_event`] rather than
+    /// on a literal line.
+    pub const TIER1_PREFIX: &str = "[t1:";
+
+    /// Tier-1 instance called `proc_exit(0)`.
+    pub const T1_EXIT_0: &str = "exit(0)";
+
+    /// wasmi trapped inside the instance (OOB load, unreachable, …);
+    /// the kernel logged the trap kind and faulted only that tenant.
+    pub const T1_TRAP: &str = "runtime trap";
+
+    /// `_start` returned without `proc_exit`: protocol violation the
+    /// kernel treats as `exit(0)`.
+    pub const T1_RETURNED: &str = "returned cleanly without proc_exit";
+
+    /// Does any line of `text` say the scheduler faulted a Tier-1
+    /// instance (`kernel/src/sched/mod.rs`: `[sched] Tier-1 instance
+    /// proc_id=<n> faulted`)? This is the typed-rejection terminal
+    /// state: a load failure or a trap ends here, never in a panic.
+    ///
+    /// ```
+    /// use wari_security_tests::markers::sched_tier1_faulted;
+    /// assert!(sched_tier1_faulted("[sched] Tier-1 instance proc_id=7 faulted\n"));
+    /// assert!(!sched_tier1_faulted("[sched] Tier-1 instance proc_id=7 exited (code=0)"));
+    /// ```
+    pub fn sched_tier1_faulted(text: &str) -> bool {
+        text.lines().any(|line| {
+            line.starts_with("[sched] Tier-1 instance proc_id=") && line.ends_with(" faulted")
+        })
+    }
+
+    /// Does any line of `text` read `[t1:<digits>] <event>…`?
+    ///
+    /// Pure string scan, no regex dependency. `event` is matched as a
+    /// prefix of what follows the proc id, so `T1_TRAP` matches
+    /// `[t1:3] runtime trap: MemoryOutOfBounds` as well.
+    ///
+    /// ```
+    /// use wari_security_tests::markers::{tier1_event, T1_EXIT_0};
+    /// assert!(tier1_event("boot\n[t1:12] exit(0)\n", T1_EXIT_0));
+    /// assert!(!tier1_event("[hello] exit(0)", T1_EXIT_0)); // old format
+    /// assert!(!tier1_event("[t1:] exit(0)", T1_EXIT_0));   // no proc id
+    /// ```
+    pub fn tier1_event(text: &str, event: &str) -> bool {
+        text.lines().any(|line| {
+            let Some(rest) = line.strip_prefix(TIER1_PREFIX) else {
+                return false;
+            };
+            let id_len = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if id_len == 0 {
+                return false;
+            }
+            rest[id_len..]
+                .strip_prefix("] ")
+                .is_some_and(|tail| tail.starts_with(event))
+        })
+    }
 
     /// Printed by the kernel boot banner. Always expected — its
     /// absence indicates the kernel did not even boot.
