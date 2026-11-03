@@ -21,3 +21,9 @@ pub static HELLO_SIGNED: &[u8] = include_bytes!("../../../build/apps/hello.signe
 /// signed by `scripts/build.sh` step 2. Embedded so the boot self-test
 /// can spawn the guard without a network transport.
 pub static GUARD_SIGNED: &[u8] = include_bytes!("../../../build/apps/guard.signed.wasm");
+
+/// The signed fuel-hog envelope (`apps/hog`): a Tier-1 that never
+/// yields. Spawned by the boot self-test so every boot proves the
+/// scheduler faults a non-yielding tenant on fuel
+/// (`tests/security/tests/fuel_exhaustion.rs`).
+pub static HOG_SIGNED: &[u8] = include_bytes!("../../../build/apps/hog.signed.wasm");

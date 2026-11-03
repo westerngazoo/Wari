@@ -48,7 +48,7 @@
 #![allow(dead_code)]
 #![allow(clippy::doc_lazy_continuation)]
 
-use wasmi::{Engine, Linker, Module, Store};
+use wasmi::{Config, Engine, Linker, Module, Store};
 
 use crate::cap::{caps_for, Caps, ModuleId, Tier};
 use crate::error::KernelError;
@@ -282,8 +282,13 @@ pub fn load_tier1(
     module_id: ModuleId,
     proc_id: u8,
 ) -> Result<Tier1Instance, KernelError> {
-    // Step 1 — parse + validate.
-    let engine = Engine::default();
+    // Step 1 — parse + validate, on an engine that meters fuel
+    // (ADR-002 step 4): `tier1_pool` sets the per-step budget before
+    // `_start` and before every resume, and faults the tenant on
+    // `TrapCode::OutOfFuel`. Tier-2 engines stay unmetered for now.
+    let mut config = Config::default();
+    config.consume_fuel(true);
+    let engine = Engine::new(&config);
     let module = Module::new(&engine, wasm_bytes).map_err(|_| KernelError::BadWasm)?;
 
     // Step 2 — assign caps and build the per-instance store.
@@ -299,6 +304,11 @@ pub fn load_tier1(
             exit_code: None,
         },
     );
+    // Cannot fail: metering was enabled on this engine above. Folded
+    // into a typed error rather than unwrapped (R5).
+    store
+        .set_fuel(wari_sched::TIER1_FUEL_PER_STEP)
+        .map_err(|_| KernelError::BadWasm)?;
     let mut linker = <Linker<Tier1HostState>>::new(&engine);
     wasi::register_wasi_host_fns(&mut linker, proc_id)?;
 
