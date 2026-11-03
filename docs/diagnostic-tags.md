@@ -141,6 +141,8 @@ NOT calling consume — without per-event log spam.
 |---|---|---|
 | `0x57415_200` | `WARI` boot beacon | Driver `_start` running |
 | Various `0x57...` | First-letter `W` family | Init register dumps (one-shot at boot) |
+| `0x444D_416F` | `DMAo` | INV-25 self-check in `init_virtio`: `nic_dma_set_buf` with a span past the end of linear memory. `val` = kernel rc; must be `0xfffffffe` (E_INVAL) or the driver refuses to start |
+| `0x444D_4169` | `DMAi` | Same self-check, descriptor index past the ring. Same contract on `val` |
 
 ## Adding a new tag
 

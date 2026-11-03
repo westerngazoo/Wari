@@ -180,6 +180,7 @@ pub const fn access_in_windows(addr: usize, width: usize, windows: &[MmioWindow]
 /// Per-platform board descriptors (audit blocker B3) — every constant
 /// that differs by SoC, as one record per platform. See `board`.
 pub mod board;
+pub mod dma;
 
 /// Per-platform NIC MMIO window tables — pure data, both platforms,
 /// host-tested. The kernel's `#[cfg(feature)]` shim picks one; the
@@ -220,6 +221,28 @@ pub mod windows {
             base: 0x1000_1000,
             len: 0x8000,
         }];
+
+        /// Registers that take a DMA *address*, which the driver may
+        /// not write through `net_mmio_write32`: the kernel programs
+        /// them itself from validated offsets (ADR-002 step 1,
+        /// INV-25). VirtIO 1.2 §4.2.2: `QueueDescLow/High` (0x080,
+        /// 0x084), `QueueDriverLow/High` (0x090, 0x094),
+        /// `QueueDeviceLow/High` (0x0a0, 0x0a4), written by
+        /// `nic_attach_queue`.
+        pub const DMA_ADDR_REGS: &[MmioWindow] = &[
+            MmioWindow {
+                base: 0x1000_8080,
+                len: 0x8,
+            },
+            MmioWindow {
+                base: 0x1000_8090,
+                len: 0x8,
+            },
+            MmioWindow {
+                base: 0x1000_80a0,
+                len: 0x8,
+            },
+        ];
     }
 
     /// Orange Pi R2S (Ky X1 / SpacemiT K1) platform windows.
@@ -244,6 +267,10 @@ pub mod windows {
         /// scalar bases, and no other device is touched before the
         /// DT-blocked halt.
         pub const MMIO_REGIONS: &[MmioWindow] = &[];
+
+        /// DMA address registers the driver may not write directly.
+        /// Empty until the R2S NIC is named.
+        pub const DMA_ADDR_REGS: &[MmioWindow] = &[];
     }
 
     /// StarFive VisionFive 2 (JH7110) platform windows.
@@ -344,6 +371,15 @@ pub mod windows {
                 len: 0x1000,
             },
         ];
+
+        /// DMA address registers the driver may not write directly.
+        ///
+        /// **Empty for now, on purpose.** The GMAC driver still
+        /// programs `DMA_CH0_{TX,RX}DESC_LIST_ADDR{,_HI}` and the two
+        /// tail pointers itself; ADR-002 step 1 moves that into the
+        /// kernel in the VF2 PR, which fills this table at the same
+        /// time. Filling it earlier would brick the VF2 network.
+        pub const DMA_ADDR_REGS: &[MmioWindow] = &[];
     }
 }
 

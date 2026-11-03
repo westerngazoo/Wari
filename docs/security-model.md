@@ -108,7 +108,11 @@ patch cadence, multi-NIC + per-NIC driver instantiation if/when the
 platform supports it (Phase 2+ multi-board work). The decision and
 its order of work are in `adr/ADR-002-network-layering.md`: DMA
 addressing moves into the kernel, then the stack leaves the driver
-into a Tier-2 module with no device capability.
+into a Tier-2 module with no device capability. The first half of
+that step is in: on the VirtIO path the kernel writes every
+descriptor address (`wari::nic_dma_set_buf`) and refuses driver
+writes to the queue-address registers; the GMAC path follows in its
+own PR (see INV-25's status note in `invariants.md`).
 
 ### DMA — the driver programs physical addresses
 

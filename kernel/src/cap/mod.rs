@@ -50,6 +50,7 @@ pub mod static_caps;
 // these modules implement.
 pub mod boot;
 pub mod cspace;
+pub mod dma;
 pub mod grants;
 pub mod objects;
 pub mod pool;
@@ -77,6 +78,7 @@ pub use boot::{
     PROC_ID_TIER2_UART,
 };
 pub use cspace::{CSpace, CSPACE_SLOTS, MAX_PROCS};
+pub use dma::{nic_dma_set_buf_impl, record_ring};
 pub use objects::{
     Endpoint, Frame, Net, Notification, ObjectPools, Socket, TcbRef, Untyped,
     ENDPOINT_POOL_CAPACITY, FRAME_POOL_CAPACITY, NET_POOL_CAPACITY, NOTIFICATION_POOL_CAPACITY,
@@ -85,7 +87,7 @@ pub use objects::{
 pub use pool::{BoundedQueue, Pool};
 pub use reg::{RegEntry, RegTable};
 pub use ring_drain::{ring_setup_impl, ring_submit_impl, RingDesc};
-pub use storage::{cspaces, object_pools, reg_tables, ring_descriptors};
+pub use storage::{cspaces, dma_rings, object_pools, reg_tables, ring_descriptors};
 pub use syscall::{
     cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl, cap_register_impl,
     cap_revoke_impl, cap_unregister_impl, check_cap, lin_mem_base_impl, net_socket_accept_impl,

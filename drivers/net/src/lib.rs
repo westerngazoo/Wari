@@ -256,13 +256,39 @@ extern "C" {
     #[link_name = "nic_queue_notify"]
     fn wari_nic_queue_notify(queue_idx: u32) -> i32;
 
-    /// Return the driver's WASM lin-mem physical address. Used by
-    /// the driver to compute PAs for VirtIO descriptor `addr`
-    /// fields (which are PAs, not lin-mem offsets). PR Net-4d
-    /// host fn. Cap-gated by Net + READ; returns 0 on cap denial.
+    /// Point descriptor `idx` of ring `ring` (`RING_RX` / `RING_TX`)
+    /// at `[buf_off, buf_off + len)` of this module's linear memory.
+    /// The kernel validates the span against our memory and writes
+    /// the physical address into the descriptor itself; the driver
+    /// never forms one (ADR-002 step 1, INV-25). Returns 0, or
+    /// `HOST_E_INVAL` / E_PERM / E_NOMEM with nothing written.
+    #[link_name = "nic_dma_set_buf"]
+    fn wari_nic_dma_set_buf(ring: u32, idx: u32, buf_off: u32, len: u32) -> i32;
+
+    /// Return the driver's WASM lin-mem physical address. Still used
+    /// by the GMAC (vf2) path to compute ring and buffer addresses;
+    /// the VirtIO path uses `nic_dma_set_buf` instead. Goes away with
+    /// the VF2 follow-up of ADR-002 step 1. Cap-gated by Net + READ;
+    /// returns 0 on cap denial.
     #[link_name = "lin_mem_base"]
     fn wari_lin_mem_base() -> u64;
 }
+
+/// Ring ids for `nic_dma_set_buf`: VirtIO-net §5.1.6.1 numbers
+/// receiveq[0] as queue 0 and transmitq[0] as queue 1, and the GMAC
+/// path keeps the same ids.
+const RING_RX: u32 = 0;
+const RING_TX: u32 = 1;
+
+/// Kernel errno for a malformed argument (`cap::syscall::E_INVAL`).
+/// The INV-25 self-check in `init_virtio` expects exactly this.
+const HOST_E_INVAL: i32 = -2;
+
+/// Diagnostic tags for the INV-25 self-check: 'DMAo' (span outside
+/// linear memory) and 'DMAi' (descriptor index past the ring). `val`
+/// is the kernel's return code; both must read `0xfffffffe`.
+const TAG_DMA_OOB: u32 = 0x444D_416F;
+const TAG_DMA_IDX: u32 = 0x444D_4169;
 
 // ── Virtqueue ring storage (PR Net-4c) ───────────────────────────
 //
@@ -684,26 +710,15 @@ fn read_u32_le(off: u32) -> u32 {
     }
 }
 
-/// Write a 64-bit little-endian value to a lin-mem offset. Used
-/// for VirtIO descriptor `addr` fields.
-fn write_u64_le(off: u32, val: u64) {
-    let p = off as *mut u8;
-    // SAFETY: same as write_u16_le.
-    unsafe {
-        for i in 0..8 {
-            p.add(i).write((val >> (i * 8)) as u8);
-        }
-    }
-}
-
-/// Build a VirtIO descriptor at `desc_off + idx*16` pointing at a
-/// packet buffer.
+/// Fill the non-address fields of the VirtIO descriptor at
+/// `desc_off + idx*16`. The `addr` field (first 8 bytes) is written
+/// by the kernel through `nic_dma_set_buf`, never by the driver
+/// (INV-25).
 ///
 /// VirtIO 1.2 §2.6.5:
 ///   struct virtq_desc { le64 addr; le32 len; le16 flags; le16 next; }
-fn write_desc(desc_off: u32, idx: u16, buf_pa: u64, len: u32, flags: u16, next: u16) {
+fn write_desc_meta(desc_off: u32, idx: u16, len: u32, flags: u16, next: u16) {
     let off = desc_off + (idx as u32) * 16;
-    write_u64_le(off, buf_pa); // addr
     write_u32_le(off + 8, len); // len
     write_u16_le(off + 12, flags); // flags
     write_u16_le(off + 14, next); // next
@@ -720,14 +735,6 @@ fn write_desc(desc_off: u32, idx: u16, buf_pa: u64, len: u32, flags: u16, next: 
 /// pile up in the used ring (Phase-1b polling, Phase-2+ adds an
 /// idle loop or worker to drain them).
 fn populate_rx() -> Result<(), ()> {
-    // SAFETY: extern host-fn — kernel cap-checks Net + READ. The
-    // returned PA is the WASM lin-mem base in kernel-physical
-    // address space. Returns 0 on cap denial.
-    let lin_base = unsafe { wari_lin_mem_base() };
-    if lin_base == 0 {
-        return Err(());
-    }
-
     // Offsets in lin-mem.
     let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
     let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
@@ -736,13 +743,19 @@ fn populate_rx() -> Result<(), ()> {
     // driver, no data race.
     let rx_buf0_off = unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
 
-    // Build 8 descriptors, one per rx buffer.
+    // Build 8 descriptors, one per rx buffer. The kernel writes each
+    // descriptor's address from the offset we hand it (INV-25: the
+    // driver never forms a physical address); we fill length + flags.
     for i in 0..RX_BUF_COUNT {
-        let buf_pa = lin_base + (rx_buf0_off as u64) + (i as u64) * (ETH_FRAME_MAX as u64);
-        write_desc(
+        let buf_off = rx_buf0_off + (i as u32) * (ETH_FRAME_MAX as u32);
+        // SAFETY: extern host-fn — kernel cap-checks Net + WRITE and
+        // bounds-checks the span against our lin-mem.
+        if unsafe { wari_nic_dma_set_buf(RING_RX, i as u32, buf_off, ETH_FRAME_MAX as u32) } != 0 {
+            return Err(());
+        }
+        write_desc_meta(
             rx_desc_off,
             i as u16,
-            buf_pa,
             ETH_FRAME_MAX as u32,
             VIRTQ_DESC_F_WRITE,
             0,
@@ -791,22 +804,22 @@ pub fn driver_tx_send(buf_off: u32, len: u32) -> i32 {
     if len > ETH_FRAME_MAX as u32 {
         return -1;
     }
-    // SAFETY: extern host-fn, kernel cap-checks Net + READ.
-    let lin_base = unsafe { wari_lin_mem_base() };
-    if lin_base == 0 {
-        return -1;
-    }
 
     let tx_desc_off = core::ptr::addr_of_mut!(TX_DESC) as u32;
     let tx_avail_off = core::ptr::addr_of_mut!(TX_AVAIL) as u32;
 
     // Always reuse descriptor 0 — Phase-1b has no in-flight queue.
     let desc_idx: u16 = 0;
-    let buf_pa = lin_base + (buf_off as u64);
 
+    // The kernel validates `[buf_off, buf_off + len)` against our
+    // lin-mem and writes the descriptor's address field (INV-25).
+    // SAFETY: extern host-fn, kernel cap-checks Net + WRITE.
+    if unsafe { wari_nic_dma_set_buf(RING_TX, desc_idx as u32, buf_off, len) } != 0 {
+        return -1;
+    }
     // VIRTQ_DESC_F_WRITE not set on tx — device reads, doesn't
     // write. flags = 0.
-    write_desc(tx_desc_off, desc_idx, buf_pa, len, 0, 0);
+    write_desc_meta(tx_desc_off, desc_idx, len, 0, 0);
 
     // Available ring: bump idx to publish the descriptor.
     let avail_idx = unsafe {
@@ -878,11 +891,6 @@ pub fn driver_rx_recycle(desc_idx: u32) -> i32 {
     if (desc_idx as usize) >= RX_BUF_COUNT {
         return -1;
     }
-    // SAFETY: extern host-fn — kernel cap-checks.
-    let lin_base = unsafe { wari_lin_mem_base() };
-    if lin_base == 0 {
-        return -1;
-    }
 
     let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
     let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
@@ -890,13 +898,17 @@ pub fn driver_rx_recycle(desc_idx: u32) -> i32 {
     // Rust's E0133 still flags the index expression. Single-thread
     // driver, no data race.
     let rx_buf0_off = unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
-    let buf_pa = lin_base + (rx_buf0_off as u64) + (desc_idx as u64) * (ETH_FRAME_MAX as u64);
+    let buf_off = rx_buf0_off + desc_idx * (ETH_FRAME_MAX as u32);
 
-    // Rewrite the descriptor (idempotent).
-    write_desc(
+    // Rewrite the descriptor (idempotent): the kernel re-validates
+    // and rewrites the address (INV-25), we rewrite length + flags.
+    // SAFETY: extern host-fn — kernel cap-checks Net + WRITE.
+    if unsafe { wari_nic_dma_set_buf(RING_RX, desc_idx, buf_off, ETH_FRAME_MAX as u32) } != 0 {
+        return -1;
+    }
+    write_desc_meta(
         rx_desc_off,
         desc_idx as u16,
-        buf_pa,
         ETH_FRAME_MAX as u32,
         VIRTQ_DESC_F_WRITE,
         0,
@@ -2272,6 +2284,24 @@ fn init_virtio() -> Result<[u8; 6], ()> {
     // controlq (didn't negotiate VIRTIO_NET_F_CTRL_VQ).
     attach_queue(0, rx_desc_off, rx_avail_off, rx_used_off)?;
     attach_queue(1, tx_desc_off, tx_avail_off, tx_used_off)?;
+
+    // INV-25 self-check (ADR-002 step 1). The kernel must refuse to
+    // aim the DMA engine outside our linear memory. Two calls that
+    // have to fail — a span that wraps past the end of memory, and a
+    // descriptor index past the ring — logged as DMAo / DMAi with the
+    // kernel's return code. If either is accepted the containment is
+    // gone, and this driver refuses to bring the device up rather
+    // than run on a kernel that no longer checks. The adversarial
+    // test `tests/security/tests/dma_escape.rs` asserts both tags.
+    // SAFETY: extern host-fns; on a rejected call nothing is written.
+    let rc_oob = unsafe { wari_nic_dma_set_buf(RING_RX, 0, u32::MAX - 64, ETH_FRAME_MAX as u32) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_OOB, rc_oob as u32) };
+    let rc_idx =
+        unsafe { wari_nic_dma_set_buf(RING_RX, QUEUE_SIZE, rx_desc_off, ETH_FRAME_MAX as u32) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_IDX, rc_idx as u32) };
+    if rc_oob != HOST_E_INVAL || rc_idx != HOST_E_INVAL {
+        return Err(());
+    }
 
     // PR Net-4d — populate the rx queue with descriptors pointing
     // at our packet buffers. After this the device may start
@@ -3743,6 +3773,10 @@ mod vf2_keep_imports {
     static E: unsafe extern "C" fn(u32) -> i32 = wari_nic_queue_notify;
     #[used]
     static F: unsafe extern "C" fn() -> u64 = wari_lin_mem_base;
+    // `nic_dma_set_buf`: the VirtIO path calls it; the GMAC path
+    // migrates to it in the VF2 follow-up of ADR-002 step 1.
+    #[used]
+    static H: unsafe extern "C" fn(u32, u32, u32, u32) -> i32 = wari_nic_dma_set_buf;
     // `drv_trace_u32`: the per-frame trace call sites are now gated behind
     // `net-diag` (a release console stays quiet), so a release vf2 build
     // has no live call site to retain the import. Pin it here — same
@@ -3761,6 +3795,11 @@ mod vf2_keep_imports {
 #[cfg(feature = "qemu")]
 mod qemu_keep_imports {
     use super::*;
+    // `lin_mem_base`: only the GMAC path still calls it (ADR-002
+    // step 1 moved the VirtIO path to `nic_dma_set_buf`). Pinned
+    // until the VF2 follow-up drops the import on both platforms.
+    #[used]
+    static F: unsafe extern "C" fn() -> u64 = wari_lin_mem_base;
     #[used]
     static G: unsafe extern "C" fn(u32, u32) -> i32 = wari_drv_trace_u32;
 }

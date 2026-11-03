@@ -524,6 +524,15 @@ pub fn nic_attach_queue_impl<T>(
         return E_INVAL;
     }
 
+    // ADR-002 step 1: from here on the kernel, not the driver, points
+    // this ring's descriptors at buffers (`nic_dma_set_buf`), so it
+    // has to remember where the table is. `ring_fits` re-checks the
+    // same alignment and span as above; a mismatch here is a kernel
+    // bug, reported as E_INVAL rather than trusted.
+    if !super::dma::record_ring(proc_id, queue_idx, desc_off, queue_size, mem_len) {
+        return E_INVAL;
+    }
+
     let desc_pa = mem_base + desc_off as usize;
     let avail_pa = mem_base + avail_off as usize;
     let used_pa = mem_base + used_off as usize;
