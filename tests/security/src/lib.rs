@@ -144,6 +144,10 @@ pub mod markers {
     /// kernel treats as `exit(0)`.
     pub const T1_RETURNED: &str = "returned cleanly without proc_exit";
 
+    /// The instance burned its whole per-step fuel budget without
+    /// yielding (`wari_sched::TIER1_FUEL_PER_STEP`) and was faulted.
+    pub const T1_OUT_OF_FUEL: &str = "out of fuel";
+
     /// Does any line of `text` say the scheduler faulted a Tier-1
     /// instance (`kernel/src/sched/mod.rs`: `[sched] Tier-1 instance
     /// proc_id=<n> faulted`)? This is the typed-rejection terminal

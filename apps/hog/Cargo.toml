@@ -1,0 +1,26 @@
+[package]
+name = "wari-hog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Adversarial Tier-1 module that never yields — the fuel-exhaustion probe the kernel must fault at every boot."
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Manifest declaration, cross-checked by `scripts/sign-module` against
+# the binary's real import/export surface before signing.
+wari-driver-iface = { path = "../../driver-iface" }
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+lto = true
+strip = true

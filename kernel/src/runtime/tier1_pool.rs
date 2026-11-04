@@ -51,6 +51,8 @@
 
 use core::ptr::addr_of_mut;
 
+use wari_sched::TIER1_FUEL_PER_STEP;
+use wasmi::core::TrapCode;
 use wasmi::{Instance, ResumableCall, ResumableInvocation, Store, Val};
 
 use crate::cap::{ModuleId, MAX_PROCS};
@@ -209,9 +211,30 @@ pub fn resume(proc_id: u8) -> StepOutcome {
             return StepOutcome::Faulted;
         }
     };
+    // A fresh step gets a fresh budget (wari_sched::fuel). Cannot
+    // fail on a metered engine; refuse to run blind if it does.
+    if slot.store.set_fuel(TIER1_FUEL_PER_STEP).is_err() {
+        release(proc_id);
+        return StepOutcome::Faulted;
+    }
     let rc = slot.pending_resume;
     let call = inv.resume(&mut slot.store, &[Val::I32(rc)], &mut []);
     settle(proc_id, call)
+}
+
+/// Boot-trace line with the fuel the tenant burned in its last step,
+/// so budgets can be sized from real runs (QEMU and VF2).
+fn log_fuel_used(proc_id: u8) {
+    if let Some(slot) = pool()[proc_id as usize].as_ref() {
+        if let Ok(left) = slot.store.get_fuel() {
+            kprintln!(
+                "[t1:{}] fuel used={} of {}",
+                proc_id,
+                TIER1_FUEL_PER_STEP.saturating_sub(left),
+                TIER1_FUEL_PER_STEP
+            );
+        }
+    }
 }
 
 /// Common tail for [`start`]/[`resume`]: classify the wasmi result,
@@ -235,6 +258,7 @@ fn settle(proc_id: u8, call: Result<ResumableCall, wasmi::Error>) -> StepOutcome
             // tenant gets faulted at its own exit.
             if let Some(code) = inv.host_error().i32_exit_status() {
                 kprintln!("[t1:{}] exit({})", proc_id, code);
+                log_fuel_used(proc_id);
                 release(proc_id);
                 return StepOutcome::Exited(code);
             }
@@ -262,8 +286,20 @@ fn settle(proc_id: u8, call: Result<ResumableCall, wasmi::Error>) -> StepOutcome
         Err(e) => {
             if let Some(code) = e.i32_exit_status() {
                 kprintln!("[t1:{}] exit({})", proc_id, code);
+                log_fuel_used(proc_id);
                 release(proc_id);
                 StepOutcome::Exited(code)
+            } else if e.as_trap_code() == Some(TrapCode::OutOfFuel) {
+                // The tenant kept the hart for a whole budget without
+                // yielding. On wasmi 0.32.3 this trap is not resumable
+                // (wari_sched::fuel), so the step ends the tenant.
+                kprintln!(
+                    "[t1:{}] out of fuel: {} units in one step without yielding — faulting",
+                    proc_id,
+                    TIER1_FUEL_PER_STEP
+                );
+                release(proc_id);
+                StepOutcome::Faulted
             } else {
                 kprintln!("[t1:{}] runtime trap: {:?}", proc_id, e.kind());
                 release(proc_id);

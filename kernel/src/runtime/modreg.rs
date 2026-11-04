@@ -53,13 +53,14 @@ use crate::error::KernelError;
 use crate::runtime::sign;
 use crate::{kprintln, sched};
 
-/// Registry capacity. Four runtime modules is plenty for the demo
-/// era; the constant is the single knob.
-pub const DYN_SLOTS: usize = 4;
+/// Registry capacity. The boot self-test holds four (guard, hello,
+/// attenuated hello, daemon) and the fuel probe takes the fifth;
+/// plenty for the demo era, and the constant is the single knob.
+pub const DYN_SLOTS: usize = 5;
 
 /// Per-slot byte budget for a staged envelope. The hello envelope is
 /// ~3 KiB; the signed net driver is ~120 KiB. 256 KiB leaves headroom
-/// without making `.bss` silly (total: 1 MiB, zeroed at boot).
+/// without making `.bss` silly (total: 1.25 MiB, zeroed at boot).
 pub const MAX_MODULE_BYTES: usize = 256 * 1024;
 
 /// First proc_id the registry may hand out. 0–4 are boot-assigned
@@ -530,6 +531,18 @@ pub fn self_test_spawn() -> Result<u8, KernelError> {
     kprintln!(
         "[modreg] daemon: pid {} spawned with restart budget 2",
         daemon_pid,
+    );
+
+    // Fuel probe (ADR-002 step 4, tests/security/fuel_exhaustion.rs):
+    // a Tier-1 that never yields. The scheduler must fault it on
+    // `TrapCode::OutOfFuel` after `wari_sched::TIER1_FUEL_PER_STEP`
+    // units; every other tenant above still exits normally. Spawned
+    // last so the demo pids above keep their numbers.
+    let hog_slot = stage(crate::runtime::hello_signed_blob::HOG_SIGNED)?;
+    let hog_pid = spawn(hog_slot)?;
+    kprintln!(
+        "[modreg] fuel probe: pid {} will spin without yielding; expect it faulted on fuel",
+        hog_pid,
     );
     Ok(pid)
 }

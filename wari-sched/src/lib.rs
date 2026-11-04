@@ -17,9 +17,11 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod fuel;
 pub mod policy;
 pub mod process;
 
+pub use fuel::TIER1_FUEL_PER_STEP;
 pub use policy::{count_blocked, pick_next_tenant};
 pub use process::{
     transfer_msg, BlockReason, MsgRegs, Process, ProcessState, MSG_WORDS, NO_MSG_BUF,

@@ -123,7 +123,7 @@ today").
 | Tier-2 UART driver | Done | `drivers/uart/`, `kernel/src/runtime/tier2_uart.rs`       |
 | Tier-2 net driver | Done (Phase 1c) | `drivers/net/`, `kernel/src/runtime/tier2_net.rs` — JH7110 GMAC1 on the VF2, virtio-net on QEMU, smoltcp, TCP sockets; 0% ping loss on silicon (build 162). DMA addresses are driver-computed and unchecked — see `security-model.md` §"DMA" |
 | Tier-1 U-mode + per-instance page tables | **Not implemented** | One S-mode, identity-mapped address space (`kernel/src/mem/kvm.rs`, `kernel/src/trap.S`) |
-| Fuel / preemption | **Not implemented** | Run-to-completion (`kernel/src/sched/mod.rs`); the wasmi `Engine` is built without fuel |
+| Fuel / preemption | **Partial** (ADR-002 step 4) | Tier-1 engines are fuel-metered (`kernel/src/runtime/loader.rs::load_tier1`) with a per-step budget, `wari_sched::TIER1_FUEL_PER_STEP`, refilled at every resume; a tenant that exhausts it without yielding is faulted (`runtime/tier1_pool.rs::settle`), not preempted — out-of-fuel is a non-resumable trap on wasmi 0.32.3. Proved at every boot by the `apps/hog` probe. Tier-2 drivers are still unmetered; no timer preemption |
 | Kernel heap | Bump allocator, no free (Phase-0 design, INV-12) | `kernel/src/runtime/heap.rs` — memory from every instantiation is kept until reset |
 
 ## Design decisions settled since Phase 0

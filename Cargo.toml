@@ -36,6 +36,7 @@ members = [
     "kernel",
     "apps/hello",
     "apps/guard",
+    "apps/hog",
     "drivers/uart",
     "drivers/net",
     "tests/integration",
