@@ -28,13 +28,26 @@
 //! ## Sizing
 //!
 //! wasmi charges roughly one unit per instruction (`FuelCosts`
-//! default). The Phase-2 demos (hello, planner/executor, guard) use
-//! well under 100 000 units per step on QEMU; ten million is two
-//! orders of magnitude of headroom and still bounds a runaway tenant
-//! to a fraction of a second on the VF2. Tier-2 drivers are not
-//! metered here (they get a larger budget and a watchdog in a later
-//! step, per ADR-002).
+//! default). The budget has to cover the longest step a legitimate
+//! tenant takes, and today that is a busy-wait: the HTTP demo polls
+//! `net_socket_accept` in a loop for up to the kernel's accept window
+//! (`wari_abi::net::ACCEPT_DEADLINE_MS`, 60 s), and a host fn call is
+//! not a yield, so the whole wait is one step. Measured cost of that
+//! loop, build 171: about 0.67 M units/s on the VF2 (U74) and about
+//! 1.0 M units/s on QEMU TCG on the development Mac. Ten million units
+//! faulted the demo after ~10–15 s of waiting on both.
+//!
+//! 150 M units is the 60 s window at the faster of the two rates with
+//! a margin of 2.5. The price is how long a runaway tenant keeps the
+//! hart before it is faulted: the `apps/hog` spin burns about 24 M
+//! units/s on QEMU, so about six seconds rather than a fraction of
+//! one. That is the emergency setting; the fix is to
+//! make network waits yield, so a waiting tenant costs no fuel at all
+//! and the budget can come back down to a computation bound.
+//!
+//! Tier-2 drivers are not metered here (they get a larger budget and
+//! a watchdog in a later step, per ADR-002).
 
 /// Fuel a Tier-1 instance may burn in one scheduling step before the
-/// scheduler faults it.
-pub const TIER1_FUEL_PER_STEP: u64 = 10_000_000;
+/// scheduler faults it. See the module docs for how it is sized.
+pub const TIER1_FUEL_PER_STEP: u64 = 150_000_000;

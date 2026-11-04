@@ -18,14 +18,21 @@
 //! The negative arm is real here (a genuine non-yielding blob runs),
 //! unlike the structural Phase-0 tests in this directory.
 
-use wari_security_tests::{boot_kernel_capture, markers, DEFAULT_WALLCLOCK};
+use std::time::Duration;
+
+use wari_security_tests::{boot_kernel_capture, markers};
+
+/// The hog needs `TIER1_FUEL_PER_STEP` / ~24 M units/s (QEMU TCG,
+/// measured) ≈ 6 s to exhaust its step after a ~1 s boot. Twice that,
+/// so a slower host does not turn a working budget into a failure.
+const WALLCLOCK: Duration = Duration::from_secs(15);
 
 /// Printed by `apps/hog` before it spins — proves the probe ran.
 const HOG_BANNER: &str = "[hog] spinning without yielding";
 
 #[test]
 fn non_yielding_tenant_is_faulted_on_fuel() {
-    let text = boot_kernel_capture(DEFAULT_WALLCLOCK);
+    let text = boot_kernel_capture(WALLCLOCK);
 
     assert!(
         text.contains(markers::BOOT_BANNER),
