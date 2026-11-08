@@ -1168,29 +1168,36 @@ pub fn net_socket_listen_impl(proc_id: u8, slot: u32, backlog: u32) -> i32 {
     }
 }
 
-/// `wari::net_socket_accept(slot) -> i32` (Phase-1c HTTP demo).
+/// `wari::net_socket_accept(slot) -> i32` (Phase-1c HTTP demo),
+/// cap-check half.
 ///
 /// Caller must hold a Socket cap with WRITE rights at `slot`.
-/// Returns 1 if a connection is ready for `net_socket_send_canned`,
-/// 0 if still listening, negative errno otherwise.
-///
-/// The kernel-side wrapper drives one smoltcp poll cycle before
-/// inspecting the socket state so a pending SYN is processed first.
-/// Tier-1 typically busy-loops on this until it returns 1.
-pub fn net_socket_accept_impl(proc_id: u8, slot: u32) -> i32 {
+/// Returns `Ok(handle)`, the driver socket handle to wait on, or
+/// `Err(errno)` (`E_INVAL` bad proc/slot, `E_PERM` no such cap) for
+/// the host fn to return as-is. The wait itself is
+/// [`net_socket_accept_on`], driven by the host fn and then by the
+/// scheduler while the tenant is blocked (`runtime::net_wait`).
+pub fn net_socket_accept_resolve(proc_id: u8, slot: u32) -> Result<u32, i32> {
     if (proc_id as usize) >= MAX_PROCS {
-        return E_INVAL;
+        return Err(E_INVAL);
     }
     if slot >= CSPACE_SLOTS as u32 {
-        return E_INVAL;
+        return Err(E_INVAL);
     }
-    let smoltcp_handle = match resolve_socket_handle(proc_id, slot as u8) {
-        Ok(h) => h,
-        Err(e) => return e,
-    };
+    resolve_socket_handle(proc_id, slot as u8)
+}
+
+/// One accept attempt on an already-resolved driver socket `handle`:
+/// drives one smoltcp poll, then reads the socket state.
+///
+/// Returns 1 if a connection is ready for `net_socket_send_canned`,
+/// `wari_sched::net_wait::ACCEPT_PENDING` (0) if still listening
+/// inside the accept window, `E_TIMEDOUT` once the window expired,
+/// `E_NOMEM` on a driver trap.
+pub fn net_socket_accept_on(handle: u32) -> i32 {
     let tick = crate::runtime::tier2_net::next_tick();
     // SAFETY: install ran during boot.
-    match unsafe { crate::runtime::tier2_net::socket_accept(smoltcp_handle, tick) } {
+    match unsafe { crate::runtime::tier2_net::socket_accept(handle, tick) } {
         Ok(rc) => rc,
         Err(_) => E_NOMEM,
     }

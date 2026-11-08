@@ -315,6 +315,9 @@ fn settle(proc_id: u8, call: Result<ResumableCall, wasmi::Error>) -> StepOutcome
 pub fn release(proc_id: u8) {
     if (proc_id as usize) < MAX_PROCS {
         pool()[proc_id as usize] = None;
+        // A tenant that dies mid-wait must not stay in the network
+        // waiter set (the scheduler would try to resume a dead slot).
+        crate::runtime::net_wait::forget(proc_id);
     }
 }
 

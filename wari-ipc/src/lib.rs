@@ -37,6 +37,14 @@ pub enum BlockReason {
     /// it (its `ep_idx` is the reserved sentinel). This is what turns a
     /// guard agent from a busy-poller into a zero-CPU daemon.
     EventWait,
+    /// Blocked in `net_socket_accept` with no connection ready and the
+    /// accept window still open: waiting for the kernel's network poll
+    /// to see the socket connect or the window expire. Not queued on
+    /// any Endpoint — the waiter set lives in the kernel's
+    /// `runtime::net_wait` — and, unlike every other reason, woken by
+    /// an external event rather than a peer tenant, so the scheduler
+    /// must not count it as a deadlock.
+    NetWait,
 }
 
 /// What the *caller* of the op does after the pure decision, when a peer

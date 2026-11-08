@@ -90,8 +90,7 @@ pub use ring_drain::{ring_setup_impl, ring_submit_impl, RingDesc};
 pub use storage::{cspaces, dma_rings, object_pools, reg_tables, ring_descriptors};
 pub use syscall::{
     cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl, cap_register_impl,
-    cap_revoke_impl, cap_unregister_impl, check_cap, lin_mem_base_impl, net_socket_accept_impl,
-    net_socket_bind_impl, net_socket_close_impl, net_socket_create_impl, net_socket_listen_impl,
+    cap_revoke_impl, cap_unregister_impl, check_cap, lin_mem_base_impl, net_socket_bind_impl, net_socket_close_impl, net_socket_create_impl, net_socket_listen_impl,
     net_socket_send_canned_impl, nic_attach_queue_impl, nic_queue_notify_impl, nic_set_mac_impl,
     notification_ack_impl, notification_wait_impl, E_AGAIN, E_INVAL, E_NOMEM, E_NOTCONN, E_PERM,
     E_REFUSED,
