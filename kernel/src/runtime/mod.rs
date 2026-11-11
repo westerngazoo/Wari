@@ -32,6 +32,7 @@ pub mod host_fns;
 pub mod loader;
 pub mod manifest;
 pub mod net_blob;
+pub mod net_wait;
 pub mod noop_blob;
 pub mod sign;
 pub mod tier1_pool;

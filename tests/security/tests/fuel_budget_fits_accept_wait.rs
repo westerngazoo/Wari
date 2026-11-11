@@ -12,14 +12,15 @@
 //! fuel after ~10 s of waiting, on QEMU and on the VF2; the 8 s
 //! `fuel_exhaustion` run ended before that could show.
 //!
-//! This boots with a NIC so the demo reaches its accept loop, lets it
-//! wait well past the point where the old budget ran out, and asserts
-//! that nobody ran out of fuel. The hog probe cannot interfere: it is
-//! scheduled after the demo tenants, which are still waiting when the
-//! run ends.
+//! This boots with a NIC so the demo reaches its accept, lets it wait
+//! well past the point where that budget ran out, and asserts that no
+//! tenant other than the fuel probe ran out of fuel.
 //!
-//! The real fix is network waits that yield (tracked separately); when
-//! it lands this test keeps guarding the same property.
+//! Network waits now block the tenant (`BlockReason::NetWait`) and the
+//! budget is back at ten million: a wait is no longer a step, so it
+//! costs no fuel however long it lasts. The probe (`apps/hog`) now
+//! runs while the demo waits and is faulted on fuel by design, which
+//! is why the check names it rather than forbidding every fault.
 
 use std::time::Duration;
 
@@ -45,13 +46,30 @@ fn tenant_waiting_in_accept_is_not_faulted_on_fuel() {
         text.contains(ACCEPT_WINDOW_OPEN),
         "the demo never reached its accept loop, so this run proves nothing:\n{text}",
     );
+    let probe =
+        fuel_probe_pid(&text).unwrap_or_else(|| panic!("the fuel probe was not spawned:\n{text}"));
+    let probe_line = format!(
+        "{}{probe}] {}",
+        markers::TIER1_PREFIX,
+        markers::T1_OUT_OF_FUEL
+    );
     assert!(
-        !markers::tier1_event(&text, markers::T1_OUT_OF_FUEL),
-        "a tenant waiting in accept was faulted on fuel: \
-         TIER1_FUEL_PER_STEP is too small for the accept window:\n{text}",
+        text.lines()
+            .filter(|l| l.starts_with(markers::TIER1_PREFIX) && l.contains(markers::T1_OUT_OF_FUEL))
+            .all(|l| l.starts_with(&probe_line)),
+        "a tenant other than the fuel probe (pid {probe}) was faulted on fuel: \
+         waiting in accept is being charged as computation:\n{text}",
     );
     assert!(
         !text.contains("panicked at"),
         "rust panic detected:\n{text}",
     );
+}
+
+/// Pid of the fuel probe, from `[modreg] fuel probe: pid <n> will spin…`
+/// (`kernel/src/runtime/modreg.rs`).
+fn fuel_probe_pid(text: &str) -> Option<u32> {
+    let rest = text.split("[modreg] fuel probe: pid ").nth(1)?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }

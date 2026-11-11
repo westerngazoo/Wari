@@ -256,21 +256,15 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Phase-1c HTTP demo — full end-to-end:
-    //   create → bind 7000 → listen → busy-poll accept → send_canned → close
+    //   create → bind 7000 → listen → accept → send_canned → close
     //
     // CSpace slot 8 holds the Socket cap (well above slots 0/1/2
     // used for stdout/exit/Net). If any step fails we print the
-    // step name + rc and exit cleanly; the demo never panics. The
-    // accept loop is bounded so a second tenant (Tier-1 instance
-    // B, which also runs hello) doesn't busy-spin forever when no
-    // client connects on its turn.
-    // accept is a busy-poll: each iteration host-calls into the
-    // kernel which drives one smoltcp poll cycle then inspects the
-    // socket state. The interpreter loops fast (~µs/iter on QEMU);
-    // a generous cap gives a human-paced `curl` a few seconds to
-    // hit the port. Real apps will get a blocking wait once the
-    // IPC story can suspend a Tier-1 cleanly (Phase-1c follow-up).
-    const ACCEPT_MAX_ITERS: u32 = 50_000_000;
+    // step name + rc and exit cleanly; the demo never panics.
+    // accept blocks: with no client yet the kernel suspends this
+    // tenant (no CPU, no fuel) and resumes it when a client connects
+    // or the 60 s accept window expires, so a second tenant running
+    // the same demo, and everyone else, keeps the hart meanwhile.
 
     fn print(s: &[u8]) {
         let mut nw: u32 = 0;
@@ -310,31 +304,16 @@ pub extern "C" fn _start() -> ! {
     }
     print(b"  http: listening on :7000\r\n");
 
-    // Kernel-side wall-clock deadline (Phase-1c Ctrl-R fix B):
-    // `net_socket_accept` returns E_TIMEDOUT (-7) once the 60 s
-    // accept window expires, so the busy-poll below is bounded by
-    // time even if ACCEPT_MAX_ITERS would take hours to count down
-    // on silicon. Matches `kernel/src/cap/syscall.rs::E_TIMEDOUT`.
+    // `net_socket_accept` returns once the wait is over: 1 when a
+    // client connected, E_TIMEDOUT (-7) when the 60 s accept window
+    // expired with no client, another negative errno on failure.
+    // Matches `kernel/src/cap/syscall.rs::E_TIMEDOUT`.
     const E_TIMEDOUT: i32 = -7;
 
-    let mut i: u32 = 0;
-    let mut accepted = false;
-    while i < ACCEPT_MAX_ITERS {
-        let rc = unsafe { wasi::net_socket_accept(8) };
-        if rc == 1 {
-            accepted = true;
-            break;
-        }
-        if rc == E_TIMEDOUT {
-            // Expected when no client connects inside the window;
-            // the shared "accept timeout" epilogue below reports it.
-            break;
-        }
-        if rc < 0 {
-            print(b"  http: accept err\r\n");
-            break;
-        }
-        i = i.wrapping_add(1);
+    let rc = unsafe { wasi::net_socket_accept(8) };
+    let accepted = rc == 1;
+    if !accepted && rc != E_TIMEDOUT {
+        print(b"  http: accept err\r\n");
     }
 
     if accepted {

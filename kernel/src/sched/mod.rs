@@ -144,10 +144,26 @@ pub fn register_tenant(proc_id: u8, tier: Tier, module_id: ModuleId) -> Result<(
 ///     (`kmain`) typically halts in a wfi loop afterward.
 pub fn run() -> Result<(), KernelError> {
     loop {
+        // Wake tenants whose network wait ended (connection ready or
+        // accept window expired) before picking. Each check drives a
+        // smoltcp poll, so the NIC is also serviced once per step
+        // while anyone waits on it.
+        if runtime::net_wait::has_waiters() {
+            runtime::net_wait::service();
+        }
+
         // Pick the next runnable tenant, in ascending proc_id order.
         let next_id = pick_next_tenant();
         let proc_id = match next_id {
             Some(id) => id,
+            None if runtime::net_wait::has_waiters() => {
+                // Nothing runnable, but a network waiter is not a
+                // deadlock: the NIC, not a peer tenant, wakes it, and
+                // its accept window bounds the wait. Keep servicing —
+                // a kernel busy-poll, as the kmain idle loop is, with
+                // Ctrl-R still delivered by interrupt (mmio::plic).
+                continue;
+            }
             None => {
                 // No Ready tenant left. If tenants are still
                 // Blocked, every one of them waits on a peer that

@@ -20,12 +20,12 @@
 
 use std::time::Duration;
 
-use wari_security_tests::{boot_kernel_capture, markers};
+use wari_security_tests::{boot_kernel_capture, markers, DEFAULT_WALLCLOCK};
 
 /// The hog needs `TIER1_FUEL_PER_STEP` / ~24 M units/s (QEMU TCG,
-/// measured) ≈ 6 s to exhaust its step after a ~1 s boot. Twice that,
-/// so a slower host does not turn a working budget into a failure.
-const WALLCLOCK: Duration = Duration::from_secs(15);
+/// measured) ≈ 0.4 s to exhaust its step after a ~1 s boot; the
+/// default budget leaves a wide margin for a slower host.
+const WALLCLOCK: Duration = DEFAULT_WALLCLOCK;
 
 /// Printed by `apps/hog` before it spins — proves the probe ran.
 const HOG_BANNER: &str = "[hog] spinning without yielding";
