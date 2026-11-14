@@ -71,6 +71,13 @@ does, native code produced by an AOT engine runs under the same
 constraint: a compiler bug in it is a direct escape, with nothing
 behind it.
 
+**That question is now decided**: everything that is not Tier 0 —
+the interpreter, compiled code and the Tier-2 drivers — moves to
+U-mode, one address space per process
+([ADR-004](adr/ADR-004-runtime-out-of-kernel.md)). Nothing in this
+section changes until the steps of that ADR land; the table above
+stays "not implemented" until then.
+
 ### Network attack surface — Tier-2 driver scope
 
 A second important threat-model split lives in the network stack. The
