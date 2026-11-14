@@ -42,6 +42,10 @@ pub enum ModuleId {
     Tier2Uart,
     /// The Tier-1 hello app (PR 6).
     Tier1Hello,
+    /// The baked socket-leak probe (`apps/sockleak`): a Tier-1 that
+    /// dies holding sockets. Same boolean caps as the hello app; like
+    /// it, the boot path additionally installs a Net cap.
+    Tier1SockLeak,
     /// The Tier-2 net driver (PR Net-4a). Cap authority lives in
     /// the new `ObjectKind::Net`, not in the legacy boolean `Caps`,
     /// so `caps_for(Tier::Two, Tier2Net)` returns `Caps::empty()`.
@@ -115,7 +119,7 @@ pub const TIER2_UART_DRIVER_CAPS: Caps = Caps {
 pub const fn caps_for(tier: Tier, module_id: ModuleId) -> Caps {
     match (tier, module_id) {
         (Tier::Two, ModuleId::Tier2Uart) => TIER2_UART_DRIVER_CAPS,
-        (Tier::One, ModuleId::Tier1Hello) => TIER1_DEFAULT_CAPS,
+        (Tier::One, ModuleId::Tier1Hello | ModuleId::Tier1SockLeak) => TIER1_DEFAULT_CAPS,
         // Runtime-loaded tenants: stdout + exit, nothing else. Any
         // wider authority is an explicit later grant (the AI-layer
         // Supervisor's job), never a default. Deliberately identical
@@ -169,5 +173,16 @@ mod tests {
         // Tier-2 cannot impersonate the hello app.
         let c = caps_for(Tier::Two, ModuleId::Tier1Hello);
         assert_eq!(c, Caps::empty());
+        // ... nor the socket-leak probe.
+        let c = caps_for(Tier::Two, ModuleId::Tier1SockLeak);
+        assert_eq!(c, Caps::empty());
+    }
+
+    #[test]
+    fn tier1_sockleak_has_the_default_tier1_caps() {
+        assert_eq!(
+            caps_for(Tier::One, ModuleId::Tier1SockLeak),
+            caps_for(Tier::One, ModuleId::Tier1Hello),
+        );
     }
 }

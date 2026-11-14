@@ -1122,6 +1122,38 @@ pub fn net_socket_close_impl(proc_id: u8, slot: u32) -> i32 {
     }
 }
 
+/// Close every Socket cap `proc_id` still holds. Tenant teardown: the
+/// scheduler calls this once a Tier-1 has exited or faulted, so a
+/// dead tenant cannot keep driver sockets allocated.
+///
+/// # Contract
+///
+/// - Precondition: scheduler context, no wasmi frame of `proc_id`
+///   live (its slot is already released) — the close calls into the
+///   Tier-2 net driver.
+/// - Postcondition: no slot of `proc_id`'s CSpace holds a Socket cap
+///   whose pool entry exists; each such socket was closed in the
+///   driver and its accept window cleared (`net_socket_close_impl`).
+/// - Returns the number of Socket caps found. A driver-side close
+///   error does not stop the sweep: the cap is dropped regardless.
+/// - `proc_id >= MAX_PROCS` returns 0. Never panics.
+pub fn net_socket_close_all(proc_id: u8) -> u32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return 0;
+    }
+    let mut closed = 0;
+    for slot in 0..CSPACE_SLOTS as u32 {
+        // Fresh borrow per slot: the close below re-borrows the
+        // CSpace table itself.
+        let is_socket = cspaces()[proc_id as usize].holds(slot as u8, ObjectKind::Socket);
+        if is_socket {
+            let _ = net_socket_close_impl(proc_id, slot);
+            closed += 1;
+        }
+    }
+    closed
+}
+
 /// `wari::net_socket_bind(slot, ip_be, port) -> i32` (PR Net-6c).
 ///
 /// Caller must hold a Socket cap with WRITE rights at `slot`.

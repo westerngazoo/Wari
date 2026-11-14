@@ -44,7 +44,7 @@
 
 use wari_error::KernelError;
 
-use crate::types::Cap;
+use crate::types::{Cap, ObjectKind};
 
 /// Number of slots in a CSpace. Chosen so a CSpace's slot array
 /// fits in exactly one 4 KiB page (256 × 16 = 4 096 bytes).
@@ -117,6 +117,26 @@ impl CSpace {
             Some(&mut self.slots[s])
         } else {
             None
+        }
+    }
+
+    /// `true` if the slot at `slot` holds a cap of exactly `kind`.
+    ///
+    /// An unoccupied slot has kind `Empty`, so asking for any real
+    /// kind there is `false`. Used at tenant teardown to find the
+    /// caps of one kind a dead process still holds.
+    ///
+    /// ```
+    /// use wari_cap::cspace::CSpace;
+    /// use wari_cap::types::ObjectKind;
+    /// let cs = CSpace::new();
+    /// assert!(!cs.holds(8, ObjectKind::Socket)); // nothing minted
+    /// assert!(cs.holds(8, ObjectKind::Empty));
+    /// ```
+    pub fn holds(&self, slot: u8, kind: ObjectKind) -> bool {
+        match self.lookup(slot) {
+            Some(c) => c.kind == kind,
+            None => false,
         }
     }
 

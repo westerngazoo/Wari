@@ -974,6 +974,13 @@ name = "wari-security-tests"
 version = "0.0.1"
 
 [[package]]
+name = "wari-sockleak"
+version = "0.0.1"
+dependencies = [
+ "wari-driver-iface",
+]
+
+[[package]]
 name = "wari-validate"
 version = "0.0.1"
 

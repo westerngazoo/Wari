@@ -334,6 +334,20 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
             }
         }
     }
+    // Socket-leak probes (`apps/sockleak`): two baked tenants that
+    // take every free socket and trap. B gets one only if the kernel
+    // released A's at its death — checked on every boot and by
+    // tests/security/tests/socket_release_on_fault.rs. A failed
+    // registration costs the probe, not the boot.
+    for pid in [cap::PROC_ID_TIER1_SOCKLEAK_A, cap::PROC_ID_TIER1_SOCKLEAK_B] {
+        if let Err(e) = sched::register_tenant(pid, cap::Tier::One, cap::ModuleId::Tier1SockLeak) {
+            kprintln!(
+                "wari sched: socket-leak probe {} register failed: {:?}",
+                pid,
+                e
+            );
+        }
+    }
     // Module-registry self-test (Phase-2 p2a): push the signed hello
     // envelope through the FULL runtime path — stage → ed25519 verify
     // → minimal-cap install → scheduler registration — as if it had

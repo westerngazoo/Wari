@@ -143,6 +143,19 @@ pub mod markers {
     /// error; the kernel then idles in `wfi`.
     pub const TIER2_UART_REFUSED: &str = "tier-2 uart load failed";
 
+    /// Printed by `apps/sockleak` once it holds every free socket,
+    /// right before it traps without closing them.
+    pub const SOCKLEAK_HOLDING: &str = "[sockleak] holding every free socket";
+
+    /// Printed by `apps/sockleak` when the driver had no socket left
+    /// for it: an earlier dead tenant still owns them.
+    pub const SOCKLEAK_NONE_LEFT: &str = "[sockleak] no socket available";
+
+    /// Tail of the scheduler's line after it closes the sockets a
+    /// terminated tenant left open (`kernel/src/sched/mod.rs`:
+    /// `[sched] proc_id=<n> left <k> socket(s) open, closed`).
+    pub const SOCKETS_CLOSED_AT_EXIT: &str = "socket(s) open, closed";
+
     /// Banner line of a kernel built with `--features dev-keys`: it
     /// trusts the in-tree dev key (`kernel/src/boot.rs`).
     pub const DEV_KEYS_BANNER: &str = "DEV SIGNING KEY ACCEPTED";
