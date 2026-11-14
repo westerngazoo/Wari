@@ -30,6 +30,20 @@ use wari_security_tests::{
 #[test]
 fn production_kernel_rejects_dev_signed_drivers() {
     let root = workspace_root();
+
+    // Precondition: the staged driver really is dev-signed (envelope
+    // bytes 0..32 are the signer's public key). `make build` signs it
+    // so; after a production `scripts/build.sh` it would not be, and
+    // the refusal below would prove nothing about the dev key.
+    let envelope = std::fs::read(root.join("build/drivers/uart-qemu.signed.wasm"))
+        .expect("staged UART driver missing: run `make build` first");
+    let dev_pubkey = std::fs::read(root.join("scripts/dev-keys/wari-dev.ed25519.pub"))
+        .expect("dev public key missing");
+    assert!(
+        envelope.starts_with(&dev_pubkey),
+        "staged driver is not dev-signed: run `make build` first",
+    );
+
     let target_dir = root.join("target/prod-key");
     let built = Command::new("cargo")
         .current_dir(root.join("kernel"))

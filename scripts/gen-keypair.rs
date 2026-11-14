@@ -2,7 +2,9 @@
 //! Host-side ed25519 keypair generator.
 //!
 //! Writes the 32-byte raw secret key to `<prefix>.sec` and the 32-byte
-//! raw public key to `<prefix>.pub`.
+//! raw public key to `<prefix>.pub`. The secret is created readable
+//! by its owner only, and an existing `<prefix>.sec` is never
+//! overwritten: losing a signing secret means re-keying every board.
 //!
 //! Usage (production key — the prefix is outside the repository):
 //!
@@ -15,7 +17,9 @@
 //! that directory's README.
 
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -38,7 +42,15 @@ fn main() -> ExitCode {
     let sec_path = with_ext(&prefix, "sec");
     let pub_path = with_ext(&prefix, "pub");
 
-    if let Err(e) = fs::write(&sec_path, signing_key.to_bytes()) {
+    // create_new: never replace an existing secret. 0o600: this is a
+    // signing key, not a build artifact.
+    let written = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&sec_path)
+        .and_then(|mut f| f.write_all(&signing_key.to_bytes()));
+    if let Err(e) = written {
         eprintln!("write {}: {}", sec_path.display(), e);
         return ExitCode::from(1);
     }

@@ -299,6 +299,7 @@ if [ "$PUBLISH" = "1" ]; then
     echo "--- [7b] Publishing release $REL_TAG"
     {
         echo "Build $NEXT_BUILD ($PROFILE) — branch $BRANCH @ $SHA"
+        echo "signing key: $SIGNING"
         echo ""
         echo "sha256:"
         shasum -a 256 build/wari.bin build/drivers/net-vf2.signed.wasm build/drivers/net-qemu.signed.wasm 2>/dev/null \
@@ -310,7 +311,7 @@ if [ "$PUBLISH" = "1" ]; then
         build/wari.bin \
         build/drivers/net-vf2.signed.wasm \
         build/drivers/net-qemu.signed.wasm \
-        --title "Build $NEXT_BUILD ($PROFILE, $BRANCH_SLUG)" \
+        --title "Build $NEXT_BUILD ($PROFILE, $BRANCH_SLUG, $SIGNING key)" \
         --notes-file /tmp/wari-release-notes.txt
     echo "    published: $REL_TAG"
 else
