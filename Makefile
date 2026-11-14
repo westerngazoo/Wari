@@ -30,6 +30,14 @@ QEMU_ARGS    := -machine virt -nographic -bios default \
                 -netdev user,id=net0,net=192.168.50.0/24,host=192.168.50.2,hostfwd=tcp::8080-192.168.50.10:7000 \
                 -device virtio-net-device,netdev=net0
 
+# Signing pair for every target in this file: the in-tree dev key, and
+# a kernel that accepts it (`dev-keys` feature, announced in the boot
+# banner). `make` is the QEMU / test / contributor path. Production
+# images are built by scripts/build.sh with the production key — see
+# docs/security-model.md, "Signing keys".
+export WARI_SIGN_KEY    := scripts/dev-keys/wari-dev.ed25519.sec
+export WARI_SIGN_PUBKEY := scripts/dev-keys/wari-dev.ed25519.pub
+
 # llvm-objcopy from Rust toolchain (install with: rustup component add llvm-tools)
 OBJCOPY := $(shell find $${HOME}/.rustup -name llvm-objcopy -type f 2>/dev/null | head -1)
 
@@ -97,7 +105,7 @@ help:
 
 build: sign-uart-driver sign-net-driver build-hello
 	@echo "  [build] kernel: QEMU virt (entry 0x80200000)"
-	@cd kernel && WARI_BUILD=$(NEXT_BUILD) cargo build --release --features qemu
+	@cd kernel && WARI_BUILD=$(NEXT_BUILD) cargo build --release --features qemu,dev-keys
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), QEMU virt"
 
@@ -165,7 +173,7 @@ sign-net-driver: build-net-driver
 # VF2 cross-compile sanity (no flash). Useful before PR 10 deploy.
 build-vf2: sign-uart-driver sign-net-driver build-hello
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo build --release --features vf2 --no-default-features
+	  cargo build --release --features vf2,dev-keys --no-default-features
 
 build-all: build build-hello
 
@@ -236,7 +244,7 @@ clippy:
 # Gustavo's call (see the host-test gate PR discussion).
 clippy-kernel: sign-uart-driver sign-net-driver build-hello
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo clippy --release --features qemu --no-default-features -- -D warnings
+	  cargo clippy --release --features qemu,dev-keys --no-default-features -- -D warnings
 
 fmt:
 	cargo fmt --all --check
@@ -253,7 +261,7 @@ audit:
 kernel-vf2: sign-uart-driver sign-net-driver build-hello
 	@echo "  [build] kernel: VF2 (entry 0x40200000, hart 1)"
 	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo build --release --features vf2 --no-default-features
+	  cargo build --release --features vf2,dev-keys --no-default-features
 	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), VF2"
@@ -306,7 +314,7 @@ verify:
 kernel-vf2-debug: sign-uart-driver sign-net-driver build-hello
 	@echo "  [build] kernel: VF2 + debug-kernel feature"
 	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo build --release --features vf2,debug-kernel --no-default-features
+	  cargo build --release --features vf2,debug-kernel,dev-keys --no-default-features
 	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), VF2 (DEBUG)"
@@ -317,7 +325,7 @@ kernel-vf2-debug: sign-uart-driver sign-net-driver build-hello
 kernel-vf2-trace: sign-uart-driver sign-net-driver build-hello
 	@echo "  [build] kernel: VF2 + debug-kernel + trace-kernel"
 	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo build --release --features vf2,trace-kernel --no-default-features
+	  cargo build --release --features vf2,trace-kernel,dev-keys --no-default-features
 	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), VF2 (TRACE)"

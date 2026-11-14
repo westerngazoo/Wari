@@ -64,6 +64,11 @@ debug-kernel = []
 # semantics (additive). Pair with `--features vf2,trace-kernel` for
 # the loudest possible silicon trace.
 trace-kernel = ["debug-kernel"]
+# Trust root selection (kernel/src/runtime/sign.rs). Off: the kernel
+# accepts only the production public key. On: it accepts only the
+# in-tree dev key, whose secret half is public, and says so at boot.
+# For QEMU, tests and contributor boards; never for a deployed image.
+dev-keys = []
 
 [profile.release]
 panic = "abort"

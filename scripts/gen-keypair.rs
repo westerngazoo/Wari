@@ -2,18 +2,17 @@
 //! Host-side ed25519 keypair generator.
 //!
 //! Writes the 32-byte raw secret key to `<prefix>.sec` and the 32-byte
-//! raw public key to `<prefix>.pub`. Run once when bootstrapping the
-//! Phase-0 dev keypair.
+//! raw public key to `<prefix>.pub`.
 //!
-//! Usage:
+//! Usage (production key — the prefix is outside the repository):
 //!
 //! ```text
 //! cargo run --manifest-path scripts/Cargo.toml --bin gen-keypair -- \
-//!     scripts/dev-keys/wari-dev.ed25519
+//!     ~/.config/wari/wari-prod.ed25519
 //! ```
 //!
-//! The output files are committed in-tree — see
-//! `scripts/dev-keys/README.md` for the NOT-FOR-PRODUCTION rationale.
+//! Only the `.pub` is then copied into `scripts/prod-keys/` — see
+//! that directory's README.
 
 use std::env;
 use std::fs;
@@ -53,10 +52,9 @@ fn main() -> ExitCode {
     println!("  public -> {}", pub_path.display());
     println!();
     println!(
-        "next: paste the 32 bytes of {} into ACCEPTED_PUBKEY in",
+        "next: copy {} into scripts/prod-keys/ (never the .sec)",
         pub_path.display()
     );
-    println!("       kernel/src/runtime/sign.rs");
     ExitCode::SUCCESS
 }
 

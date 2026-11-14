@@ -24,7 +24,7 @@
 #
 # USAGE
 # -----
-#   scripts/build.sh <profile> [--programs a,b,c] [--no-bump] [--publish]
+#   scripts/build.sh <profile> [--programs a,b,c] [--no-bump] [--publish] [--dev-keys]
 #
 # PROFILES
 #   release   VF2 hardware, production features        (vf2 gmac1)
@@ -45,6 +45,15 @@
 #                    (the board flashes it with
 #                    `wari go --build <branch>.<N>`). The commit
 #                    must already be pushed to GitHub.
+#
+#   --dev-keys       sign with the in-tree dev key and build a kernel
+#                    that accepts it (and says so in its banner). The
+#                    qemu profile always does this. Without it, VF2
+#                    profiles sign with the production key, read from
+#                    $WARI_SIGN_KEY (default
+#                    ~/.config/wari/wari-prod.ed25519.sec) — a file that
+#                    never lives in the repo. See docs/security-model.md,
+#                    "Signing keys".
 #
 # OUTPUTS
 #   Canonical (what the kernel embeds / wari-upgrade flashes — committed):
@@ -78,11 +87,13 @@ shift || true
 PROGRAMS="hello,guard,hog"
 BUMP=1
 PUBLISH=0
+DEV_KEYS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --programs) PROGRAMS="$2"; shift 2 ;;
         --no-bump)  BUMP=0; shift ;;
         --publish)  PUBLISH=1; shift ;;
+        --dev-keys) DEV_KEYS=1; shift ;;
         *) echo "unknown option: $1"; exit 2 ;;
     esac
 done
@@ -92,8 +103,31 @@ case "$PROFILE" in
     debug)   DRV_FEATURES="vf2 gmac1";          KRN_FEATURES="vf2,debug-kernel"; PLATFORM="vf2"  ;;
     trace)   DRV_FEATURES="vf2 gmac1 net-diag"; KRN_FEATURES="vf2";              PLATFORM="vf2"  ;;
     qemu)    DRV_FEATURES="qemu";               KRN_FEATURES="qemu";             PLATFORM="qemu" ;;
-    *) echo "usage: scripts/build.sh <release|debug|trace|qemu> [--programs a,b] [--no-bump] [--publish]"; exit 2 ;;
+    *) echo "usage: scripts/build.sh <release|debug|trace|qemu> [--programs a,b] [--no-bump] [--publish] [--dev-keys]"; exit 2 ;;
 esac
+
+# ── signing key ─────────────────────────────────────────────────
+# One pair per build: sign-module signs with WARI_SIGN_KEY and refuses
+# unless it derives to WARI_SIGN_PUBKEY, the key this kernel accepts.
+# QEMU has no production use, so it always takes the dev pair.
+STEP="signing-key"
+[ "$PLATFORM" = "qemu" ] && DEV_KEYS=1
+if [ "$DEV_KEYS" = "1" ]; then
+    SIGNING="dev"
+    export WARI_SIGN_KEY="scripts/dev-keys/wari-dev.ed25519.sec"
+    export WARI_SIGN_PUBKEY="scripts/dev-keys/wari-dev.ed25519.pub"
+    KRN_FEATURES="$KRN_FEATURES,dev-keys"
+else
+    SIGNING="production"
+    export WARI_SIGN_KEY="${WARI_SIGN_KEY:-$HOME/.config/wari/wari-prod.ed25519.sec}"
+    export WARI_SIGN_PUBKEY="scripts/prod-keys/wari-prod.ed25519.pub"
+    if [ ! -f "$WARI_SIGN_KEY" ]; then
+        echo "production signing key not found: $WARI_SIGN_KEY"
+        echo "  set WARI_SIGN_KEY to its path, or pass --dev-keys for a"
+        echo "  dev-signed image (not for deployment)."
+        exit 2
+    fi
+fi
 
 # ── build number (read now, written only after verify) ──────────
 STEP="build-number"
@@ -129,6 +163,7 @@ echo "=== Wari build $NEXT_BUILD  profile=$PROFILE  platform=$PLATFORM"
 echo "    branch=$BRANCH sha=$SHA dirty-files=$DIRTY programs=$PROGRAMS"
 echo "    driver features: $DRV_FEATURES"
 echo "    kernel features: $KRN_FEATURES"
+echo "    signing key:     $SIGNING"
 
 # ── tools ───────────────────────────────────────────────────────
 STEP="find-objcopy"
@@ -244,6 +279,7 @@ cp build/drivers/net-qemu.signed.wasm "$OUT/net-qemu.signed.wasm"
     echo "date:     $(date -u +%FT%TZ)"
     echo "driver-features: $DRV_FEATURES"
     echo "kernel-features: $KRN_FEATURES"
+    echo "signing:  $SIGNING"
     echo "programs: $PROGRAMS"
 } > "$OUT/build-info.txt"
 
