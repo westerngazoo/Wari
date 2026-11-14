@@ -203,25 +203,47 @@ Sub-decision, independent of the above:
 | Backend support | needs ≥3 reservable registers | needs exactly **one** (WCTX) |
 | After `memory.grow` / any trampoline call | must be re-materialised | re-loaded naturally |
 
-Cranelift exposes a *single* pinned register (`enable_pinned_reg`); whether
-its riscv64 backend honours more is **unverified and is a G4 deliverable**
-(§8). The ABI therefore mandates only WCTX and treats base/length caching as
-a backend optimisation.
+**RESOLVED 2026-10-21 (PM-36) — the answer is zero, not one.** This section
+previously called rv64 pinned-register support "unverified and a G4
+deliverable". It is not unverified: Cranelift's riscv64 backend does not
+implement a pinned register at all, and says so in its own source
+(`isa/riscv64/lower.rs`: *"right now riscv64 not support this feature"*).
+The `enable_pinned_reg` flag is accepted and the **lowering** is what fails,
+which is what makes the trap easy to walk into. `x64` and `aarch64` do
+implement it; we are not on those. Evidence, control experiment and the
+runnable probe: [`aot-cranelift-rv64-findings.md`](aot-cranelift-rv64-findings.md).
 
-Proposed register assignment (all in the **callee-saved `s` bank** on
-purpose — see §3.4):
+**Consequence: WCTX is an explicit first parameter, not a reserved
+register.** This is what Wasmtime itself does with `vmctx` —
+`enable_pinned_reg` is an optional feature for embedders such as
+SpiderMonkey, not the mainstream path — and it is a small change here
+rather than a redesign, because this ABI already mandated *only* WCTX and
+already passes `a0 = WCTX` explicitly across the host boundary (§3.4). The
+change simply extends to compiled-to-compiled calls the convention the host
+boundary already used.
 
-| Reg | Name | Role | Mandatory |
-|-----|------|------|-----------|
-| `x27` / `s11` | **WCTX** | pointer to this instance's context in the arena | **yes** |
-| `x26` / `s10` | `WMBASE` | linear-memory base | if reservable |
-| `x25` / `s9` | `WMLEN` | linear-memory length, bytes | if reservable |
+No register is reserved. The former assignment is kept below only so the
+reasoning that replaced it is legible:
+
+| Reg | Name | Role | Status |
+|-----|------|------|--------|
+| — | **WCTX** | pointer to this instance's context in the arena | **explicit first parameter** of every compiled function |
+| ~~`x27`/`s11`~~ | ~~WCTX~~ | — | withdrawn: rv64 cannot pin a register |
+| ~~`x26`/`s10`~~ | ~~`WMBASE`~~ | ~~linear-memory base~~ | withdrawn: loaded from WCTX |
+| ~~`x25`/`s9`~~ | ~~`WMLEN`~~ | ~~linear-memory length~~ | withdrawn: loaded from WCTX |
+
+Base and length are therefore always context fields, as the table above
+anticipated ("needs exactly one (WCTX)") — the backend simply hoists the
+loads out of loops, which the G4 spike already observed it doing.
 
 > **RECOMMENDATION — A1 · Explicit bounds checks. No guard pages. Ever.**
 >
-> Adopt **Option 2B**: a reserved WCTX register, linear-memory base and
-> length reachable from it, and an explicit compare-and-branch-to-trap
-> before every access that the compiler cannot prove in range.
+> Adopt **Option 2B**: WCTX reachable in every compiled function (as an
+> explicit first parameter — see the 2026-10-21 resolution above; it was
+> originally specified as a reserved register, which rv64 cannot provide),
+> linear-memory base and length reachable from it, and an explicit
+> compare-and-branch-to-trap before every access that the compiler cannot
+> prove in range.
 >
 > The deciding argument is not performance, it is that **guard pages
 > foreclose Phase 4.** Wari's stated endpoint is a ROM-attested Tier-0 on
@@ -324,18 +346,20 @@ the existing `trap.rs` dispatch.
 
 | Register(s) | Role at a host call | Who preserves |
 |---|---|---|
-| `a0` | **WCTX** (explicit first argument, so the kernel side is a plain `extern "C" fn(ctx: *mut InstanceCtx, …)` — no hand-written assembly on the S-mode path) | caller-saved: compiled code re-materialises from `s11` |
+| `a0` | **WCTX** (explicit first argument, so the kernel side is a plain `extern "C" fn(ctx: *mut InstanceCtx, …)` — no hand-written assembly on the S-mode path) | caller-saved: compiled code re-materialises it from its own WCTX parameter, which the register allocator spills and reloads like any other live value |
 | `a1`–`a7` | wasm arguments, psABI order. Max arity in the current surface is 5 (`nic_attach_queue`), so 7 slots is ample | caller-saved |
 | `a0` (ret) | result value, zero/sign-extended per psABI | — |
 | `a1` (ret) | **trap code**, 0 = no trap (§3.6) | — |
 | `t0`–`t6`, `a*`, `ft*`/`fa*` | assumed clobbered | caller-saved (psABI) |
-| `s11` (WCTX), `s10`, `s9` | reserved; must survive the call | **automatically** — they are callee-saved in the RV64 psABI, so rustc-compiled kernel code preserves them with no special handling |
+| ~~`s11`, `s10`, `s9`~~ | **no longer reserved** (2026-10-21, PM-36: rv64 has no pinned register) — they are ordinary allocatable registers | n/a |
 | `sp` | the instance stack (§3.7) | callee-saved (psABI) |
 
-Putting the reserved registers in the `s` bank is the whole trick: the
-kernel-side shim needs *no* save/restore prologue for them, because the
-standard psABI already obliges every compiled function — Rust or Cranelift —
-to preserve them.
+The kernel-side shim still needs *no* save/restore prologue, but the reason
+changed. It used to be that WCTX lived in the callee-saved `s` bank, so the
+psABI preserved it for free. Now WCTX is a live SSA value in the compiled
+caller: the register allocator spills it across the call like any other
+value, so the shim is a plain `extern "C"` function with no special
+obligation at all. The property survives; the mechanism is simpler.
 
 **Requirement this places on the kernel lane (M3):** the memory-touching
 `*_impl` functions currently take `&mut Caller<'_, T>` purely to reach
@@ -518,13 +542,14 @@ Three options for the metering itself:
   divergent, and neither mechanism exists in the kernel today — there is no
   Tier-1 preemption timer either (`sched/mod.rs`).
 
-Where the counter lives: if only WCTX is reservable (§2.5), fuel is a context
-field and the decrement is a store into the arena. That collides with the
-rule in §5.2 that compiled code never writes the arena, so the certificate
-must whitelist **exactly one** store offset — `WCTX + FUEL_OFF` — and reject
-every other arena store. If a second register is reservable, fuel lives in it
-and the arena stays strictly read-only to compiled code, which is the
-cleaner property. Under the U-mode fill this also means the fuel word must
+Where the counter lives: **settled by the 2026-10-21 resolution in §2.5** —
+no register is reservable on rv64, so fuel is a context field and the
+decrement is a store into the arena. That collides with the rule in §5.2
+that compiled code never writes the arena, so the certificate must whitelist
+**exactly one** store offset — `WCTX + FUEL_OFF` — and reject every other
+arena store. (The alternative this paragraph used to offer — fuel in a
+second reserved register, keeping the arena strictly read-only — is no
+longer available; it was the cleaner property and we do not get it.) Under the U-mode fill this also means the fuel word must
 sit on its own page (U-RW) with the rest of the context U-RO.
 
 > **RECOMMENDATION — A3 · Trap via thunk; generate the mapping from wasmi; fuel bit-exact.**
@@ -532,6 +557,17 @@ sit on its own page (U-RW) with the rest of the context U-RO.
 > Traps use **Option 4A** (branch to a thunk that calls `WCTX.trap_entry`
 > with a stable `TrapCode`), never hardware faults — the only shape that is
 > privilege-agnostic, MMU-free-compatible and visible to the certificate.
+>
+> **How it is produced (PM-36, 2026-10-21):** the translator **never emits
+> `ir::trap`**. Cranelift lowers `trap` on rv64 to `udf` — four zero bytes,
+> an illegal instruction, not a call — so the thunk edge would be absent
+> from the emitted code and G7b could not verify it. Instead the translator
+> emits the check as ordinary control flow into a block that loads
+> `WCTX.trap_entry` and calls it. This is better than the machine-code
+> post-processing the roadmap assumed: the trap edge is a real call in the
+> IR, verifiable **by construction** rather than recovered by matching
+> bytes. Validated on `riscv64gc`: 72 bytes, 0 relocations, trap path is a
+> real `callind`.
 >
 > The trap mapping is **generated from the pinned wasmi's `TrapCode` enum**
 > with a test that fails on any unhandled variant. Div/rem-by-zero,

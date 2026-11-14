@@ -1,0 +1,11 @@
+[package]
+name = "clif-rv64-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+cranelift-codegen = { version = "0.134.2", features = ["riscv64", "disas"] }
+cranelift-frontend = "0.134.2"
+target-lexicon = "0.13.5"
+
+[workspace]
