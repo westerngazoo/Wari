@@ -176,7 +176,10 @@ pub enum FuncSig {
     /// `lin_mem_base`.
     UnitU64 = 6,
 
-    /// `(u32, u32, u32, u32, u32) -> i32` — `nic_attach_queue`.
+    /// `(u32, u32, u32, u32, u32) -> i32`. No current user:
+    /// `nic_attach_queue` took five arguments until the descriptor
+    /// table moved into the kernel. The discriminant stays reserved
+    /// so already-signed manifests keep their meaning.
     U32x5I32 = 7,
 
     /// `(u32, u32, u32) -> i32` — `socket_bind` (handle, ip_be,
@@ -957,7 +960,7 @@ macro_rules! wari_net_driver {
                     (b"wari", b"net_mmio_write32", $crate::FuncSig::U32xU32I32),
                     (b"wari", b"net_mmio_read32", $crate::FuncSig::U32U32),
                     (b"wari", b"nic_set_mac", $crate::FuncSig::U32xU32I32),
-                    (b"wari", b"nic_attach_queue", $crate::FuncSig::U32x5I32),
+                    (b"wari", b"nic_attach_queue", $crate::FuncSig::U32x4I32),
                     (b"wari", b"nic_queue_notify", $crate::FuncSig::U32I32),
                     (b"wari", b"nic_dma_set_buf", $crate::FuncSig::U32x4I32),
                     (b"wari", b"lin_mem_base", $crate::FuncSig::UnitU64),

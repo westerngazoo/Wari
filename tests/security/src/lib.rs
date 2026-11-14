@@ -88,6 +88,109 @@ pub fn boot_kernel_capture_with_net(wallclock: Duration) -> String {
     boot_capture(&default_kernel(), wallclock, NET_DEVICE_ARGS)
 }
 
+/// Boot the kernel with a VirtIO-net NIC whose traffic is recorded,
+/// poke the guest from the host so traffic exists, and return the
+/// UART text together with the capture (pcap bytes).
+///
+/// QEMU forwards a free host TCP port to the demo's port in the
+/// guest and dumps every frame on the virtual wire to a file
+/// (`-object filter-dump`). `after`, into the run, a host-side TCP
+/// connect to that port makes QEMU's user-mode stack ARP for the
+/// guest: a frame the guest must **receive** and answer, i.e. one
+/// trip through its RX DMA path and one through its TX DMA path.
+///
+/// # Panics
+///
+/// If the kernel ELF is missing, QEMU cannot be spawned, or no host
+/// port can be reserved.
+pub fn boot_kernel_capture_wire(wallclock: Duration, after: Duration) -> (String, Vec<u8>) {
+    // Reserve a free port, then release it for QEMU to bind. Another
+    // process could take it in between; the run would then fail
+    // loudly (QEMU exits), not pass falsely.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("no free host port")
+        .port();
+    let pcap = std::env::temp_dir().join(format!("wari-wire-{}-{port}.pcap", std::process::id()));
+    let _ = std::fs::remove_file(&pcap);
+
+    let netdev =
+        format!("user,id=net0,net=192.168.50.0/24,host=192.168.50.2,hostfwd=tcp:127.0.0.1:{port}-192.168.50.10:7000");
+    let dump = format!("filter-dump,id=f0,netdev=net0,file={}", pcap.display());
+    let args = [
+        "-global",
+        "virtio-mmio.force-legacy=false",
+        "-netdev",
+        &netdev,
+        "-device",
+        "virtio-net-device,netdev=net0",
+        "-object",
+        &dump,
+    ];
+
+    let poke = thread::spawn(move || {
+        thread::sleep(after);
+        // The connect itself may time out (the guest's TCP answer is
+        // not what this harness measures); the ARP exchange it
+        // triggers is.
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let _ = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2));
+    });
+    let text = boot_capture(&default_kernel(), wallclock, &args);
+    let _ = poke.join();
+
+    let wire = std::fs::read(&pcap).unwrap_or_default();
+    let _ = std::fs::remove_file(&pcap);
+    (text, wire)
+}
+
+/// Ethernet frames of a classic pcap capture (the format QEMU's
+/// `filter-dump` writes), in order. Truncated or foreign input yields
+/// the frames read so far, never a panic.
+///
+/// ```
+/// use wari_security_tests::pcap_frames;
+/// // 24-byte global header (little-endian magic), then one record
+/// // with a 4-byte frame.
+/// let mut cap = vec![0xd4, 0xc3, 0xb2, 0xa1];
+/// cap.extend_from_slice(&[0; 20]);
+/// cap.extend_from_slice(&[0; 8]);                 // timestamp
+/// cap.extend_from_slice(&4u32.to_le_bytes());     // captured length
+/// cap.extend_from_slice(&4u32.to_le_bytes());     // original length
+/// cap.extend_from_slice(&[1, 2, 3, 4]);
+/// assert_eq!(pcap_frames(&cap), vec![&[1u8, 2, 3, 4][..]]);
+/// assert!(pcap_frames(&[0; 10]).is_empty());      // not a capture
+/// ```
+pub fn pcap_frames(cap: &[u8]) -> Vec<&[u8]> {
+    const GLOBAL_HEADER: usize = 24;
+    const RECORD_HEADER: usize = 16;
+    let mut frames = Vec::new();
+    let Some(magic) = cap.get(0..4) else {
+        return frames;
+    };
+    let little_endian = match magic {
+        [0xd4, 0xc3, 0xb2, 0xa1] => true,
+        [0xa1, 0xb2, 0xc3, 0xd4] => false,
+        _ => return frames,
+    };
+    let mut at = GLOBAL_HEADER;
+    while let Some(len_bytes) = cap.get(at + 8..at + 12) {
+        let raw = [len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]];
+        let len = if little_endian {
+            u32::from_le_bytes(raw)
+        } else {
+            u32::from_be_bytes(raw)
+        } as usize;
+        let start = at + RECORD_HEADER;
+        let Some(frame) = cap.get(start..start + len) else {
+            break;
+        };
+        frames.push(frame);
+        at = start + len;
+    }
+    frames
+}
+
 fn boot_capture(kernel: &Path, wallclock: Duration, extra_args: &[&str]) -> String {
     assert!(
         kernel.exists(),

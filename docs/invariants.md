@@ -420,8 +420,10 @@ Greek.
 > Once software sets the OWN bit on a descriptor, it does not read or
 > write that descriptor or its buffer until the engine clears OWN.
 > Symmetrically, software does not re-arm a descriptor without first
-> observing OWN clear. Every physical address handed to a DMA engine
-> lies inside the driver's own linear memory.
+> observing OWN clear. Every span a DMA engine is told to read or
+> write — address **and** length — lies inside the driver's own
+> linear memory, and the descriptors that say so are not storable by
+> the driver.
 
 **Consequence**: no frame is silently lost to software overwriting a
 completed descriptor, and no in-flight frame is corrupted by software
@@ -471,18 +473,31 @@ kernel memory included. See `security-model.md` §"DMA" for the threat
 and the required fix (kernel-owned DMA addressing), decided in
 `adr/ADR-002-network-layering.md` step 1.
 
-*Status of that fix.* **VirtIO (QEMU): enforced.** The driver names a
-buffer by linear-memory offset through `wari::nic_dma_set_buf`;
-`cap::dma::nic_dma_set_buf_impl` checks the span and the descriptor
-index (`wari_validate::dma`, host-tested) and writes the physical
-address into the descriptor itself. `nic_attach_queue` records each
-ring; `net_mmio_write32` refuses the VirtIO queue-address registers
-(`BoardDescriptor::dma_addr_regs`). The driver's INV-25 self-check at
-init makes two calls that must be refused and will not bring the
-device up if either is accepted (`tests/security/tests/dma_escape.rs`).
+*Status of that fix.* **VirtIO (QEMU): enforced.** The descriptor
+tables live in kernel memory (`mmio::dma_mem`), not in the driver's.
+The driver names a buffer by linear-memory offset and length through
+`wari::nic_dma_set_buf`; `cap::dma::nic_dma_set_buf_impl` checks the
+span and the descriptor index (`wari_validate::dma`, host-tested) and
+writes the whole descriptor — address, length, direction — itself.
+`nic_attach_queue` claims the table and programs it into the device;
+`net_mmio_write32` refuses the VirtIO queue-address registers
+(`BoardDescriptor::dma_addr_regs`). The driver's self-check at init
+makes three calls that must be refused and will not bring the device
+up if any is accepted (`tests/security/tests/dma_escape.rs`);
+`dma_kernel_rings.rs` proves the device really uses the kernel's
+tables by passing a frame through each DMA direction.
+
+An earlier version of this fix wrote the validated address into a
+descriptor that stayed in the driver's linear memory. That was not
+containment: the driver could overwrite the address or the length
+afterwards with an ordinary store, and read the address to learn its
+physical base. It is why the tables moved.
+
 **GMAC (VF2): not yet.** The driver still forms ring and buffer
-addresses from `lin_mem_base`; the VF2 follow-up moves them into the
-kernel and fills `dma_addr_regs` for the DWMAC list/tail registers.
+addresses from `lin_mem_base` and keeps its descriptor rings in its
+own memory; the VF2 follow-up moves them into the kernel, with the
+ring-length, buffer-size and descriptor-skip registers that also
+decide what the engine touches, and fills `dma_addr_regs`.
 
 ### INV-26 · A Driver Socket Lives Exactly As Long As a Cap Names It *(Phase 2)*
 

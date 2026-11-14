@@ -236,19 +236,15 @@ extern "C" {
     #[link_name = "notification_ack"]
     fn wari_notification_ack(slot: u32) -> i32;
 
-    /// Driver → kernel: bind a virtqueue's three rings (descriptor
-    /// table, available ring, used ring) to the NIC. The driver
-    /// passes lin-mem offsets; the kernel translates to physical
-    /// addresses and writes the VirtIO MMIO queue config registers.
+    /// Driver → kernel: bind a virtqueue to the NIC. The driver
+    /// passes the lin-mem offsets of its available and used rings;
+    /// the descriptor table is the kernel's (INV-25) and never
+    /// appears in this module's memory. The kernel translates the
+    /// offsets and writes the VirtIO MMIO queue config registers.
     /// PR Net-4c host fn.
     #[link_name = "nic_attach_queue"]
-    fn wari_nic_attach_queue(
-        queue_idx: u32,
-        desc_off: u32,
-        avail_off: u32,
-        used_off: u32,
-        queue_size: u32,
-    ) -> i32;
+    fn wari_nic_attach_queue(queue_idx: u32, avail_off: u32, used_off: u32, queue_size: u32)
+        -> i32;
 
     /// Kick the device's QueueNotify register for `queue_idx`
     /// (0 = rx, 1 = tx) after the driver has updated the available
@@ -256,11 +252,13 @@ extern "C" {
     #[link_name = "nic_queue_notify"]
     fn wari_nic_queue_notify(queue_idx: u32) -> i32;
 
-    /// Point descriptor `idx` of ring `ring` (`RING_RX` / `RING_TX`)
+    /// Aim descriptor `idx` of ring `ring` (`RING_RX` / `RING_TX`)
     /// at `[buf_off, buf_off + len)` of this module's linear memory.
     /// The kernel validates the span against our memory and writes
-    /// the physical address into the descriptor itself; the driver
-    /// never forms one (ADR-002 step 1, INV-25). Returns 0, or
+    /// the whole descriptor — address, length, direction — into a
+    /// table it keeps in its own memory; the driver never forms a
+    /// physical address and cannot store to a descriptor (ADR-002
+    /// step 1, INV-25). Returns 0, or
     /// `HOST_E_INVAL` / E_PERM / E_NOMEM with nothing written.
     #[link_name = "nic_dma_set_buf"]
     fn wari_nic_dma_set_buf(ring: u32, idx: u32, buf_off: u32, len: u32) -> i32;
@@ -284,11 +282,14 @@ const RING_TX: u32 = 1;
 /// The INV-25 self-check in `init_virtio` expects exactly this.
 const HOST_E_INVAL: i32 = -2;
 
-/// Diagnostic tags for the INV-25 self-check: 'DMAo' (span outside
-/// linear memory) and 'DMAi' (descriptor index past the ring). `val`
-/// is the kernel's return code; both must read `0xfffffffe`.
+/// Diagnostic tags for the INV-25 self-check: 'DMAo' (span starting
+/// outside linear memory), 'DMAi' (descriptor index past the ring)
+/// and 'DMAl' (span that starts inside linear memory and runs past
+/// its end). `val` is the kernel's return code; all must read
+/// `0xfffffffe`.
 const TAG_DMA_OOB: u32 = 0x444D_416F;
 const TAG_DMA_IDX: u32 = 0x444D_4169;
+const TAG_DMA_LEN: u32 = 0x444D_416C;
 
 // ── Virtqueue ring storage (PR Net-4c) ───────────────────────────
 //
@@ -303,12 +304,9 @@ const TAG_DMA_IDX: u32 = 0x444D_4169;
 
 const QUEUE_SIZE: u32 = 8;
 
-/// Descriptor table — `virtq_desc[QUEUE_SIZE]`. Each desc is 16
-/// bytes; alignment 16 (VirtIO 1.2 §2.6).
-#[repr(C, align(16))]
-struct DescTable {
-    bytes: [u8; 16 * QUEUE_SIZE as usize],
-}
+// The descriptor table (`virtq_desc[QUEUE_SIZE]`) is not here: it
+// holds the addresses and lengths the device acts on, so it lives in
+// kernel memory and is written only by `nic_dma_set_buf` (INV-25).
 
 /// Available ring — `flags : u16, idx : u16, ring : u16[QUEUE_SIZE]`.
 /// 4 + 2*8 = 20 bytes. Alignment 2.
@@ -325,9 +323,6 @@ struct UsedRing {
     bytes: [u8; 4 + 8 * QUEUE_SIZE as usize],
 }
 
-static mut RX_DESC: DescTable = DescTable {
-    bytes: [0; 16 * QUEUE_SIZE as usize],
-};
 static mut RX_AVAIL: AvailRing = AvailRing {
     bytes: [0; 4 + 2 * QUEUE_SIZE as usize],
 };
@@ -335,9 +330,6 @@ static mut RX_USED: UsedRing = UsedRing {
     bytes: [0; 4 + 8 * QUEUE_SIZE as usize],
 };
 
-static mut TX_DESC: DescTable = DescTable {
-    bytes: [0; 16 * QUEUE_SIZE as usize],
-};
 static mut TX_AVAIL: AvailRing = AvailRing {
     bytes: [0; 4 + 2 * QUEUE_SIZE as usize],
 };
@@ -346,14 +338,15 @@ static mut TX_USED: UsedRing = UsedRing {
 };
 
 /// Set up one virtqueue: select it on the device, choose queue size,
-/// hand the kernel offsets for the three rings via `nic_attach_queue`
-/// (which writes the VirtIO MMIO queue-config registers).
+/// hand the kernel the offsets of the available and used rings via
+/// `nic_attach_queue` (which supplies the descriptor table itself
+/// and writes the VirtIO MMIO queue-config registers).
 ///
 /// `queue_idx`: 0 = rx, 1 = tx (VirtIO-net §5.1.6.1 convention).
-fn attach_queue(queue_idx: u32, desc_off: u32, avail_off: u32, used_off: u32) -> Result<(), ()> {
+fn attach_queue(queue_idx: u32, avail_off: u32, used_off: u32) -> Result<(), ()> {
     // SAFETY: extern host-fn call. Kernel does cap check + bounds
     // check on the offsets, then writes VirtIO MMIO queue regs.
-    let r = unsafe { wari_nic_attach_queue(queue_idx, desc_off, avail_off, used_off, QUEUE_SIZE) };
+    let r = unsafe { wari_nic_attach_queue(queue_idx, avail_off, used_off, QUEUE_SIZE) };
     if r == 0 {
         Ok(())
     } else {
@@ -371,9 +364,6 @@ fn attach_queue(queue_idx: u32, desc_off: u32, avail_off: u32, used_off: u32) ->
 
 const ETH_FRAME_MAX: usize = 1536;
 const RX_BUF_COUNT: usize = QUEUE_SIZE as usize;
-
-/// VirtIO descriptor flag — buffer is device-write (rx).
-const VIRTQ_DESC_F_WRITE: u16 = 0x2;
 
 /// VirtIO-net packet header per §5.1.6. The device prepends this
 /// to every frame on rx, and expects it on every tx frame. We
@@ -686,42 +676,16 @@ fn read_u16_le(off: u32) -> u16 {
     unsafe { p.read() as u16 | ((p.add(1).read() as u16) << 8) }
 }
 
-/// Write a 32-bit little-endian value to a lin-mem offset.
-fn write_u32_le(off: u32, val: u32) {
-    let p = off as *mut u8;
-    // SAFETY: same as write_u16_le.
-    unsafe {
-        p.write(val as u8);
-        p.add(1).write((val >> 8) as u8);
-        p.add(2).write((val >> 16) as u8);
-        p.add(3).write((val >> 24) as u8);
-    }
-}
-
 #[allow(dead_code)]
 fn read_u32_le(off: u32) -> u32 {
     let p = off as *const u8;
-    // SAFETY: same as write_u32_le.
+    // SAFETY: same as write_u16_le.
     unsafe {
         p.read() as u32
             | ((p.add(1).read() as u32) << 8)
             | ((p.add(2).read() as u32) << 16)
             | ((p.add(3).read() as u32) << 24)
     }
-}
-
-/// Fill the non-address fields of the VirtIO descriptor at
-/// `desc_off + idx*16`. The `addr` field (first 8 bytes) is written
-/// by the kernel through `nic_dma_set_buf`, never by the driver
-/// (INV-25).
-///
-/// VirtIO 1.2 §2.6.5:
-///   struct virtq_desc { le64 addr; le32 len; le16 flags; le16 next; }
-fn write_desc_meta(desc_off: u32, idx: u16, len: u32, flags: u16, next: u16) {
-    let off = desc_off + (idx as u32) * 16;
-    write_u32_le(off + 8, len); // len
-    write_u16_le(off + 12, flags); // flags
-    write_u16_le(off + 14, next); // next
 }
 
 /// Populate the rx queue: build 8 descriptors, each pointing at a
@@ -736,7 +700,6 @@ fn write_desc_meta(desc_off: u32, idx: u16, len: u32, flags: u16, next: u16) {
 /// idle loop or worker to drain them).
 fn populate_rx() -> Result<(), ()> {
     // Offsets in lin-mem.
-    let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
     let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
     // SAFETY: addr_of_mut! over indexed static doesn't deref, but
     // Rust's E0133 still flags the index expression. Single-thread
@@ -744,8 +707,9 @@ fn populate_rx() -> Result<(), ()> {
     let rx_buf0_off = unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
 
     // Build 8 descriptors, one per rx buffer. The kernel writes each
-    // descriptor's address from the offset we hand it (INV-25: the
-    // driver never forms a physical address); we fill length + flags.
+    // one whole — address, length, device-writable — from the offset
+    // and length we hand it (INV-25: the driver never forms a
+    // physical address and cannot store to a descriptor).
     for i in 0..RX_BUF_COUNT {
         let buf_off = rx_buf0_off + (i as u32) * (ETH_FRAME_MAX as u32);
         // SAFETY: extern host-fn — kernel cap-checks Net + WRITE and
@@ -753,13 +717,6 @@ fn populate_rx() -> Result<(), ()> {
         if unsafe { wari_nic_dma_set_buf(RING_RX, i as u32, buf_off, ETH_FRAME_MAX as u32) } != 0 {
             return Err(());
         }
-        write_desc_meta(
-            rx_desc_off,
-            i as u16,
-            ETH_FRAME_MAX as u32,
-            VIRTQ_DESC_F_WRITE,
-            0,
-        );
     }
 
     // Available ring layout (§2.6.6):
@@ -805,21 +762,18 @@ pub fn driver_tx_send(buf_off: u32, len: u32) -> i32 {
         return -1;
     }
 
-    let tx_desc_off = core::ptr::addr_of_mut!(TX_DESC) as u32;
     let tx_avail_off = core::ptr::addr_of_mut!(TX_AVAIL) as u32;
 
     // Always reuse descriptor 0 — Phase-1b has no in-flight queue.
     let desc_idx: u16 = 0;
 
     // The kernel validates `[buf_off, buf_off + len)` against our
-    // lin-mem and writes the descriptor's address field (INV-25).
+    // lin-mem and writes the descriptor (INV-25). On the TX ring it
+    // is never device-writable: the device reads, doesn't write.
     // SAFETY: extern host-fn, kernel cap-checks Net + WRITE.
     if unsafe { wari_nic_dma_set_buf(RING_TX, desc_idx as u32, buf_off, len) } != 0 {
         return -1;
     }
-    // VIRTQ_DESC_F_WRITE not set on tx — device reads, doesn't
-    // write. flags = 0.
-    write_desc_meta(tx_desc_off, desc_idx, len, 0, 0);
 
     // Available ring: bump idx to publish the descriptor.
     let avail_idx = unsafe {
@@ -892,7 +846,6 @@ pub fn driver_rx_recycle(desc_idx: u32) -> i32 {
         return -1;
     }
 
-    let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
     let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
     // SAFETY: addr_of_mut! over indexed static doesn't deref, but
     // Rust's E0133 still flags the index expression. Single-thread
@@ -901,18 +854,11 @@ pub fn driver_rx_recycle(desc_idx: u32) -> i32 {
     let buf_off = rx_buf0_off + desc_idx * (ETH_FRAME_MAX as u32);
 
     // Rewrite the descriptor (idempotent): the kernel re-validates
-    // and rewrites the address (INV-25), we rewrite length + flags.
+    // the span and rewrites the whole descriptor (INV-25).
     // SAFETY: extern host-fn — kernel cap-checks Net + WRITE.
     if unsafe { wari_nic_dma_set_buf(RING_RX, desc_idx, buf_off, ETH_FRAME_MAX as u32) } != 0 {
         return -1;
     }
-    write_desc_meta(
-        rx_desc_off,
-        desc_idx as u16,
-        ETH_FRAME_MAX as u32,
-        VIRTQ_DESC_F_WRITE,
-        0,
-    );
 
     // Append to avail ring.
     let avail_idx = unsafe {
@@ -2272,34 +2218,36 @@ fn init_virtio() -> Result<[u8; 6], ()> {
     // we only convert to u32 (lin-mem offset) and pass to the
     // kernel, never dereference here. The kernel accesses the
     // memory via the wasmi Memory abstraction (bounds-checked).
-    let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
     let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
     let rx_used_off = core::ptr::addr_of_mut!(RX_USED) as u32;
-    let tx_desc_off = core::ptr::addr_of_mut!(TX_DESC) as u32;
     let tx_avail_off = core::ptr::addr_of_mut!(TX_AVAIL) as u32;
     let tx_used_off = core::ptr::addr_of_mut!(TX_USED) as u32;
 
     // VirtIO-net §5.1.6.1: queue 0 is receiveq[0], queue 1 is
     // transmitq[0]. Phase-1b uses one rx + one tx queue, no
     // controlq (didn't negotiate VIRTIO_NET_F_CTRL_VQ).
-    attach_queue(0, rx_desc_off, rx_avail_off, rx_used_off)?;
-    attach_queue(1, tx_desc_off, tx_avail_off, tx_used_off)?;
+    attach_queue(0, rx_avail_off, rx_used_off)?;
+    attach_queue(1, tx_avail_off, tx_used_off)?;
 
     // INV-25 self-check (ADR-002 step 1). The kernel must refuse to
-    // aim the DMA engine outside our linear memory. Two calls that
-    // have to fail — a span that wraps past the end of memory, and a
-    // descriptor index past the ring — logged as DMAo / DMAi with the
-    // kernel's return code. If either is accepted the containment is
-    // gone, and this driver refuses to bring the device up rather
-    // than run on a kernel that no longer checks. The adversarial
-    // test `tests/security/tests/dma_escape.rs` asserts both tags.
+    // aim the DMA engine outside our linear memory. Three calls that
+    // have to fail — a span that starts past the end of memory, a
+    // descriptor index past the ring, and a span that starts inside
+    // memory but whose length runs off the end — logged as DMAo /
+    // DMAi / DMAl with the kernel's return code. If any is accepted
+    // the containment is gone, and this driver refuses to bring the
+    // device up rather than run on a kernel that no longer checks.
+    // The adversarial test `tests/security/tests/dma_escape.rs`
+    // asserts all three tags.
     // SAFETY: extern host-fns; on a rejected call nothing is written.
     let rc_oob = unsafe { wari_nic_dma_set_buf(RING_RX, 0, u32::MAX - 64, ETH_FRAME_MAX as u32) };
     let _ = unsafe { wari_drv_log_u32(TAG_DMA_OOB, rc_oob as u32) };
     let rc_idx =
-        unsafe { wari_nic_dma_set_buf(RING_RX, QUEUE_SIZE, rx_desc_off, ETH_FRAME_MAX as u32) };
+        unsafe { wari_nic_dma_set_buf(RING_RX, QUEUE_SIZE, rx_avail_off, ETH_FRAME_MAX as u32) };
     let _ = unsafe { wari_drv_log_u32(TAG_DMA_IDX, rc_idx as u32) };
-    if rc_oob != HOST_E_INVAL || rc_idx != HOST_E_INVAL {
+    let rc_len = unsafe { wari_nic_dma_set_buf(RING_RX, 0, rx_avail_off, u32::MAX / 2) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_LEN, rc_len as u32) };
+    if rc_oob != HOST_E_INVAL || rc_idx != HOST_E_INVAL || rc_len != HOST_E_INVAL {
         return Err(());
     }
 
@@ -3768,7 +3716,7 @@ mod vf2_keep_imports {
     #[used]
     static C: unsafe extern "C" fn(u32, u32) -> i32 = wari_nic_set_mac;
     #[used]
-    static D: unsafe extern "C" fn(u32, u32, u32, u32, u32) -> i32 = wari_nic_attach_queue;
+    static D: unsafe extern "C" fn(u32, u32, u32, u32) -> i32 = wari_nic_attach_queue;
     #[used]
     static E: unsafe extern "C" fn(u32) -> i32 = wari_nic_queue_notify;
     #[used]

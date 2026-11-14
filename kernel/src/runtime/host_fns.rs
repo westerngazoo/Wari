@@ -519,29 +519,21 @@ pub fn register_net_host_fns(
         )
         .map_err(|_| KernelError::BadWasm)?;
 
-    // PR Net-4c — virtqueue attach. Driver passes lin-mem offsets;
-    // kernel translates to PAs and writes the VirtIO MMIO queue
-    // config registers.
+    // PR Net-4c — virtqueue attach. Driver passes lin-mem offsets of
+    // its available and used rings; the kernel supplies the descriptor
+    // table from its own memory (INV-25), translates the offsets to
+    // PAs and writes the VirtIO MMIO queue config registers.
     linker
         .func_wrap(
             "wari",
             "nic_attach_queue",
             move |mut caller: Caller<'_, Tier2HostState>,
                   queue_idx: u32,
-                  desc_off: u32,
                   avail_off: u32,
                   used_off: u32,
                   queue_size: u32|
                   -> i32 {
-                nic_attach_queue_impl(
-                    &mut caller,
-                    pid,
-                    queue_idx,
-                    desc_off,
-                    avail_off,
-                    used_off,
-                    queue_size,
-                )
+                nic_attach_queue_impl(&mut caller, pid, queue_idx, avail_off, used_off, queue_size)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;

@@ -30,6 +30,9 @@ use wari_security_tests::{boot_kernel_capture_with_net, markers, DEFAULT_WALLCLO
 const TAG_DMA_OOB: &str = "tag=0x444d416f";
 /// `[net:drv] tag=0x444d4169` — 'DMAi', descriptor index past the ring.
 const TAG_DMA_IDX: &str = "tag=0x444d4169";
+/// `[net:drv] tag=0x444d416c` — 'DMAl', span that starts inside
+/// linear memory and whose length runs past its end.
+const TAG_DMA_LEN: &str = "tag=0x444d416c";
 /// `cap::syscall::E_INVAL` (-2) as the kernel prints it.
 const E_INVAL_HEX: &str = "val=0xfffffffe";
 
@@ -42,7 +45,7 @@ fn dma_outside_linmem_is_refused() {
         "kernel did not boot:\n{text}",
     );
 
-    for tag in [TAG_DMA_OOB, TAG_DMA_IDX] {
+    for tag in [TAG_DMA_OOB, TAG_DMA_IDX, TAG_DMA_LEN] {
         let line = text
             .lines()
             .find(|l| l.contains(tag))

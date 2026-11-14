@@ -127,30 +127,36 @@ A Tier-2 driver's WASM sandbox bounds what the driver *loads and
 stores*. It does not bound what the driver tells a bus-master device
 to load and store, and the GMAC on the JH7110 sits behind no IOMMU.
 
-Today the net driver computes the physical addresses it hands to the
-DMA engine itself: it asks the kernel for its linear-memory base
-(`lin_mem_base` host fn), adds its own offsets, and writes the result
-into descriptors in its own linear memory and into the DMA list-address
-registers via `net_mmio_write32`. That host fn checks the driver's
-`Net` capability and that the *register* lies inside the NIC window;
-it does not check the *value* written. On QEMU, `nic_attach_queue`
-bounds-checks the virtqueue ring offsets, but the buffer addresses
-inside the descriptors are again written by the driver unchecked.
+**On the VF2 (GMAC), today**, the net driver computes the physical
+addresses it hands to the DMA engine itself: it asks the kernel for
+its linear-memory base (`lin_mem_base` host fn), adds its own offsets,
+and writes the result into descriptors in its own linear memory and
+into the DMA list-address registers via `net_mmio_write32`. That host
+fn checks the driver's `Net` capability and that the *register* lies
+inside the NIC window; it does not check the *value* written.
 
-INV-25 states that every physical address handed to a DMA engine lies
-inside the driver's own linear memory. **Nothing enforces that half of
-INV-25 today.** A driver that writes an arbitrary physical address into
-a descriptor or a DMA register gets the device to read or write that
+INV-25 states that every span a DMA engine is told to touch lies
+inside the driver's own linear memory. **Nothing enforces that on the
+GMAC.** A driver that writes an arbitrary physical address into a
+descriptor or a DMA register gets the device to read or write that
 address — including kernel memory. Signing (INV-11/INV-13) guarantees
 which driver is loaded, not what it does after a smoltcp exploit takes
-it over.
+it over. Until this is closed, the VF2 net driver is part of the TCB
+in practice, whatever its sandbox says. U-mode (ADR-004) does not
+close it either: a bus master does not go through the MMU.
 
-Closing this requires the kernel, not the driver, to own every
-physical address the device sees (kernel-owned descriptor rings and
-DMA registers with offsets validated against the driver's linear
-memory, or a hardware IOPMP/PMP fence if the SoC offers one). Until
-then, a Tier-2 driver that drives a DMA-capable device is part of the
-TCB in practice, whatever its sandbox says.
+**On QEMU (VirtIO), it is enforced**, and the same mechanism is what
+the GMAC moves to. The descriptor tables live in kernel memory; the
+driver cannot store to them and never learns where they are. It asks
+the kernel to aim a descriptor at a span of its own memory, and the
+kernel checks the span and writes the whole descriptor — address,
+length and direction. Validating only the address, or validating it
+into a descriptor the driver can still write, is not containment: the
+length next to it, and the address itself after the check, would
+remain the driver's to change. On the GMAC the same reasoning extends
+to the registers that set ring length, receive buffer size and
+descriptor stride. A hardware IOPMP/PMP fence is not available on the
+JH7110.
 
 **Rule**: a feature that crosses a trust boundary (adds a host fn,
 adds a capability, widens driver MMIO surface) does not merge until
