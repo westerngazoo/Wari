@@ -35,6 +35,7 @@ pub mod net_blob;
 pub mod net_wait;
 pub mod noop_blob;
 pub mod sign;
+pub mod sockleak_blob;
 pub mod tier1_pool;
 pub mod tier2_net;
 pub mod tier2_uart;

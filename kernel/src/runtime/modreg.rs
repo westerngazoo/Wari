@@ -64,7 +64,9 @@ pub const DYN_SLOTS: usize = 5;
 pub const MAX_MODULE_BYTES: usize = 256 * 1024;
 
 /// First proc_id the registry may hand out. 0–4 are boot-assigned
-/// (`cap::boot`); everything from here to `MAX_PROCS` is dynamic.
+/// (`cap::boot`), and so are the two socket-leak probes at the top of
+/// the table (14, 15); `alloc_proc_id` takes the first free id from
+/// here up and skips any already in use.
 pub const PROC_ID_DYN_BASE: u8 = 5;
 
 /// Slot lifecycle. `Live` records where the verified payload sits

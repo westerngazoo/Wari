@@ -37,6 +37,7 @@ members = [
     "apps/hello",
     "apps/guard",
     "apps/hog",
+    "apps/sockleak",
     "drivers/uart",
     "drivers/net",
     "tests/integration",

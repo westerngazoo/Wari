@@ -44,7 +44,10 @@
 //!   gains a `Blocked` variant that pairs with the `Endpoint`
 //!   queues from `cap::objects`
 //! - Process exit cleanup that walks the exiting process's CSpace
-//!   and calls `cap::syscall::cap_revoke` on each held cap
+//!   and calls `cap::syscall::cap_revoke` on each held cap. Today
+//!   only Socket caps are released at termination
+//!   (`cap::net_socket_close_all`); a cap dropped earlier with
+//!   `cap_delete` / `cap_revoke` does not close its driver socket.
 
 #![allow(dead_code)]
 #![allow(clippy::doc_lazy_continuation)]
@@ -279,6 +282,21 @@ pub fn run() -> Result<(), KernelError> {
                     .ok_or(KernelError::NoSuchProcess)?;
                 proc.state = state;
             }
+            // A tenant that is gone holds nothing. `proc_exit` and a
+            // fault both land here, and neither path runs the tenant's
+            // own cleanup, so the kernel closes whatever sockets it
+            // left open — otherwise they stay allocated in the driver
+            // until reset. Before any restart below reuses the id.
+            if terminated {
+                let closed = crate::cap::net_socket_close_all(proc_id);
+                if closed > 0 {
+                    kprintln!(
+                        "[sched] proc_id={} left {} socket(s) open, closed",
+                        proc_id,
+                        closed
+                    );
+                }
+            }
             // Restart the module if it is a daemon (borrow released
             // above; runtime::modreg re-borrows the table/pool itself).
             // Scheduler context, not a resumable frame — the restart's
@@ -346,6 +364,7 @@ fn pick_next_tenant() -> Option<u8> {
 fn blob_for(module_id: ModuleId) -> &'static [u8] {
     match module_id {
         ModuleId::Tier1Hello => runtime::hello_blob::HELLO_WASM,
+        ModuleId::Tier1SockLeak => runtime::sockleak_blob::SOCKLEAK_WASM,
         // Runtime-loaded module: verified payload held by the
         // registry. Returns the empty slice for a slot that is not
         // Live — same refuse-by-default as the arms below.
