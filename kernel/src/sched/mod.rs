@@ -44,7 +44,10 @@
 //!   gains a `Blocked` variant that pairs with the `Endpoint`
 //!   queues from `cap::objects`
 //! - Process exit cleanup that walks the exiting process's CSpace
-//!   and calls `cap::syscall::cap_revoke` on each held cap
+//!   and calls `cap::syscall::cap_revoke` on each held cap. Today
+//!   only Socket caps are released at termination
+//!   (`cap::net_socket_close_all`); a cap dropped earlier with
+//!   `cap_delete` / `cap_revoke` does not close its driver socket.
 
 #![allow(dead_code)]
 #![allow(clippy::doc_lazy_continuation)]

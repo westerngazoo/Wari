@@ -17,6 +17,13 @@
 //! `[sockleak] no socket available`: the dead tenant still owns the
 //! driver's sockets, and so would every later tenant find it.
 //!
+//! ## What it does not cover
+//!
+//! The cleanup walks the Socket caps the tenant still holds. A tenant
+//! that drops a Socket cap with `cap_delete` or `cap_revoke` before
+//! dying frees the cap without closing the driver socket; that leak
+//! exists for a living tenant too and is tracked separately.
+//!
 //! The run needs a NIC: without one the net driver never initialises
 //! and no socket can be created at all.
 

@@ -74,8 +74,8 @@ pub use static_caps::{caps_for, Caps, ModuleId, Tier};
 // Phase-1b dynamic re-exports. These are the userspace-facing names
 // for the new cap layer; downstream PRs build on top.
 pub use boot::{
-    PROC_ID_RESERVED, PROC_ID_TIER1_HELLO, PROC_ID_TIER1_HELLO_B, PROC_ID_TIER1_SOCKLEAK_A, PROC_ID_TIER1_SOCKLEAK_B, PROC_ID_TIER2_NET,
-    PROC_ID_TIER2_UART,
+    PROC_ID_RESERVED, PROC_ID_TIER1_HELLO, PROC_ID_TIER1_HELLO_B, PROC_ID_TIER1_SOCKLEAK_A,
+    PROC_ID_TIER1_SOCKLEAK_B, PROC_ID_TIER2_NET, PROC_ID_TIER2_UART,
 };
 pub use cspace::{CSpace, CSPACE_SLOTS, MAX_PROCS};
 pub use dma::{nic_dma_set_buf_impl, record_ring};
