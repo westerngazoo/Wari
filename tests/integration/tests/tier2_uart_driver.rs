@@ -7,7 +7,7 @@
 //! verifier accepted the embedded blob, wasmi parsed + instantiated it,
 //! and `wari::mmio_write8` was registered without error.
 //!
-//! Mirrors the pattern in `runtime_noop.rs`; only the marker differs.
+//! Mirrors the pattern in `hello_wasm.rs`; only the marker differs.
 //!
 //! Failure modes the test catches:
 //!   - signature verification failed (placeholder pubkey, key mismatch)

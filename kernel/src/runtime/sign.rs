@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Tier-2 signed-envelope verifier (INV-13).
 //!
-//! Phase 0 ships a single compiled-in ed25519 public key
-//! (`ACCEPTED_PUBKEY`). A Tier-2 module is delivered as a signed
-//! envelope; this module verifies the signature before the loader
-//! hands the bytes to wasmi.
+//! The kernel carries one compiled-in ed25519 public key
+//! (`ACCEPTED_PUBKEY`), selected at build time: the production key by
+//! default, the in-tree dev key under `--features dev-keys`. A signed
+//! module is delivered as an envelope; this module verifies the
+//! signature before the loader hands the bytes to wasmi.
 //!
 //! ## Envelope layout (96-byte fixed header)
 //!
@@ -46,7 +47,7 @@
 #![allow(dead_code)]
 #![allow(clippy::doc_lazy_continuation)]
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 
 use crate::error::KernelError;
 
@@ -59,27 +60,33 @@ pub const SIGNATURE_LEN: usize = 64;
 /// Total fixed header length.
 pub const HEADER_LEN: usize = PUBKEY_LEN + SIGNATURE_LEN;
 
-/// Compiled-in accepted public key — **Phase-0 DEV KEY**.
+/// Compiled-in accepted public key — the trust root of INV-13.
 ///
-/// These 32 bytes are the public half of the dev keypair committed at
-/// `scripts/dev-keys/wari-dev.ed25519.{pub,sec}`. The matching secret
-/// key is in-tree by design, so every contributor and CI can re-sign
-/// Tier-2 driver blobs bit-for-bit from a clean checkout (R8). See
-/// `scripts/dev-keys/README.md` for the full threat model and rationale.
+/// Exactly one key is accepted per kernel image, picked at build time:
 ///
-/// **Before any production deploy** this constant MUST be replaced
-/// with the pubkey of a Phase-1+ signing key whose secret never enters
-/// the repo (offline signer / HSM / hardware token — pipeline TBD per
-/// `dev-keys/README.md`). Driver blobs must then be re-signed with the
-/// new key and re-flashed; mixing keys yields `KernelError::BadWasm`
-/// on every Tier-2 load (INV-13), which is the safe failure mode.
+/// - default: the **production** key. Only its public half is in the
+///   repo (`scripts/prod-keys/`); the secret is held outside it by
+///   the architect and never enters git.
+/// - `--features dev-keys`: the **dev** key, whose secret half is
+///   committed (`scripts/dev-keys/`) and therefore public. Such an
+///   image announces itself at boot ([`DEV_KEYS`]).
 ///
-/// Replacing only this constant without re-signing the drivers is
-/// itself safe: every signed envelope will be rejected.
-pub const ACCEPTED_PUBKEY: [u8; PUBKEY_LEN] = [
-    0xf6, 0x09, 0xfc, 0x9a, 0xe4, 0x6f, 0xd9, 0x09, 0xbe, 0x0f, 0x6d, 0xf9, 0x78, 0x9d, 0xc4, 0x32,
-    0xa1, 0xb8, 0x2c, 0x70, 0xf1, 0x56, 0x44, 0xbf, 0xf7, 0x94, 0x9d, 0xac, 0x12, 0x05, 0x70, 0x1a,
-];
+/// The two are exclusive rather than additive so that a production
+/// image rejects every dev-signed envelope (`KernelError::BadWasm`),
+/// which is the safe failure mode. The bytes come straight from the
+/// key file — `include_bytes!` of anything but 32 bytes fails to
+/// compile — so the file and the kernel cannot drift. Key model:
+/// `docs/security-model.md`, "Signing keys".
+#[cfg(not(feature = "dev-keys"))]
+pub const ACCEPTED_PUBKEY: [u8; PUBKEY_LEN] =
+    *include_bytes!("../../../scripts/prod-keys/wari-prod.ed25519.pub");
+#[cfg(feature = "dev-keys")]
+pub const ACCEPTED_PUBKEY: [u8; PUBKEY_LEN] =
+    *include_bytes!("../../../scripts/dev-keys/wari-dev.ed25519.pub");
+
+/// Whether this image trusts the public dev key (see
+/// [`ACCEPTED_PUBKEY`]). Read by the boot banner.
+pub const DEV_KEYS: bool = cfg!(feature = "dev-keys");
 
 /// Verify a signed Tier-2 envelope.
 ///
@@ -93,7 +100,7 @@ pub const ACCEPTED_PUBKEY: [u8; PUBKEY_LEN] = [
 ///   - pubkey field does not equal `ACCEPTED_PUBKEY`,
 ///   - signature does not verify against the wasm-bytes suffix,
 ///   - pubkey or signature bytes are not a well-formed ed25519
-///     point/scalar.
+///     point/scalar, or the signature is not in canonical form.
 ///
 /// `BadWasm` collapses every failure mode at the syscall boundary; the
 /// kernel does not need to distinguish them, and collapsing limits
@@ -125,8 +132,12 @@ pub fn verify(envelope: &[u8]) -> Result<&[u8], KernelError> {
         VerifyingKey::from_bytes(&pubkey_array).map_err(|_| KernelError::BadWasm)?;
     let signature = Signature::from_bytes(&sig_array);
 
+    // `verify_strict`, not `verify`: it also rejects small-order keys
+    // and non-canonical signature encodings, so one message has one
+    // accepted signature (dalek docs; Chalkias et al., "Taming the
+    // many EdDSAs", 2020).
     verifying_key
-        .verify(wasm_bytes, &signature)
+        .verify_strict(wasm_bytes, &signature)
         .map_err(|_| KernelError::BadWasm)?;
 
     Ok(wasm_bytes)

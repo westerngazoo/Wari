@@ -5,8 +5,20 @@
 //! Reads `<input>.wasm`, asserts the embedded `wari_driver_manifest`
 //! custom section is structurally well-formed AND agrees with the
 //! WASM binary's actual export + import surface, then signs the
-//! result with the dev key and writes the envelope to
-//! `<output>.signed.wasm`.
+//! result and writes the envelope to `<output>.signed.wasm`.
+//!
+//! ## Which key signs
+//!
+//! The tool has no built-in key. The caller names it:
+//!
+//! - `WARI_SIGN_KEY` — path of the 32-byte raw ed25519 secret key.
+//! - `WARI_SIGN_PUBKEY` — path of the public key the target kernel
+//!   accepts. The tool refuses to sign when the secret does not
+//!   derive to it: such an envelope would be rejected at boot, on
+//!   the board, long after the build looked green.
+//!
+//! `scripts/build.sh` and the `Makefile` set both (production or dev
+//! pair); see `docs/security-model.md`, "Signing keys".
 //!
 //! Envelope layout (matches `kernel/src/runtime/sign.rs`):
 //!
@@ -37,7 +49,8 @@
 //! Usage:
 //!
 //! ```text
-//! cargo run --manifest-path scripts/Cargo.toml --bin sign-module -- \
+//! WARI_SIGN_KEY=<key.sec> WARI_SIGN_PUBKEY=<key.pub> \
+//!   cargo run --manifest-path scripts/Cargo.toml --bin sign-module -- \
 //!     <input.wasm> <output.signed.wasm>
 //! ```
 
@@ -54,8 +67,10 @@ use wari_driver_iface::{
 };
 use wasmparser::{ExternalKind, Parser, Payload, TypeRef, ValType};
 
-const SECRET_PATH: &str = "scripts/dev-keys/wari-dev.ed25519.sec";
-const PUBKEY_PATH: &str = "scripts/dev-keys/wari-dev.ed25519.pub";
+/// Environment variable naming the secret-key file.
+const SECRET_ENV: &str = "WARI_SIGN_KEY";
+/// Environment variable naming the public-key file the kernel accepts.
+const PUBKEY_ENV: &str = "WARI_SIGN_PUBKEY";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -81,36 +96,14 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let secret_bytes = match fs::read(SECRET_PATH) {
-        Ok(b) => b,
+    let signing_key = match load_signing_key() {
+        Ok(k) => k,
         Err(e) => {
-            eprintln!("read {}: {}", SECRET_PATH, e);
+            eprintln!("sign-module: {}", e);
             return ExitCode::from(1);
         }
     };
-    if secret_bytes.len() != 32 {
-        eprintln!(
-            "{} must be exactly 32 raw bytes, got {}",
-            SECRET_PATH,
-            secret_bytes.len()
-        );
-        return ExitCode::from(1);
-    }
-    let secret_array: [u8; 32] = secret_bytes
-        .as_slice()
-        .try_into()
-        .expect("checked length above");
-    let signing_key = SigningKey::from_bytes(&secret_array);
     let pubkey_bytes = signing_key.verifying_key().to_bytes();
-
-    if let Ok(on_disk) = fs::read(PUBKEY_PATH) {
-        if on_disk.len() == 32 && on_disk[..] != pubkey_bytes[..] {
-            eprintln!(
-                "warning: {} does not match the pubkey derived from the secret",
-                PUBKEY_PATH
-            );
-        }
-    }
 
     let signature = signing_key.sign(&wasm_bytes);
 
@@ -131,6 +124,43 @@ fn main() -> ExitCode {
         output.display()
     );
     ExitCode::SUCCESS
+}
+
+// ── Key loading ──────────────────────────────────────────────────
+
+/// Load the signing key named by `WARI_SIGN_KEY` and check that it
+/// derives to the public key named by `WARI_SIGN_PUBKEY`.
+///
+/// # Errors
+///
+/// A message naming the variable or file at fault when either
+/// variable is unset, either file is unreadable or not exactly 32
+/// bytes, or the two keys are not a pair.
+fn load_signing_key() -> Result<SigningKey, String> {
+    let secret = read_key_file(SECRET_ENV)?;
+    let expected_pubkey = read_key_file(PUBKEY_ENV)?;
+    let signing_key = SigningKey::from_bytes(&secret);
+    if signing_key.verifying_key().to_bytes() != expected_pubkey {
+        return Err(format!(
+            "the key in {} is not the secret half of the key in {} — \
+             the kernel would reject every envelope it signs",
+            SECRET_ENV, PUBKEY_ENV
+        ));
+    }
+    Ok(signing_key)
+}
+
+/// Read the 32-byte raw key file whose path is in the variable `var`.
+fn read_key_file(var: &str) -> Result<[u8; 32], String> {
+    let path = env::var(var).map_err(|_| format!("{} is not set (path of a key file)", var))?;
+    let bytes = fs::read(&path).map_err(|e| format!("{}: read {}: {}", var, path, e))?;
+    let len = bytes.len();
+    bytes.try_into().map_err(|_| {
+        format!(
+            "{}: {} must be exactly 32 raw bytes, got {}",
+            var, path, len
+        )
+    })
 }
 
 // ── Manifest cross-check ─────────────────────────────────────────

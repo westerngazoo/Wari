@@ -36,11 +36,14 @@ members = [
     "kernel",
     "apps/hello",
     "apps/guard",
+    "apps/hog",
+    "apps/sockleak",
     "drivers/uart",
     "drivers/net",
     "tests/integration",
     "tests/security", "tools/wari-bench",
-    "tools/wari-aot-spike",   # throwaway — delete when G6 lands
+    "tools/wari-aot",         # G6 — the real AOT compiler driver
+    "tools/wari-aot-spike",   # throwaway — delete when G6 fully replaces it
     # tools/*    — populated as needed
     # tests/fuzz — populated per-phase
 ]

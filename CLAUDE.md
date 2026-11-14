@@ -65,7 +65,7 @@ reasoning before executing. Gustavo may overrule; Claude complies.
 The kernel `include_bytes!`s pre-built, signed Tier-2 driver wasm
 blobs (`build/drivers/net-{qemu,vf2}.signed.wasm`). Those wasm blobs
 are produced from `drivers/net/src/` — a **separate cargo crate**
-targeting `wasm32-unknown-unknown`. If you bypass `make` and run
+targeting `wasm32-unknown-unknown`. If you bypass `scripts/build.sh` and run
 `cd kernel && cargo build` directly after editing driver source,
 cargo will happily embed the **last-known-good** driver blob,
 which may be many builds stale.
@@ -76,18 +76,18 @@ silently reused the build-106 artifact while the kernel banner read
 "build 114". Every diagnostic added to the driver during that window
 was a no-op because the kernel wasn't running our updated code.
 
-**Always build via `make`:**
+**Always build via `scripts/build.sh`** (see `docs/build-workflow.md`):
 
 ```bash
-make kernel-vf2     # rebuilds drivers/net wasm32 → signs → links kernel
-make build          # same flow for the QEMU variant
+scripts/build.sh release    # VF2: test gate → drivers wasm32 → sign → kernel → verify tags
+scripts/build.sh qemu       # same flow for the QEMU variant
 ```
 
 **Never run `cd kernel && cargo build` after touching driver code.**
 The kernel's `build.rs` now contains a stale-driver guard that greps
 the embedded signed wasm for a `WARI-DRV-BUILD-TAG-N` rodata string
 and fails the build if `N != WARI_BUILD`. If that check ever fires,
-run `make` and don't try to "fix" it by editing `build.rs`.
+run `scripts/build.sh` and don't try to "fix" it by editing `build.rs`.
 
 When adding new driver code, **double-check it compiles to wasm32**.
 No inline asm. No RISC-V intrinsics. No `core::arch::asm!`. MMIO goes
@@ -210,6 +210,8 @@ non-trivial.
 * \[ ] `cargo clippy -- -D warnings` clean
 * \[ ] `cargo test` passes (host tests)
 * \[ ] QEMU integration passes (if applicable)
+* \[ ] Silicon run passes on the VF2 (required for driver / boot / MMIO
+  / DMA / timing changes; QEMU alone does not clear these)
 * \[ ] `docs/invariants.md` updated if new unsafe landed
 * \[ ] Local verification commands reproduce claimed output
 
@@ -234,14 +236,28 @@ Test coverage grows **with** the code, not after it. Every phase
 milestone has test gates that must pass before the milestone is
 considered done.
 
-### The four test layers
+### The five test layers
 
 |Layer|Tool|Runs on|Gate|
 |-|-|-|-|
 |**Unit**|`cargo test` (host)|Pure-logic modules|Every PR|
 |**Integration**|QEMU `virt` RV64|Full kernel boot + WASM execution|Every PR that touches kernel or runtime|
+|**Silicon (field)**|VisionFive 2 (JH7110); Orange Pi R2S as it lands|Full boot + net on real hardware|Every PR touching drivers, boot, MMIO, DMA or timing|
 |**Security (adversarial)**|WASM modules designed to fail|QEMU|Every PR that touches trust boundary|
 |**Fuzz**|cargo-fuzz + wasmi's validator|Host|Periodic (weekly) + pre-release|
+
+**QEMU and silicon are two different tests, and neither substitutes for
+the other.** QEMU is deterministic and proves logic: it will reproduce a
+scheduler bug or a bad PTE every time. It models none of the things that
+have actually cost us weeks — DMA/cache coherence, descriptor writeback
+visibility, PHY/RGMII behaviour, real interrupt latency, MMC counters.
+The intermittent GMAC RX wedge is the canonical example: it is invisible
+in QEMU and swings 0–57% boot-to-boot on the VF2. A green QEMU run is
+necessary and not sufficient for anything that touches hardware.
+
+Building is always `make` (see the build-pipeline section above). There
+is no mvn/gradle/container step anywhere in this project, and nothing in
+this repo is gated on an external code-quality service.
 
 ### Unit-testable modules (the pure-logic discipline)
 

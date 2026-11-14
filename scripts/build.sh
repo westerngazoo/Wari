@@ -24,7 +24,7 @@
 #
 # USAGE
 # -----
-#   scripts/build.sh <profile> [--programs a,b,c] [--no-bump]
+#   scripts/build.sh <profile> [--programs a,b,c] [--no-bump] [--publish] [--dev-keys]
 #
 # PROFILES
 #   release   VF2 hardware, production features        (vf2 gmac1)
@@ -39,6 +39,21 @@
 #                    wari_<name>.wasm -> build/apps/<name>.wasm
 #   --no-bump        rebuild at the CURRENT .build_number (no increment).
 #                    For rebuilding identical sources after a clean.
+#   --publish        create the GitHub Release build-<N>-<branch-slug>.
+#                    N is then GLOBAL: one past the highest published
+#                    build on any branch, so it names exactly one binary
+#                    (the board flashes it with
+#                    `wari go --build <branch>.<N>`). The commit
+#                    must already be pushed to GitHub.
+#
+#   --dev-keys       sign with the in-tree dev key and build a kernel
+#                    that accepts it (and says so in its banner). The
+#                    qemu profile always does this. Without it, VF2
+#                    profiles sign with the production key, read from
+#                    $WARI_SIGN_KEY (default
+#                    ~/.config/wari/wari-prod.ed25519.sec) — a file that
+#                    never lives in the repo. See docs/security-model.md,
+#                    "Signing keys".
 #
 # OUTPUTS
 #   Canonical (what the kernel embeds / wari-upgrade flashes — committed):
@@ -69,14 +84,16 @@ trap 'echo ""; echo "!! BUILD FAILED at step: $STEP (build number NOT advanced)"
 # ── args ────────────────────────────────────────────────────────
 PROFILE="${1:-}"
 shift || true
-PROGRAMS="hello,guard"
+PROGRAMS="hello,guard,hog,sockleak"
 BUMP=1
 PUBLISH=0
+DEV_KEYS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --programs) PROGRAMS="$2"; shift 2 ;;
         --no-bump)  BUMP=0; shift ;;
         --publish)  PUBLISH=1; shift ;;
+        --dev-keys) DEV_KEYS=1; shift ;;
         *) echo "unknown option: $1"; exit 2 ;;
     esac
 done
@@ -86,8 +103,31 @@ case "$PROFILE" in
     debug)   DRV_FEATURES="vf2 gmac1";          KRN_FEATURES="vf2,debug-kernel"; PLATFORM="vf2"  ;;
     trace)   DRV_FEATURES="vf2 gmac1 net-diag"; KRN_FEATURES="vf2";              PLATFORM="vf2"  ;;
     qemu)    DRV_FEATURES="qemu";               KRN_FEATURES="qemu";             PLATFORM="qemu" ;;
-    *) echo "usage: scripts/build.sh <release|debug|trace|qemu> [--programs a,b] [--no-bump]"; exit 2 ;;
+    *) echo "usage: scripts/build.sh <release|debug|trace|qemu> [--programs a,b] [--no-bump] [--publish] [--dev-keys]"; exit 2 ;;
 esac
+
+# ── signing key ─────────────────────────────────────────────────
+# One pair per build: sign-module signs with WARI_SIGN_KEY and refuses
+# unless it derives to WARI_SIGN_PUBKEY, the key this kernel accepts.
+# QEMU has no production use, so it always takes the dev pair.
+STEP="signing-key"
+[ "$PLATFORM" = "qemu" ] && DEV_KEYS=1
+if [ "$DEV_KEYS" = "1" ]; then
+    SIGNING="dev"
+    export WARI_SIGN_KEY="scripts/dev-keys/wari-dev.ed25519.sec"
+    export WARI_SIGN_PUBKEY="scripts/dev-keys/wari-dev.ed25519.pub"
+    KRN_FEATURES="$KRN_FEATURES,dev-keys"
+else
+    SIGNING="production"
+    export WARI_SIGN_KEY="${WARI_SIGN_KEY:-$HOME/.config/wari/wari-prod.ed25519.sec}"
+    export WARI_SIGN_PUBKEY="scripts/prod-keys/wari-prod.ed25519.pub"
+    if [ ! -f "$WARI_SIGN_KEY" ]; then
+        echo "production signing key not found: $WARI_SIGN_KEY"
+        echo "  set WARI_SIGN_KEY to its path, or pass --dev-keys for a"
+        echo "  dev-signed image (not for deployment)."
+        exit 2
+    fi
+fi
 
 # ── build number (read now, written only after verify) ──────────
 STEP="build-number"
@@ -96,6 +136,21 @@ if [ "$BUMP" = "1" ]; then
     NEXT_BUILD=$(( CUR_BUILD + 1 ))
 else
     NEXT_BUILD=$CUR_BUILD
+fi
+
+# Build numbers used to be monotonic per branch and collided across
+# branches (three branches each published a "build 155"), so a number
+# alone could not name a binary. A publish takes the next number after
+# every release already on GitHub instead, which makes N unique. An
+# unpublished build never reaches the board and keeps the local count.
+GH_REPO="westerngazoo/Wari"
+if [ "$BUMP" = "1" ] && [ "$PUBLISH" = "1" ]; then
+    STEP="global-build-number"
+    MAX_PUBLISHED="$(gh release list -R "$GH_REPO" --limit 1000 --json tagName --jq '.[].tagName' \
+        | sed -n 's/^build-\([0-9][0-9]*\)-.*/\1/p' | sort -n | tail -1)"
+    if [ "${MAX_PUBLISHED:-0}" -ge "$NEXT_BUILD" ]; then
+        NEXT_BUILD=$(( MAX_PUBLISHED + 1 ))
+    fi
 fi
 
 BRANCH="$(git branch --show-current 2>/dev/null || true)"
@@ -108,6 +163,7 @@ echo "=== Wari build $NEXT_BUILD  profile=$PROFILE  platform=$PLATFORM"
 echo "    branch=$BRANCH sha=$SHA dirty-files=$DIRTY programs=$PROGRAMS"
 echo "    driver features: $DRV_FEATURES"
 echo "    kernel features: $KRN_FEATURES"
+echo "    signing key:     $SIGNING"
 
 # ── tools ───────────────────────────────────────────────────────
 STEP="find-objcopy"
@@ -181,7 +237,7 @@ cargo run --quiet --manifest-path scripts/Cargo.toml --bin sign-module -- \
 # ── 5. kernel ───────────────────────────────────────────────────
 STEP="kernel"
 echo "--- [5/7] Kernel [$KRN_FEATURES]"
-( cd kernel && WARI_BUILD=$NEXT_BUILD \
+( cd kernel && WARI_BUILD=$NEXT_BUILD WARI_BUILD_ID="${NEXT_BUILD}-${BRANCH_SLUG}" \
     cargo build --release --features "$KRN_FEATURES" --no-default-features )
 "$OBJCOPY" -O binary target/riscv64gc-unknown-none-elf/release/wari build/wari.bin
 
@@ -223,6 +279,7 @@ cp build/drivers/net-qemu.signed.wasm "$OUT/net-qemu.signed.wasm"
     echo "date:     $(date -u +%FT%TZ)"
     echo "driver-features: $DRV_FEATURES"
     echo "kernel-features: $KRN_FEATURES"
+    echo "signing:  $SIGNING"
     echo "programs: $PROGRAMS"
 } > "$OUT/build-info.txt"
 
@@ -242,16 +299,19 @@ if [ "$PUBLISH" = "1" ]; then
     echo "--- [7b] Publishing release $REL_TAG"
     {
         echo "Build $NEXT_BUILD ($PROFILE) — branch $BRANCH @ $SHA"
+        echo "signing key: $SIGNING"
         echo ""
         echo "sha256:"
         shasum -a 256 build/wari.bin build/drivers/net-vf2.signed.wasm build/drivers/net-qemu.signed.wasm 2>/dev/null \
           || sha256sum build/wari.bin build/drivers/net-vf2.signed.wasm build/drivers/net-qemu.signed.wasm
     } > /tmp/wari-release-notes.txt
-    gh release create "$REL_TAG" \
+    # --target pins the tag to the commit that was built; without it gh
+    # tags the default branch's HEAD, whatever branch was built.
+    gh release create "$REL_TAG" -R "$GH_REPO" --target "$(git rev-parse HEAD)" \
         build/wari.bin \
         build/drivers/net-vf2.signed.wasm \
         build/drivers/net-qemu.signed.wasm \
-        --title "Build $NEXT_BUILD ($PROFILE, $BRANCH_SLUG)" \
+        --title "Build $NEXT_BUILD ($PROFILE, $BRANCH_SLUG, $SIGNING key)" \
         --notes-file /tmp/wari-release-notes.txt
     echo "    published: $REL_TAG"
 else
@@ -265,6 +325,8 @@ echo "=== BUILD $NEXT_BUILD OK ($PROFILE) ==="
 echo "    canonical: build/wari.bin (embedded tag WARI-BUILD-TAG-$NEXT_BUILD)"
 echo "    archive:   $OUT/"
 echo ""
-echo "    To deploy: build with --publish, then git add build/wari.release .build_number && git commit && git push"
-echo "    On VF2:    wari upgrade && wari go -y      (flashes main)"
-echo "               wari go-branch $BRANCH          (flashes this branch)"
+if [ "$PUBLISH" = "1" ]; then
+    echo "    On VF2:    wari go --build $BRANCH.$NEXT_BUILD -y"
+else
+    echo "    To deploy: scripts/wari-build.sh $BRANCH   (mirror + build + publish)"
+fi

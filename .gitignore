@@ -15,6 +15,10 @@ rustc-ice-*.txt
 # local convenience copy so the agent loads it automatically.
 CLAUDE.local.md
 
+# The production signing secret must never be committed; only the
+# .pub belongs in scripts/prod-keys/ (docs/security-model.md).
+/scripts/prod-keys/*.sec
+
 # Editor / OS noise
 .vscode/
 .idea/

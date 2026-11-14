@@ -524,6 +524,15 @@ pub fn nic_attach_queue_impl<T>(
         return E_INVAL;
     }
 
+    // ADR-002 step 1: from here on the kernel, not the driver, points
+    // this ring's descriptors at buffers (`nic_dma_set_buf`), so it
+    // has to remember where the table is. `ring_fits` re-checks the
+    // same alignment and span as above; a mismatch here is a kernel
+    // bug, reported as E_INVAL rather than trusted.
+    if !super::dma::record_ring(proc_id, queue_idx, desc_off, queue_size, mem_len) {
+        return E_INVAL;
+    }
+
     let desc_pa = mem_base + desc_off as usize;
     let avail_pa = mem_base + avail_off as usize;
     let used_pa = mem_base + used_off as usize;
@@ -578,6 +587,13 @@ pub fn nic_attach_queue_impl<T>(
         // not VirtIO virtqueues). Phase 1c will introduce the GMAC
         // equivalent host fn. Until then, the vf2 driver doesn't
         // call this and we hard-reject any caller that does.
+        let _ = (queue_idx, desc_pa, avail_pa, used_pa, queue_size);
+        E_INVAL
+    }
+    #[cfg(feature = "r2s")]
+    {
+        // R2S first-light is net-less — no Tier-2 net driver calls this;
+        // reject any caller until the Ky X1 NIC host-fn path exists.
         let _ = (queue_idx, desc_pa, avail_pa, used_pa, queue_size);
         E_INVAL
     }
@@ -644,6 +660,12 @@ pub fn nic_queue_notify_impl(proc_id: u8, queue_idx: u32) -> i32 {
     }
     #[cfg(feature = "vf2")]
     {
+        let _ = queue_idx;
+        E_INVAL
+    }
+    #[cfg(feature = "r2s")]
+    {
+        // R2S first-light is net-less; no NIC notify path yet.
         let _ = queue_idx;
         E_INVAL
     }
@@ -1100,6 +1122,38 @@ pub fn net_socket_close_impl(proc_id: u8, slot: u32) -> i32 {
     }
 }
 
+/// Close every Socket cap `proc_id` still holds. Tenant teardown: the
+/// scheduler calls this once a Tier-1 has exited or faulted, so a
+/// dead tenant cannot keep driver sockets allocated.
+///
+/// # Contract
+///
+/// - Precondition: scheduler context, no wasmi frame of `proc_id`
+///   live (its slot is already released) — the close calls into the
+///   Tier-2 net driver.
+/// - Postcondition: no slot of `proc_id`'s CSpace holds a Socket cap
+///   whose pool entry exists; each such socket was closed in the
+///   driver and its accept window cleared (`net_socket_close_impl`).
+/// - Returns the number of Socket caps found. A driver-side close
+///   error does not stop the sweep: the cap is dropped regardless.
+/// - `proc_id >= MAX_PROCS` returns 0. Never panics.
+pub fn net_socket_close_all(proc_id: u8) -> u32 {
+    if (proc_id as usize) >= MAX_PROCS {
+        return 0;
+    }
+    let mut closed = 0;
+    for slot in 0..CSPACE_SLOTS as u32 {
+        // Fresh borrow per slot: the close below re-borrows the
+        // CSpace table itself.
+        let is_socket = cspaces()[proc_id as usize].holds(slot as u8, ObjectKind::Socket);
+        if is_socket {
+            let _ = net_socket_close_impl(proc_id, slot);
+            closed += 1;
+        }
+    }
+    closed
+}
+
 /// `wari::net_socket_bind(slot, ip_be, port) -> i32` (PR Net-6c).
 ///
 /// Caller must hold a Socket cap with WRITE rights at `slot`.
@@ -1146,29 +1200,36 @@ pub fn net_socket_listen_impl(proc_id: u8, slot: u32, backlog: u32) -> i32 {
     }
 }
 
-/// `wari::net_socket_accept(slot) -> i32` (Phase-1c HTTP demo).
+/// `wari::net_socket_accept(slot) -> i32` (Phase-1c HTTP demo),
+/// cap-check half.
 ///
 /// Caller must hold a Socket cap with WRITE rights at `slot`.
-/// Returns 1 if a connection is ready for `net_socket_send_canned`,
-/// 0 if still listening, negative errno otherwise.
-///
-/// The kernel-side wrapper drives one smoltcp poll cycle before
-/// inspecting the socket state so a pending SYN is processed first.
-/// Tier-1 typically busy-loops on this until it returns 1.
-pub fn net_socket_accept_impl(proc_id: u8, slot: u32) -> i32 {
+/// Returns `Ok(handle)`, the driver socket handle to wait on, or
+/// `Err(errno)` (`E_INVAL` bad proc/slot, `E_PERM` no such cap) for
+/// the host fn to return as-is. The wait itself is
+/// [`net_socket_accept_on`], driven by the host fn and then by the
+/// scheduler while the tenant is blocked (`runtime::net_wait`).
+pub fn net_socket_accept_resolve(proc_id: u8, slot: u32) -> Result<u32, i32> {
     if (proc_id as usize) >= MAX_PROCS {
-        return E_INVAL;
+        return Err(E_INVAL);
     }
     if slot >= CSPACE_SLOTS as u32 {
-        return E_INVAL;
+        return Err(E_INVAL);
     }
-    let smoltcp_handle = match resolve_socket_handle(proc_id, slot as u8) {
-        Ok(h) => h,
-        Err(e) => return e,
-    };
+    resolve_socket_handle(proc_id, slot as u8)
+}
+
+/// One accept attempt on an already-resolved driver socket `handle`:
+/// drives one smoltcp poll, then reads the socket state.
+///
+/// Returns 1 if a connection is ready for `net_socket_send_canned`,
+/// `wari_sched::net_wait::ACCEPT_PENDING` (0) if still listening
+/// inside the accept window, `E_TIMEDOUT` once the window expired,
+/// `E_NOMEM` on a driver trap.
+pub fn net_socket_accept_on(handle: u32) -> i32 {
     let tick = crate::runtime::tier2_net::next_tick();
     // SAFETY: install ran during boot.
-    match unsafe { crate::runtime::tier2_net::socket_accept(smoltcp_handle, tick) } {
+    match unsafe { crate::runtime::tier2_net::socket_accept(handle, tick) } {
         Ok(rc) => rc,
         Err(_) => E_NOMEM,
     }

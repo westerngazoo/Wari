@@ -821,6 +821,18 @@ name = "wari-abi"
 version = "0.0.1"
 
 [[package]]
+name = "wari-aot"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "target-lexicon",
+ "wari-wnm",
+ "wasmparser",
+]
+
+[[package]]
 name = "wari-aot-spike"
 version = "0.0.1"
 dependencies = [
@@ -898,6 +910,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wari-hog"
+version = "0.0.1"
+dependencies = [
+ "wari-driver-iface",
+]
+
+[[package]]
 name = "wari-http"
 version = "0.0.1"
 
@@ -953,6 +972,13 @@ dependencies = [
 [[package]]
 name = "wari-security-tests"
 version = "0.0.1"
+
+[[package]]
+name = "wari-sockleak"
+version = "0.0.1"
+dependencies = [
+ "wari-driver-iface",
+]
 
 [[package]]
 name = "wari-validate"

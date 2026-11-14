@@ -44,7 +44,10 @@
 //!   gains a `Blocked` variant that pairs with the `Endpoint`
 //!   queues from `cap::objects`
 //! - Process exit cleanup that walks the exiting process's CSpace
-//!   and calls `cap::syscall::cap_revoke` on each held cap
+//!   and calls `cap::syscall::cap_revoke` on each held cap. Today
+//!   only Socket caps are released at termination
+//!   (`cap::net_socket_close_all`); a cap dropped earlier with
+//!   `cap_delete` / `cap_revoke` does not close its driver socket.
 
 #![allow(dead_code)]
 #![allow(clippy::doc_lazy_continuation)]
@@ -144,10 +147,26 @@ pub fn register_tenant(proc_id: u8, tier: Tier, module_id: ModuleId) -> Result<(
 ///     (`kmain`) typically halts in a wfi loop afterward.
 pub fn run() -> Result<(), KernelError> {
     loop {
+        // Wake tenants whose network wait ended (connection ready or
+        // accept window expired) before picking. Each check drives a
+        // smoltcp poll, so the NIC is also serviced once per step
+        // while anyone waits on it.
+        if runtime::net_wait::has_waiters() {
+            runtime::net_wait::service();
+        }
+
         // Pick the next runnable tenant, in ascending proc_id order.
         let next_id = pick_next_tenant();
         let proc_id = match next_id {
             Some(id) => id,
+            None if runtime::net_wait::has_waiters() => {
+                // Nothing runnable, but a network waiter is not a
+                // deadlock: the NIC, not a peer tenant, wakes it, and
+                // its accept window bounds the wait. Keep servicing —
+                // a kernel busy-poll, as the kmain idle loop is, with
+                // Ctrl-R still delivered by interrupt (mmio::plic).
+                continue;
+            }
             None => {
                 // No Ready tenant left. If tenants are still
                 // Blocked, every one of them waits on a peer that
@@ -263,6 +282,21 @@ pub fn run() -> Result<(), KernelError> {
                     .ok_or(KernelError::NoSuchProcess)?;
                 proc.state = state;
             }
+            // A tenant that is gone holds nothing. `proc_exit` and a
+            // fault both land here, and neither path runs the tenant's
+            // own cleanup, so the kernel closes whatever sockets it
+            // left open — otherwise they stay allocated in the driver
+            // until reset. Before any restart below reuses the id.
+            if terminated {
+                let closed = crate::cap::net_socket_close_all(proc_id);
+                if closed > 0 {
+                    kprintln!(
+                        "[sched] proc_id={} left {} socket(s) open, closed",
+                        proc_id,
+                        closed
+                    );
+                }
+            }
             // Restart the module if it is a daemon (borrow released
             // above; runtime::modreg re-borrows the table/pool itself).
             // Scheduler context, not a resumable frame — the restart's
@@ -330,6 +364,7 @@ fn pick_next_tenant() -> Option<u8> {
 fn blob_for(module_id: ModuleId) -> &'static [u8] {
     match module_id {
         ModuleId::Tier1Hello => runtime::hello_blob::HELLO_WASM,
+        ModuleId::Tier1SockLeak => runtime::sockleak_blob::SOCKLEAK_WASM,
         // Runtime-loaded module: verified payload held by the
         // registry. Returns the empty slice for a slot that is not
         // Live — same refuse-by-default as the arms below.

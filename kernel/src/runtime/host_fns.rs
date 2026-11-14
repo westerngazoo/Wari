@@ -279,6 +279,14 @@ fn host_net_mmio_write32(_caller: Caller<'_, Tier2HostState>, addr: u32, val: u3
     if !validate::is_net_mmio_access(addr as usize, 4) {
         return E_INVAL;
     }
+    // Registers that take a DMA address are the kernel's to write
+    // (ADR-002 step 1, INV-25): a driver that could aim the DMA
+    // engine at an arbitrary physical address would own kernel
+    // memory, sandbox or not. The kernel programs them itself from
+    // validated linear-memory offsets (`cap::dma`, `nic_attach_queue`).
+    if validate::is_dma_addr_register(addr as usize, 4) {
+        return E_INVAL;
+    }
     // Order every prior memory write ahead of this device write.
     //
     // This is the barrier INV-25 records as missing, and it has to
@@ -397,8 +405,8 @@ pub fn register_net_host_fns(
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl, cap_register_impl,
         cap_revoke_impl, cap_unregister_impl, lin_mem_base_impl, nic_attach_queue_impl,
-        nic_queue_notify_impl, nic_set_mac_impl, notification_ack_impl, notification_wait_impl,
-        ring_setup_impl, ring_submit_impl,
+        nic_dma_set_buf_impl, nic_queue_notify_impl, nic_set_mac_impl, notification_ack_impl,
+        notification_wait_impl, ring_setup_impl, ring_submit_impl,
     };
     linker
         .func_wrap(
@@ -550,9 +558,29 @@ pub fn register_net_host_fns(
         )
         .map_err(|_| KernelError::BadWasm)?;
 
-    // PR Net-4d — return the driver's lin-mem PA so the driver can
-    // compute physical addresses for VirtIO descriptor `addr`
-    // fields. Cap-gated by Net + READ; returns 0 on cap denial.
+    // ADR-002 step 1 — the driver names a buffer by linear-memory
+    // offset; the kernel validates it and writes the physical
+    // address into the descriptor. See `cap::dma`.
+    linker
+        .func_wrap(
+            "wari",
+            "nic_dma_set_buf",
+            move |mut caller: Caller<'_, Tier2HostState>,
+                  ring: u32,
+                  idx: u32,
+                  buf_off: u32,
+                  len: u32|
+                  -> i32 {
+                nic_dma_set_buf_impl(&mut caller, pid, ring, idx, buf_off, len)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
+    // PR Net-4d — return the driver's lin-mem PA. The VirtIO path no
+    // longer needs it (`nic_dma_set_buf` above); the GMAC path still
+    // computes its ring and buffer addresses from it until the VF2
+    // follow-up of ADR-002 step 1, which removes this host fn.
+    // Cap-gated by Net + READ; returns 0 on cap denial.
     linker
         .func_wrap(
             "wari",

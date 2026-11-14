@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "wari-aot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# AOT compiler driver — roadmap G6 (docs/aot-parallel-roadmap.md §4).
+# `.wasm -> native RV64 .text -> WNM`. Host-side tool (std allowed; it
+# never runs on device). Promotes the throwaway G4 spike
+# (tools/wari-aot-spike) into the real driver.
+[dependencies]
+# Pinned exactly (R8, reproducible builds): the emitted bytes are
+# attributable to one backend version. Same pins as the G4 spike, so the
+# ported translator compiles unchanged.
+cranelift-codegen = { version = "=0.134.2", default-features = false, features = ["riscv64"] }
+cranelift-frontend = { version = "=0.134.2" }
+target-lexicon = "=0.13.5"
+wasmparser = "=0.254.0"
+clap = { version = "4.4", features = ["derive"] }
+# The container format. wari-aot writes it; wari-wnm reads it. Reusing
+# wari-wnm's constants keeps the encoder in lockstep with the decoder.
+wari-wnm = { path = "../../wari-wnm" }
+
+[lints]
+workspace = true

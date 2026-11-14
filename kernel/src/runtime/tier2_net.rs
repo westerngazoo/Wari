@@ -113,10 +113,7 @@ static mut ACCEPT_EXPIRED_LOGGED: [bool; ACCEPT_TRACK_SLOTS] = [false; ACCEPT_TR
 /// RISC-V `time` CSR frequency. JH7110's CLINT timebase runs at
 /// 4 MHz (Linux dts `timebase-frequency = <4000000>`); QEMU virt
 /// uses 10 MHz.
-#[cfg(feature = "vf2")]
-const TIMEBASE_HZ: u64 = 4_000_000;
-#[cfg(feature = "qemu")]
-const TIMEBASE_HZ: u64 = 10_000_000;
+const TIMEBASE_HZ: u64 = crate::board::BOARD.timebase_hz;
 
 /// Real monotonic milliseconds from the RISC-V `time` CSR.
 ///
@@ -190,9 +187,9 @@ pub unsafe fn install(handle: Tier2NetHandle) {
 /// `KernelError::DriverError` if the call traps.
 ///
 /// Phase-1b kmain idle loop calls this in a `wfi`-paced loop.
-/// `timestamp_ms` is a logical monotonic counter (NOT wall-clock);
-/// smoltcp uses it for retransmit interval decisions, which still
-/// work correctly as long as the counter advances monotonically.
+/// `timestamp_ms` must come from [`next_tick`] (rdtime milliseconds)
+/// on every call: smoltcp stores ARP-cache expiry, the ARP rate
+/// limit and TCP timers against it, so a second clock corrupts them.
 ///
 /// # Safety
 ///

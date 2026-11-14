@@ -77,6 +77,24 @@ pub const PROC_ID_TIER1_HELLO_B: u8 = 3;
 /// signed net driver blob lands. PR Net-3 reserves the proc_id so
 /// the host-fn closures can bake it in.
 pub const PROC_ID_TIER2_NET: u8 = 4;
+/// Process ids of the two baked socket-leak probes (`apps/sockleak`,
+/// `ModuleId::Tier1SockLeak`). At the top of the table so the
+/// runtime-loaded range (`modreg::PROC_ID_DYN_BASE` and up) keeps its
+/// numbering; the registry's allocator skips ids already in use. A
+/// runs before B (ascending id), which is what the probe relies on.
+pub const PROC_ID_TIER1_SOCKLEAK_A: u8 = 14;
+/// See [`PROC_ID_TIER1_SOCKLEAK_A`].
+pub const PROC_ID_TIER1_SOCKLEAK_B: u8 = 15;
+
+/// Baked Tier-1 instances that hold the default Tier-1 caps and a Net
+/// cap: hello A and B, socket-leak probe A and B. Sizes the endpoint
+/// and Net refcounts in `init_root_caps`.
+const BAKED_TIER1_PROCS: [u8; 4] = [
+    PROC_ID_TIER1_HELLO,
+    PROC_ID_TIER1_HELLO_B,
+    PROC_ID_TIER1_SOCKLEAK_A,
+    PROC_ID_TIER1_SOCKLEAK_B,
+];
 
 /// Slot index for a module's primary cap (UART receive on Tier-2,
 /// stdout on Tier-1).
@@ -202,6 +220,13 @@ pub fn init_root_caps() -> Result<(), KernelError> {
         kernel_exit_ep,
     );
 
+    // 4b. Socket-leak probes A and B (`apps/sockleak`): the same
+    //     stdout + exit caps. `caps_for` maps both module ids to the
+    //     default Tier-1 set (host-tested in wari-cap).
+    for pid in [PROC_ID_TIER1_SOCKLEAK_A, PROC_ID_TIER1_SOCKLEAK_B] {
+        install_tier1_caps(cs, pid, &tier1_caps, uart_ipc_ep, kernel_exit_ep);
+    }
+
     // 5. Bump refcounts on the endpoints, allocate the Net pool
     //    entry for the NIC, install the Net cap in the net
     //    driver's CSpace. We re-take the pools borrow now that
@@ -216,12 +241,16 @@ pub fn init_root_caps() -> Result<(), KernelError> {
     let nic_kind = 0u8;
     #[cfg(feature = "vf2")]
     let nic_kind = 1u8;
+    // R2S first-light never reaches init_root_caps (kmain halts before
+    // it), but this must compile. The Ky X1 NIC is not yet named; 0 is a
+    // placeholder that is never observed.
+    #[cfg(feature = "r2s")]
+    let nic_kind = 0u8;
     let net_pool_idx = pools.nets.alloc(super::objects::Net::new(nic_kind))?;
     if let Some(net) = pools.nets.get_mut(net_pool_idx) {
-        // 3 caps reference this Net: the driver's root cap (slot 0)
-        // and one derived cap each in tier-1 hello A + B (slot
-        // SLOT_NET = 2). PR Net-6b.
-        net.refcount = 3;
+        // The driver's root cap (slot 0) plus one derived cap in
+        // each baked Tier-1 CSpace (slot SLOT_NET = 2). PR Net-6b.
+        net.refcount = 1 + BAKED_TIER1_PROCS.len() as u16;
     }
 
     // 5b. Install the Net cap (READ + WRITE) at the net driver's
@@ -241,9 +270,10 @@ pub fn init_root_caps() -> Result<(), KernelError> {
             kind: ObjectKind::Net,
             rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
         };
-        // PR Net-6b: install Net cap into both Tier-1 hello CSpaces.
-        install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO, net_pool_idx);
-        install_tier1_net_cap(cs, PROC_ID_TIER1_HELLO_B, net_pool_idx);
+        // PR Net-6b: install Net cap into every baked Tier-1 CSpace.
+        for pid in BAKED_TIER1_PROCS {
+            install_tier1_net_cap(cs, pid, net_pool_idx);
+        }
     }
 
     // 5b-ipc (Option B brick 3b). One shared demo IPC endpoint,
@@ -320,9 +350,10 @@ pub fn init_root_caps() -> Result<(), KernelError> {
 
     // UART ep refs: 1 for Tier-2 (if mmio_uart), plus 1 per Tier-1
     // instance (if stdout).
-    let uart_refs = (tier2_caps.mmio_uart as u16) + 2 * (tier1_caps.stdout as u16);
+    let baked_tier1 = BAKED_TIER1_PROCS.len() as u16;
+    let uart_refs = (tier2_caps.mmio_uart as u16) + baked_tier1 * (tier1_caps.stdout as u16);
     // Exit ep refs: 1 per Tier-1 instance (if exit).
-    let exit_refs = 2 * (tier1_caps.exit as u16);
+    let exit_refs = baked_tier1 * (tier1_caps.exit as u16);
     if let Some(ep) = pools.endpoints.get_mut(uart_ipc_ep) {
         ep.refcount = ep.refcount.saturating_add(uart_refs);
     }

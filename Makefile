@@ -30,6 +30,14 @@ QEMU_ARGS    := -machine virt -nographic -bios default \
                 -netdev user,id=net0,net=192.168.50.0/24,host=192.168.50.2,hostfwd=tcp::8080-192.168.50.10:7000 \
                 -device virtio-net-device,netdev=net0
 
+# Signing pair for every target in this file: the in-tree dev key, and
+# a kernel that accepts it (`dev-keys` feature, announced in the boot
+# banner). `make` is the QEMU / test / contributor path. Production
+# images are built by scripts/build.sh with the production key — see
+# docs/security-model.md, "Signing keys".
+export WARI_SIGN_KEY    := scripts/dev-keys/wari-dev.ed25519.sec
+export WARI_SIGN_PUBKEY := scripts/dev-keys/wari-dev.ed25519.pub
+
 # llvm-objcopy from Rust toolchain (install with: rustup component add llvm-tools)
 OBJCOPY := $(shell find $${HOME}/.rustup -name llvm-objcopy -type f 2>/dev/null | head -1)
 
@@ -37,6 +45,13 @@ OBJCOPY := $(shell find $${HOME}/.rustup -name llvm-objcopy -type f 2>/dev/null 
 BUILD_FILE := .build_number
 BUILD_NUM  := $(shell cat $(BUILD_FILE) 2>/dev/null || echo 0)
 NEXT_BUILD := $(shell echo $$(($(BUILD_NUM) + 1)))
+# Branch slug for the self-identifying build id (`<num>-<slug>`), so the
+# boot banner is unambiguous across branches that share a build number.
+# Exported (not set per-recipe) so every kernel `cargo build` inherits it
+# without threading it through each target; only the kernel reads it.
+BRANCH_SLUG := $(shell git branch --show-current 2>/dev/null | tr '/' '-')
+WARI_BUILD_ID := $(NEXT_BUILD)-$(BRANCH_SLUG)
+export WARI_BUILD_ID
 
 # VF2 deploy target (IP of VisionFive 2 on local network — inherited from goose-os)
 VF2_IP ?= 192.168.86.236
@@ -46,7 +61,7 @@ DEPLOY_FILES := $(KERNEL_BIN) kernel/ abi-shared/ wasi/ apps/ drivers/ \
                 platform/ scripts/ docs/ Makefile Cargo.toml Cargo.lock \
                 rust-toolchain.toml CLAUDE.md README.md .build_number
 
-.PHONY: help build build-hello build-uart-driver sign-uart-driver \
+.PHONY: help build build-hello sign-apps build-uart-driver sign-uart-driver \
         build-net-driver sign-net-driver build-vf2 build-all \
         test run debug objdump clean \
         kernel-vf2 flash-sd deploy verify \
@@ -88,9 +103,9 @@ help:
 
 # ── Build ──────────────────────────────────────────────────────
 
-build: sign-uart-driver sign-net-driver build-hello
+build: sign-uart-driver sign-net-driver sign-apps
 	@echo "  [build] kernel: QEMU virt (entry 0x80200000)"
-	@cd kernel && WARI_BUILD=$(NEXT_BUILD) cargo build --release --features qemu
+	@cd kernel && WARI_BUILD=$(NEXT_BUILD) cargo build --release --features qemu,dev-keys
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), QEMU virt"
 
@@ -102,6 +117,17 @@ build-hello:
 	mkdir -p build/apps
 	cp target/wasm32-unknown-unknown/release/wari_hello.wasm \
 		build/apps/hello.wasm
+
+# Re-sign every staged Tier-1 program with this file's key pair. The
+# kernel embeds build/apps/*.signed.wasm for the runtime-load path, and
+# scripts/build.sh may have left them signed with the production key;
+# a dev-keyed kernel would refuse those at the boot self-test.
+sign-apps: build-hello
+	@for w in build/apps/*.wasm; do \
+	  case "$$w" in *.signed.wasm) continue ;; esac; \
+	  cargo run --quiet --manifest-path scripts/Cargo.toml --bin sign-module -- \
+	    "$$w" "$${w%.wasm}.signed.wasm" || exit 1; \
+	done
 
 # Build per-platform Tier-2 UART driver blobs (PR 9). The kernel
 # `include_bytes!`s the platform-matched signed blob — see
@@ -156,9 +182,9 @@ sign-net-driver: build-net-driver
 	  build/drivers/net-vf2.wasm  build/drivers/net-vf2.signed.wasm
 
 # VF2 cross-compile sanity (no flash). Useful before PR 10 deploy.
-build-vf2: sign-uart-driver sign-net-driver build-hello
+build-vf2: sign-uart-driver sign-net-driver sign-apps
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo build --release --features vf2 --no-default-features
+	  cargo build --release --features vf2,dev-keys --no-default-features
 
 build-all: build build-hello
 
@@ -227,9 +253,9 @@ clippy:
 # chain as `build`. Deliberately NOT wired into `check` yet: whether
 # the artifact-pipeline cost belongs in the every-PR gate is
 # Gustavo's call (see the host-test gate PR discussion).
-clippy-kernel: sign-uart-driver sign-net-driver build-hello
+clippy-kernel: sign-uart-driver sign-net-driver sign-apps
 	cd kernel && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo clippy --release --features qemu --no-default-features -- -D warnings
+	  cargo clippy --release --features qemu,dev-keys --no-default-features -- -D warnings
 
 fmt:
 	cargo fmt --all --check
@@ -243,15 +269,30 @@ audit:
 
 # ── VisionFive 2 ───────────────────────────────────────────────
 
-kernel-vf2: sign-uart-driver sign-net-driver build-hello
+kernel-vf2: sign-uart-driver sign-net-driver sign-apps
 	@echo "  [build] kernel: VF2 (entry 0x40200000, hart 1)"
 	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo build --release --features vf2 --no-default-features
+	  cargo build --release --features vf2,dev-keys --no-default-features
 	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), VF2"
 	@ls -lh $(KERNEL_BIN)
 	@echo ">>> $(KERNEL_BIN) ready — build $(NEXT_BUILD)"
+
+# Orange Pi R2S (Ky X1 / SpacemiT K1) — first-light scaffold (roadmap
+# p3b). Net-less: no signed driver blobs, no Tier-1 hello — the kernel
+# boots to banner + MMU on the sourced K1 constants, then halts before
+# any device-tree-blocked field (see docs/r2s-bringup.md). Hence NO
+# sign-*-driver / build-hello prerequisites.
+kernel-r2s:
+	@echo "  [build] kernel: R2S first-light (entry 0x00200000; net-less; DT-blocked halt)"
+	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
+	  cargo build --release --features r2s --no-default-features
+	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
+	@echo $(NEXT_BUILD) > $(BUILD_FILE)
+	@echo "  [build] kernel: build $(NEXT_BUILD), R2S first-light"
+	@ls -lh $(KERNEL_BIN)
+	@echo ">>> $(KERNEL_BIN) ready — build $(NEXT_BUILD) (R2S first-light, provisional)"
 
 # End-to-end build-coherence check. Greps the embedded WARI-*-BUILD-TAG
 # strings out of every artifact and compares them to .build_number.
@@ -281,10 +322,10 @@ verify:
 # kernel-vf2 with the debug-kernel feature on. Adds kdebug!()
 # subsystem-tagged lines to the COM7 trace. Use for diagnostic
 # silicon runs only — production deploys use plain `kernel-vf2`.
-kernel-vf2-debug: sign-uart-driver sign-net-driver build-hello
+kernel-vf2-debug: sign-uart-driver sign-net-driver sign-apps
 	@echo "  [build] kernel: VF2 + debug-kernel feature"
 	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo build --release --features vf2,debug-kernel --no-default-features
+	  cargo build --release --features vf2,debug-kernel,dev-keys --no-default-features
 	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), VF2 (DEBUG)"
@@ -292,10 +333,10 @@ kernel-vf2-debug: sign-uart-driver sign-net-driver build-hello
 
 # kernel-vf2 with both debug-kernel + trace-kernel on. Loudest
 # possible silicon trace; expect screens of output per second.
-kernel-vf2-trace: sign-uart-driver sign-net-driver build-hello
+kernel-vf2-trace: sign-uart-driver sign-net-driver sign-apps
 	@echo "  [build] kernel: VF2 + debug-kernel + trace-kernel"
 	@cd kernel && WARI_BUILD=$(NEXT_BUILD) \
-	  cargo build --release --features vf2,trace-kernel --no-default-features
+	  cargo build --release --features vf2,trace-kernel,dev-keys --no-default-features
 	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
 	@echo $(NEXT_BUILD) > $(BUILD_FILE)
 	@echo "  [build] kernel: build $(NEXT_BUILD), VF2 (TRACE)"

@@ -446,20 +446,43 @@ slot. `StRa` must track `StRf` 1:1 in the periodic counter dump — a 2:1
 ratio is this bug returning. Two counters make violations visible:
 `C_RX_REJECTED` and `C_TX_DROPPED`.
 
-**Status — the ordering half is NOT enforced.** There is no hardware
-memory barrier anywhere between descriptor stores and the MMIO
-doorbell. A Tier-2 WASM driver structurally cannot emit `fence`, and
-the kernel's MMIO host functions do not emit one either — a function
-call across the wasm→native boundary is not a memory barrier, despite
-comments in this driver having claimed so since build 107. Correctness
-today rests on the JH7110 interconnect being IO-coherent for the GMAC
-and on the U74 store buffer draining before the doorbell lands. **Both
-are unverified assumptions, and cache coherence is a per-SoC,
-per-peripheral property.** Resolving this — by emitting the fence in
-the kernel host fn, where it *can* be emitted — is a prerequisite for
-any second SoC, as is padding the descriptor rings to a cache line
+**Status — ordering enforced; address containment NOT enforced.**
+
+*Ordering.* A Tier-2 WASM driver structurally cannot emit `fence`,
+and a function call across the wasm→native boundary is not a memory
+barrier (despite comments in this driver having claimed so since
+build 107). The kernel's `net_mmio_write32` host fn now emits
+`fence w,o` before every device write, which orders descriptor stores
+ahead of the doorbell (Linux's `__io_bw()` before `writel`). Still
+open for any second SoC: padding the descriptor rings to a cache line
 (they are `align(16)` with 16-byte descriptors, so four share a line,
-which makes naive cache maintenance actively wrong).
+which makes naive cache maintenance actively wrong), and confirming
+the peripheral's IO-coherence, which is a per-SoC, per-peripheral
+property.
+
+*Address containment* — "every physical address handed to a DMA
+engine lies inside the driver's own linear memory" — **is not
+enforced by anything.** The driver computes physical addresses itself
+(`lin_mem_base()` + offset) and writes them into descriptors and DMA
+list-address registers; `net_mmio_write32` checks the register, not
+the value. The GMAC has no IOMMU. A driver that violates this half of
+the invariant can make the device read or write any physical address,
+kernel memory included. See `security-model.md` §"DMA" for the threat
+and the required fix (kernel-owned DMA addressing), decided in
+`adr/ADR-002-network-layering.md` step 1.
+
+*Status of that fix.* **VirtIO (QEMU): enforced.** The driver names a
+buffer by linear-memory offset through `wari::nic_dma_set_buf`;
+`cap::dma::nic_dma_set_buf_impl` checks the span and the descriptor
+index (`wari_validate::dma`, host-tested) and writes the physical
+address into the descriptor itself. `nic_attach_queue` records each
+ring; `net_mmio_write32` refuses the VirtIO queue-address registers
+(`BoardDescriptor::dma_addr_regs`). The driver's INV-25 self-check at
+init makes two calls that must be refused and will not bring the
+device up if either is accepted (`tests/security/tests/dma_escape.rs`).
+**GMAC (VF2): not yet.** The driver still forms ring and buffer
+addresses from `lin_mem_base`; the VF2 follow-up moves them into the
+kernel and fills `dma_addr_regs` for the DWMAC list/tail registers.
 
 ### INV-24 · Wire-Format Literals Are Derived, Never Transcribed *(Phase 1c)*
 
@@ -503,7 +526,9 @@ rather than weakening it.
 ### INV-13 · Tier-2 Bytecode Is Signature-Verified Before Instantiation *(Phase 0; generalizes into INV-11 in Phase 1)*
 
 > Any `.wasm` bytecode loaded at Tier 2 passes signature verification
-> against the kernel's compiled-in ed25519 `ACCEPTED_PUBKEY` before a
+> against the kernel's compiled-in ed25519 `ACCEPTED_PUBKEY` (the
+> production key, or the dev key under `--features dev-keys` — never
+> both; see `security-model.md`, "Signing keys") before a
 > wasmi `Module::new()` is constructed from it. Verification failure
 > aborts the load and the kernel halts in Phase 0 (no Tier-2 driver =
 > no I/O).

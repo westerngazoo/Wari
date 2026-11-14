@@ -14,7 +14,7 @@
 //! lines and focused on its assertion.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,8 +50,45 @@ pub fn workspace_root() -> PathBuf {
 /// - The QEMU child is killed at the end of the budget — no
 ///   indefinite hangs.
 pub fn boot_kernel_capture(wallclock: Duration) -> String {
-    let root = workspace_root();
-    let kernel = root.join(KERNEL_ELF_REL);
+    boot_capture(&default_kernel(), wallclock, &[])
+}
+
+/// [`boot_kernel_capture`] for a kernel ELF other than the one
+/// `make build` produces — a test that needs its own kernel variant
+/// builds it elsewhere and boots it through here.
+///
+/// # Panics
+///
+/// If `kernel` does not exist or QEMU cannot be spawned.
+pub fn boot_kernel_capture_at(kernel: &Path, wallclock: Duration) -> String {
+    boot_capture(kernel, wallclock, &[])
+}
+
+fn default_kernel() -> PathBuf {
+    workspace_root().join(KERNEL_ELF_REL)
+}
+
+/// QEMU device arguments that give the guest a VirtIO-net NIC on the
+/// same subnet `make run` uses (`Makefile` `QEMU_ARGS`), minus the
+/// host port forward so parallel test binaries never contend for a
+/// host port. Without a NIC the Tier-2 net driver's VirtIO init fails
+/// at the magic-value read and nothing past it runs.
+const NET_DEVICE_ARGS: &[&str] = &[
+    "-global",
+    "virtio-mmio.force-legacy=false",
+    "-netdev",
+    "user,id=net0,net=192.168.50.0/24,host=192.168.50.2",
+    "-device",
+    "virtio-net-device,netdev=net0",
+];
+
+/// [`boot_kernel_capture`] with a VirtIO-net device attached, for
+/// tests whose property lives in the net driver's init path.
+pub fn boot_kernel_capture_with_net(wallclock: Duration) -> String {
+    boot_capture(&default_kernel(), wallclock, NET_DEVICE_ARGS)
+}
+
+fn boot_capture(kernel: &Path, wallclock: Duration, extra_args: &[&str]) -> String {
     assert!(
         kernel.exists(),
         "kernel ELF not found at {:?}. Run `make build` first.",
@@ -59,15 +96,10 @@ pub fn boot_kernel_capture(wallclock: Duration) -> String {
     );
 
     let mut child = Command::new("qemu-system-riscv64")
-        .args([
-            "-machine",
-            "virt",
-            "-nographic",
-            "-bios",
-            "default",
-            "-kernel",
-        ])
-        .arg(&kernel)
+        .args(["-machine", "virt", "-nographic", "-bios", "default"])
+        .args(extra_args)
+        .arg("-kernel")
+        .arg(kernel)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -106,11 +138,101 @@ pub mod markers {
     /// failed — the kernel halted in `kmain`'s wfi loop.
     pub const TIER2_LOADED: &str = "tier-2 uart driver loaded";
 
-    /// Printed by Tier-1 hello after `proc_exit(0)`: see
-    /// `kernel/src/runtime/mod.rs::run_tier1_hello`.
-    pub const HELLO_EXIT_0: &str = "[hello] exit(0)";
+    /// Printed by `kmain` when the Tier-2 UART driver is refused
+    /// (signature, manifest or instantiation), followed by the typed
+    /// error; the kernel then idles in `wfi`.
+    pub const TIER2_UART_REFUSED: &str = "tier-2 uart load failed";
+
+    /// Printed by `apps/sockleak` once it holds every free socket,
+    /// right before it traps without closing them.
+    pub const SOCKLEAK_HOLDING: &str = "[sockleak] holding every free socket";
+
+    /// Printed by `apps/sockleak` when the driver had no socket left
+    /// for it: an earlier dead tenant still owns them.
+    pub const SOCKLEAK_NONE_LEFT: &str = "[sockleak] no socket available";
+
+    /// Tail of the scheduler's line after it closes the sockets a
+    /// terminated tenant left open (`kernel/src/sched/mod.rs`:
+    /// `[sched] proc_id=<n> left <k> socket(s) open, closed`).
+    pub const SOCKETS_CLOSED_AT_EXIT: &str = "socket(s) open, closed";
+
+    /// Banner line of a kernel built with `--features dev-keys`: it
+    /// trusts the in-tree dev key (`kernel/src/boot.rs`).
+    pub const DEV_KEYS_BANNER: &str = "DEV SIGNING KEY ACCEPTED";
+
+    /// Prefix of every per-instance line the Tier-1 runner prints
+    /// (`kernel/src/runtime/tier1_pool.rs::settle`): `[t1:<proc_id>]`
+    /// followed by one of the `T1_*` events below. The proc id is
+    /// handed out at boot and shifts whenever the daemon set changes,
+    /// so tests match on the event with [`tier1_event`] rather than
+    /// on a literal line.
+    pub const TIER1_PREFIX: &str = "[t1:";
+
+    /// Tier-1 instance called `proc_exit(0)`.
+    pub const T1_EXIT_0: &str = "exit(0)";
+
+    /// wasmi trapped inside the instance (OOB load, unreachable, …);
+    /// the kernel logged the trap kind and faulted only that tenant.
+    pub const T1_TRAP: &str = "runtime trap";
+
+    /// `_start` returned without `proc_exit`: protocol violation the
+    /// kernel treats as `exit(0)`.
+    pub const T1_RETURNED: &str = "returned cleanly without proc_exit";
+
+    /// The instance burned its whole per-step fuel budget without
+    /// yielding (`wari_sched::TIER1_FUEL_PER_STEP`) and was faulted.
+    pub const T1_OUT_OF_FUEL: &str = "out of fuel";
+
+    /// Does any line of `text` say the scheduler faulted a Tier-1
+    /// instance (`kernel/src/sched/mod.rs`: `[sched] Tier-1 instance
+    /// proc_id=<n> faulted`)? This is the typed-rejection terminal
+    /// state: a load failure or a trap ends here, never in a panic.
+    ///
+    /// ```
+    /// use wari_security_tests::markers::sched_tier1_faulted;
+    /// assert!(sched_tier1_faulted("[sched] Tier-1 instance proc_id=7 faulted\n"));
+    /// assert!(!sched_tier1_faulted("[sched] Tier-1 instance proc_id=7 exited (code=0)"));
+    /// ```
+    pub fn sched_tier1_faulted(text: &str) -> bool {
+        text.lines().any(|line| {
+            line.starts_with("[sched] Tier-1 instance proc_id=") && line.ends_with(" faulted")
+        })
+    }
+
+    /// Does any line of `text` read `[t1:<digits>] <event>…`?
+    ///
+    /// Pure string scan, no regex dependency. `event` is matched as a
+    /// prefix of what follows the proc id, so `T1_TRAP` matches
+    /// `[t1:3] runtime trap: MemoryOutOfBounds` as well.
+    ///
+    /// ```
+    /// use wari_security_tests::markers::{tier1_event, T1_EXIT_0};
+    /// assert!(tier1_event("boot\n[t1:12] exit(0)\n", T1_EXIT_0));
+    /// assert!(!tier1_event("[hello] exit(0)", T1_EXIT_0)); // old format
+    /// assert!(!tier1_event("[t1:] exit(0)", T1_EXIT_0));   // no proc id
+    /// ```
+    pub fn tier1_event(text: &str, event: &str) -> bool {
+        text.lines().any(|line| {
+            let Some(rest) = line.strip_prefix(TIER1_PREFIX) else {
+                return false;
+            };
+            let id_len = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if id_len == 0 {
+                return false;
+            }
+            rest[id_len..]
+                .strip_prefix("] ")
+                .is_some_and(|tail| tail.starts_with(event))
+        })
+    }
 
     /// Printed by the kernel boot banner. Always expected — its
     /// absence indicates the kernel did not even boot.
     pub const BOOT_BANNER: &str = "Wari v0 build";
+
+    /// Printed by the kernel once the Tier-2 net driver's smoltcp
+    /// interface is up (`runtime::run_tier2_net`). Absent if VirtIO
+    /// init failed — including when the driver's INV-25 self-check
+    /// refused to proceed (`dma_escape.rs`).
+    pub const NET_UP: &str = "[net] smoltcp interface up";
 }

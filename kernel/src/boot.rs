@@ -61,4 +61,7 @@ pub fn stage_banner(build: &str, hart_id: usize) {
     kprintln!("                          — The Geese Collective");
     kprintln!();
     kprintln!("Wari v0 build {} boot OK, hart {}", build, hart_id);
+    if crate::runtime::sign::DEV_KEYS {
+        kprintln!("!! DEV SIGNING KEY ACCEPTED - NOT FOR PRODUCTION");
+    }
 }
