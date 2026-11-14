@@ -23,9 +23,11 @@
 //! every pending accept into `E_TIMEDOUT` after 60 s.
 //!
 //! The waiter keeps the driver handle it resolved through its Socket
-//! cap when it blocked. A blocked tenant cannot close its own socket,
-//! and nothing else closes it, so the handle stays valid until the
-//! wait ends.
+//! cap when it blocked. A blocked tenant cannot drop its own cap, and
+//! the driver socket stays open while a cap names it (INV-26), so the
+//! handle stays valid until the wait ends. If the tenant dies while
+//! waiting, `tier1_pool::release` forgets the waiter before the
+//! scheduler closes its sockets.
 
 use core::ptr::addr_of_mut;
 

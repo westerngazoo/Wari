@@ -144,7 +144,8 @@ pub mod markers {
     pub const TIER2_UART_REFUSED: &str = "tier-2 uart load failed";
 
     /// Printed by `apps/sockleak` once it holds every free socket,
-    /// right before it traps without closing them.
+    /// right before it ends its life (prefix shared by the instance
+    /// that traps and the one that revokes its Net cap).
     pub const SOCKLEAK_HOLDING: &str = "[sockleak] holding every free socket";
 
     /// Printed by `apps/sockleak` when the driver had no socket left
@@ -155,6 +156,28 @@ pub mod markers {
     /// terminated tenant left open (`kernel/src/sched/mod.rs`:
     /// `[sched] proc_id=<n> left <k> socket(s) open, closed`).
     pub const SOCKETS_CLOSED_AT_EXIT: &str = "socket(s) open, closed";
+
+    /// `apps/sockleak`: after `cap_delete` of every Socket cap, all
+    /// the sockets were available again.
+    pub const SOCKLEAK_DELETE_OK: &str = "[sockleak] cap_delete: sockets came back";
+
+    /// `apps/sockleak`: with a `cap_copy` of a Socket cap alive, the
+    /// driver did not hand that socket out again.
+    pub const SOCKLEAK_COPY_OK: &str = "[sockleak] cap_copy: the copy keeps its socket";
+
+    /// `apps/sockleak`: `cap_delete` freed the caps but not the
+    /// driver sockets.
+    pub const SOCKLEAK_DELETE_LEAK: &str = "cap_delete: LEAK";
+
+    /// `apps/sockleak`: a socket still named by a cap was handed out
+    /// again — two caps, possibly of two tenants, on one socket.
+    pub const SOCKLEAK_COPY_ALIAS: &str = "cap_copy: ALIAS";
+
+    /// Tail of the kernel's line after a `cap_revoke` took the last
+    /// cap of some sockets and the kernel closed them
+    /// (`kernel/src/cap/syscall.rs`: `[cap] proc_id=<n> revoke left
+    /// <k> socket(s) without a cap, closed`).
+    pub const SOCKETS_CLOSED_AT_REVOKE: &str = "socket(s) without a cap, closed";
 
     /// Banner line of a kernel built with `--features dev-keys`: it
     /// trusts the in-tree dev key (`kernel/src/boot.rs`).
