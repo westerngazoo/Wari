@@ -8,7 +8,8 @@
 //! every boot. Each one takes every socket the driver has left and
 //! then traps without closing any.
 //!
-//! - The first instance always finds free sockets.
+//! - The first instance always finds free sockets, and ends by
+//!   trapping with them open.
 //! - The second finds one **only if** the kernel closed the first
 //!   one's sockets when it faulted
 //!   (`kernel/src/sched/mod.rs` → `cap::net_socket_close_all`).
@@ -17,12 +18,9 @@
 //! `[sockleak] no socket available`: the dead tenant still owns the
 //! driver's sockets, and so would every later tenant find it.
 //!
-//! ## What it does not cover
-//!
-//! The cleanup walks the Socket caps the tenant still holds. A tenant
-//! that drops a Socket cap with `cap_delete` or `cap_revoke` before
-//! dying frees the cap without closing the driver socket; that leak
-//! exists for a living tenant too and is tracked separately.
+//! The other ways a tenant can part with a Socket cap (`cap_delete`,
+//! `cap_copy`, `cap_revoke`) are the same probe's earlier steps,
+//! checked in `socket_cap_lifetime.rs`.
 //!
 //! The run needs a NIC: without one the net driver never initialises
 //! and no socket can be created at all.
@@ -57,11 +55,11 @@ fn dead_tenant_does_not_keep_its_sockets() {
         "a dead tenant kept the driver's sockets:\n{text}",
     );
 
-    // The kernel says it cleaned up after each of them.
-    let cleaned = text.matches(markers::SOCKETS_CLOSED_AT_EXIT).count();
+    // The kernel says it cleaned up after the one that died with
+    // sockets open (the other revokes them itself before dying).
     assert!(
-        cleaned >= 2,
-        "expected a socket-cleanup line per probe, got {cleaned}:\n{text}",
+        text.contains(markers::SOCKETS_CLOSED_AT_EXIT),
+        "no socket-cleanup line for the probe that died holding sockets:\n{text}",
     );
 
     assert!(!text.contains("panicked at"), "rust panic:\n{text}");

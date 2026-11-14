@@ -34,6 +34,12 @@ pub fn dec_refcount(kind: ObjectKind, pool_index: u16) {
     wari_cap::revoke::dec_refcount(object_pools(), kind, pool_index);
 }
 
+/// Remove one capless Socket and return its driver handle.
+/// Contract: `wari_cap::revoke::take_capless_socket` (INV-26).
+pub fn take_capless_socket() -> Option<u32> {
+    wari_cap::revoke::take_capless_socket(object_pools())
+}
+
 /// Increment a kernel object's refcount (saturating).
 /// Contract: `wari_cap::revoke::inc_refcount`.
 pub fn inc_refcount(kind: ObjectKind, pool_index: u16) {

@@ -1,0 +1,11 @@
+@startuml
+title wari — flujo de componentes
+start
+:BOOTboot.S;
+:CAP;
+:WASM;
+:APP;
+:DRV;
+stop
+
+@enduml

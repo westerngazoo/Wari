@@ -43,7 +43,7 @@ use wasmi::Caller;
 
 use super::cspace::{CSPACE_SLOTS, MAX_PROCS};
 use super::reg::RegEntry;
-use super::revoke::{dec_refcount, inc_refcount, revoke};
+use super::revoke::{dec_refcount, inc_refcount, revoke, take_capless_socket};
 use super::storage::{cspaces, object_pools, reg_tables};
 use super::types::{
     Cap, CapId, ObjectKind, CAP_RIGHTS_PHASE_1B_MASK, CAP_RIGHT_READ, CAP_RIGHT_WRITE,
@@ -349,9 +349,62 @@ pub fn cap_revoke_impl(proc_id: u8, slot: u32) -> i32 {
     }
 
     match revoke(proc_id, slot) {
-        Ok(()) => 0,
+        Ok(()) => {
+            // The cascade may have taken the last cap of some sockets.
+            let closed = close_capless_sockets(proc_id);
+            if closed > 0 {
+                crate::kprintln!(
+                    "[cap] proc_id={} revoke left {} socket(s) without a cap, closed",
+                    proc_id,
+                    closed
+                );
+            }
+            0
+        }
         Err(_) => E_INVAL,
     }
+}
+
+/// Close, in the net driver, every socket no cap names any more
+/// (INV-26), and free its pool entry. The single place a driver
+/// socket is closed on behalf of a cap holder: `net_socket_close`,
+/// `cap_delete`, `cap_revoke` and tenant teardown all end here.
+///
+/// `caller` is the process on whose behalf the kernel is running.
+///
+/// # Contract
+///
+/// - Returns the number of sockets the driver confirmed closed.
+/// - When `caller` is the net driver itself the drain is **skipped**
+///   (returns 0): the driver's wasmi `Store` is live on this stack
+///   and calling back into it would re-enter it. The capless entries
+///   stay recorded and are closed by the next drain from any other
+///   context (every Tier-1 socket operation that drops a cap, and
+///   every tenant teardown).
+/// - A driver-side close failure does not stop the drain and is not
+///   counted; it is reported on the console with the handle. The
+///   pool entry is gone either way — nothing can name the socket any
+///   more, which is the safe side — but the driver socket may then
+///   stay allocated until reset.
+/// - Never panics.
+fn close_capless_sockets(caller: u8) -> u32 {
+    if caller == super::boot::PROC_ID_TIER2_NET {
+        return 0;
+    }
+    let mut closed = 0;
+    while let Some(handle) = take_capless_socket() {
+        // SAFETY: tier2_net::install ran during boot (run_tier2_net);
+        // INV-1 + INV-8. Not re-entrant: `caller` is not the driver.
+        match unsafe { crate::runtime::tier2_net::socket_close(handle) } {
+            Ok(0) => closed += 1,
+            other => crate::kprintln!(
+                "[cap] net driver failed to close socket handle {}: {:?}",
+                handle,
+                other
+            ),
+        }
+    }
+    closed
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -362,7 +415,7 @@ pub fn cap_revoke_impl(proc_id: u8, slot: u32) -> i32 {
 ///
 /// Remove the cap at `slot` without cascading. The kernel object's
 /// refcount is decremented; the object is freed if the count hits
-/// zero. Descendants of the deleted cap are NOT affected — they
+/// zero (a Socket's driver socket is closed first, INV-26). Descendants of the deleted cap are NOT affected — they
 /// become orphaned via INV-17 (their parent slot's generation will
 /// no longer match) and get cleaned up on the next revoke walk that
 /// touches them, or when their containing process exits.
@@ -388,6 +441,10 @@ pub fn cap_delete_impl(proc_id: u8, slot: u32) -> i32 {
         info
     };
     dec_refcount(kind, pool_index);
+    if matches!(kind, ObjectKind::Socket) {
+        // Deleting the last cap of a socket closes it (INV-26).
+        close_capless_sockets(proc_id);
+    }
 
     0
 }
@@ -1069,10 +1126,11 @@ pub fn net_socket_create_impl(proc_id: u8, proto: u32, slot_for_cap: u32) -> i32
 
 /// `wari::net_socket_close(slot: u32) -> i32`.
 ///
-/// Tears down the Socket cap at `slot` — calls into the driver
-/// to release the smoltcp socket, frees the Socket pool entry,
-/// clears the cap, bumps the slot generation. Returns 0 on
-/// success, negative errno on failure.
+/// Drops the Socket cap at `slot`: clears it and bumps the slot
+/// generation. The driver socket is closed, and its pool entry
+/// freed, when this was the **last** cap naming it (INV-26) — a copy
+/// made with `cap_copy` / `cap_mint` keeps the socket open. Returns 0
+/// on success, negative errno if `slot` holds no Socket cap.
 pub fn net_socket_close_impl(proc_id: u8, slot: u32) -> i32 {
     if (proc_id as usize) >= MAX_PROCS {
         return E_INVAL;
@@ -1080,46 +1138,39 @@ pub fn net_socket_close_impl(proc_id: u8, slot: u32) -> i32 {
     if slot >= CSPACE_SLOTS as u32 {
         return E_INVAL;
     }
-    let slot = slot as u8;
+    if !drop_socket_cap(proc_id, slot as u8) {
+        return E_PERM;
+    }
 
-    // 1. Validate the cap, snapshot the smoltcp handle from the
-    //    Socket pool entry.
-    let (sock_cap, smoltcp_handle) = {
+    // Close the driver socket if that was its last cap. A driver
+    // error is not surfaced: the cap is gone either way, so the
+    // Tier-1 cannot wedge on a stuck socket.
+    close_capless_sockets(proc_id);
+
+    0
+}
+
+/// Clear the Socket cap at `(proc_id, slot)`, bump the slot
+/// generation and drop the cap's reference on its Socket object.
+/// Returns `false`, changing nothing, if the slot holds no Socket
+/// cap. Does not touch the driver: the caller drains with
+/// [`close_capless_sockets`].
+///
+/// Precondition: `proc_id < MAX_PROCS`.
+fn drop_socket_cap(proc_id: u8, slot: u8) -> bool {
+    let sock_cap = {
         let cs = cspaces();
         let cap = cs[proc_id as usize].slots[slot as usize];
-        if cap.is_empty() || !matches!(cap.kind, ObjectKind::Socket) {
-            return E_PERM;
+        if !matches!(cap.kind, ObjectKind::Socket) {
+            return false;
         }
-        let pools = object_pools();
-        let sock = match pools.sockets.get(cap.pool_index) {
-            Some(s) => s,
-            None => return E_INVAL, // dangling cap
-        };
-        (cap, sock.smoltcp_handle)
-    };
-
-    // 2. Tell the driver to release the smoltcp socket. Failures
-    //    here are surfaced but we proceed with cap cleanup so the
-    //    Tier-1 cannot wedge on a stuck socket.
-    // SAFETY: same as create above.
-    let driver_ret =
-        unsafe { crate::runtime::tier2_net::socket_close(smoltcp_handle) }.unwrap_or(-1);
-
-    // 3. Drop the cap, dec refcount (free pool entry on 0).
-    {
-        let cs = cspaces();
         cs[proc_id as usize].slots[slot as usize] = Cap::empty();
         cs[proc_id as usize].generations[slot as usize] =
             cs[proc_id as usize].generations[slot as usize].wrapping_add(1);
-    }
+        cap
+    };
     dec_refcount(sock_cap.kind, sock_cap.pool_index);
-
-    if driver_ret != 0 {
-        // Surface the driver-side error to the caller.
-        driver_ret
-    } else {
-        0
-    }
+    true
 }
 
 /// Close every Socket cap `proc_id` still holds. Tenant teardown: the
@@ -1131,27 +1182,23 @@ pub fn net_socket_close_impl(proc_id: u8, slot: u32) -> i32 {
 /// - Precondition: scheduler context, no wasmi frame of `proc_id`
 ///   live (its slot is already released) — the close calls into the
 ///   Tier-2 net driver.
-/// - Postcondition: no slot of `proc_id`'s CSpace holds a Socket cap
-///   whose pool entry exists; each such socket was closed in the
-///   driver and its accept window cleared (`net_socket_close_impl`).
-/// - Returns the number of Socket caps found. A driver-side close
-///   error does not stop the sweep: the cap is dropped regardless.
+/// - Postcondition: no slot of `proc_id`'s CSpace holds a Socket
+///   cap, and no socket is left capless: every driver socket whose
+///   last cap this tenant held is closed and its accept window
+///   cleared (INV-26). A socket another process still holds a cap to
+///   stays open.
+/// - Returns the number of driver sockets closed — not the number
+///   of caps dropped: two caps on one socket close it once, and a
+///   socket deferred by `close_capless_sockets` is counted here too.
 /// - `proc_id >= MAX_PROCS` returns 0. Never panics.
 pub fn net_socket_close_all(proc_id: u8) -> u32 {
     if (proc_id as usize) >= MAX_PROCS {
         return 0;
     }
-    let mut closed = 0;
-    for slot in 0..CSPACE_SLOTS as u32 {
-        // Fresh borrow per slot: the close below re-borrows the
-        // CSpace table itself.
-        let is_socket = cspaces()[proc_id as usize].holds(slot as u8, ObjectKind::Socket);
-        if is_socket {
-            let _ = net_socket_close_impl(proc_id, slot);
-            closed += 1;
-        }
+    for slot in 0..CSPACE_SLOTS {
+        drop_socket_cap(proc_id, slot as u8);
     }
-    closed
+    close_capless_sockets(proc_id)
 }
 
 /// `wari::net_socket_bind(slot, ip_be, port) -> i32` (PR Net-6c).

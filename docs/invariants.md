@@ -484,6 +484,44 @@ device up if either is accepted (`tests/security/tests/dma_escape.rs`).
 addresses from `lin_mem_base`; the VF2 follow-up moves them into the
 kernel and fills `dma_addr_regs` for the DWMAC list/tail registers.
 
+### INV-26 · A Driver Socket Lives Exactly As Long As a Cap Names It *(Phase 2)*
+
+> A driver socket created through `net_socket_create` stays open
+> while its kernel `Socket` object has at least one capability naming
+> it, and is closed, and the object freed, when the last cap goes —
+> by `net_socket_close`, `cap_delete`, `cap_revoke` or the death of
+> its holder.
+
+**Why it is an invariant and not a convention.** Every socket host
+function resolves the driver handle through the cap's `Socket` object.
+If the object outlives the driver socket (closed under a remaining
+copy), the stale cap names whatever the driver next assigns that
+handle to — possibly another tenant's socket. If the driver socket
+outlives the object (cap dropped without a close), the socket is
+allocated forever: the driver has four for the whole board.
+
+**Enforcement.** `wari_cap::revoke::dec_refcount` does not free a
+`Socket` at refcount zero; it leaves it *capless*. The kernel drains
+capless sockets in one place, `cap::syscall::close_capless_sockets`
+(driver close, then free), called after every operation that can drop
+a Socket cap and at tenant teardown. Called on behalf of the net
+driver itself the drain is deferred to the next caller, because the
+driver's wasmi store is live on that stack.
+
+**Tests.** Host: `wari-cap` `revoke` tests (`socket_losing_its_last_cap_stays_until_taken`,
+`socket_with_a_remaining_cap_is_not_taken`, `take_drains_every_capless_socket_and_only_those`,
+`revoking_a_net_cap_leaves_its_sockets_capless_not_lost`). QEMU and
+silicon: `apps/sockleak`, read by
+`tests/security/tests/socket_cap_lifetime.rs` and
+`socket_release_on_fault.rs`.
+
+**Not covered.** A living tenant may still hold every socket the
+driver has: there is no per-tenant quota. If the driver itself fails
+to close a socket the kernel reports it on the console and the driver
+socket may stay allocated; the kernel object is freed regardless. The
+boot self-test's own driver socket (`runtime::run_tier2_net`) has no
+`Socket` object and is outside this invariant.
+
 ### INV-24 · Wire-Format Literals Are Derived, Never Transcribed *(Phase 1c)*
 
 > Any byte sequence a driver places on a physical medium is

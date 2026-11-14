@@ -106,7 +106,8 @@ impl RevokeSet {
 ///   - The cap at `(proc_id, slot)` and every descendant are empty.
 ///   - Every cleared slot's generation counter has been bumped.
 ///   - Every kernel object whose refcount dropped to zero has been
-///     returned to its pool.
+///     returned to its pool — except Sockets, which are left capless
+///     for [`take_capless_socket`] (INV-26).
 /// - **Errors**: `KernelError::InvalidArgument` if the initial slot
 ///   is empty or out of range.
 /// - **Panics**: never.
@@ -139,6 +140,12 @@ pub fn revoke(
 /// - Out-of-range or unallocated `pool_index` is a no-op (the object
 ///   is already gone; double-decrement cannot underflow past the
 ///   `saturating_sub`).
+/// - **Socket is the exception to "deallocating if zero"**: a Socket
+///   whose refcount reaches zero stays allocated, *capless*. It
+///   stands for a driver-side socket this pure crate cannot close;
+///   the kernel drains capless entries with [`take_capless_socket`],
+///   closing each in the driver. Freeing the entry here instead would
+///   lose the only record of the driver handle (INV-26).
 /// - Panics: never.
 pub fn dec_refcount(pools: &mut ObjectPools, kind: ObjectKind, pool_index: u16) {
     match kind {
@@ -186,14 +193,39 @@ pub fn dec_refcount(pools: &mut ObjectPools, kind: ObjectKind, pool_index: u16) 
             }
         }
         ObjectKind::Socket => {
+            // No dealloc at zero: see the contract above (INV-26).
             if let Some(obj) = pools.sockets.get_mut(pool_index) {
                 obj.refcount = obj.refcount.saturating_sub(1);
-                if obj.refcount == 0 {
-                    let _ = pools.sockets.dealloc(pool_index);
-                }
             }
         }
     }
+}
+
+/// Remove one capless Socket from the pool and return the driver
+/// handle it recorded, or `None` when every allocated Socket still
+/// has a cap.
+///
+/// A Socket is capless when it is allocated with refcount zero: the
+/// last cap naming it was deleted, revoked or closed
+/// ([`dec_refcount`]). The caller owns the returned handle and must
+/// close it in the driver; calling this in a loop until `None` drains
+/// every capless entry (INV-26).
+///
+/// # Contract
+/// - Precondition: no Socket is between `alloc` and its first
+///   `inc_refcount` — the kernel's `net_socket_create` does both
+///   without an intervening drain (INV-1, single hart).
+/// - Postcondition on `Some(h)`: the entry that recorded `h` is
+///   deallocated; no cap can name it (its refcount was zero).
+/// - Panics: never.
+pub fn take_capless_socket(pools: &mut ObjectPools) -> Option<u32> {
+    for index in 0..crate::objects::SOCKET_POOL_CAPACITY as u16 {
+        let capless = matches!(pools.sockets.get(index), Some(s) if s.refcount == 0);
+        if capless {
+            return pools.sockets.dealloc(index).ok().map(|s| s.smoltcp_handle);
+        }
+    }
+    None
 }
 
 /// Increment a kernel object's refcount. Used by mint / copy when a
@@ -321,7 +353,7 @@ fn clear(cs: &mut [CSpace; MAX_PROCS], pools: &mut ObjectPools, set: &RevokeSet)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::objects::Endpoint;
+    use crate::objects::{Endpoint, Socket};
     use crate::types::{CapId, CAP_RIGHT_GRANT, CAP_RIGHT_READ, CAP_RIGHT_WRITE};
 
     // ---- helpers ----
@@ -543,6 +575,91 @@ mod tests {
         assert!(pools.endpoints.is_allocated(idx));
         dec_refcount(&mut pools, ObjectKind::Endpoint, idx);
         assert!(!pools.endpoints.is_allocated(idx));
+    }
+
+    // ---- socket lifetime (INV-26) ----
+
+    /// A Socket with one cap, as `net_socket_create` leaves it.
+    fn socket_with_one_cap(pools: &mut ObjectPools, handle: u32) -> u16 {
+        let idx = pools.sockets.alloc(Socket::new(0, handle)).unwrap();
+        inc_refcount(pools, ObjectKind::Socket, idx);
+        idx
+    }
+
+    #[test]
+    fn socket_losing_its_last_cap_stays_until_taken() {
+        let (_, mut pools) = fresh();
+        let idx = socket_with_one_cap(&mut pools, 3);
+        dec_refcount(&mut pools, ObjectKind::Socket, idx);
+        // Still allocated: the driver handle must not be forgotten.
+        assert!(pools.sockets.is_allocated(idx));
+        assert_eq!(take_capless_socket(&mut pools), Some(3));
+        assert!(!pools.sockets.is_allocated(idx));
+        assert_eq!(take_capless_socket(&mut pools), None);
+    }
+
+    #[test]
+    fn socket_with_a_remaining_cap_is_not_taken() {
+        let (_, mut pools) = fresh();
+        let idx = socket_with_one_cap(&mut pools, 3);
+        // A copy: two caps name the socket; dropping one keeps it.
+        inc_refcount(&mut pools, ObjectKind::Socket, idx);
+        dec_refcount(&mut pools, ObjectKind::Socket, idx);
+        assert_eq!(take_capless_socket(&mut pools), None);
+        assert!(pools.sockets.is_allocated(idx));
+    }
+
+    #[test]
+    fn take_drains_every_capless_socket_and_only_those() {
+        let (_, mut pools) = fresh();
+        let a = socket_with_one_cap(&mut pools, 0);
+        let live = socket_with_one_cap(&mut pools, 1);
+        let b = socket_with_one_cap(&mut pools, 2);
+        dec_refcount(&mut pools, ObjectKind::Socket, a);
+        dec_refcount(&mut pools, ObjectKind::Socket, b);
+        let mut taken = [
+            take_capless_socket(&mut pools),
+            take_capless_socket(&mut pools),
+        ];
+        taken.sort();
+        assert_eq!(taken, [Some(0), Some(2)]);
+        assert_eq!(take_capless_socket(&mut pools), None);
+        assert!(pools.sockets.is_allocated(live));
+    }
+
+    #[test]
+    fn revoking_a_net_cap_leaves_its_sockets_capless_not_lost() {
+        let (mut cs, mut pools) = fresh();
+        // Tenant 2 holds a Net cap at slot 2 and a Socket cap derived
+        // from it at slot 8 — the shape `net_socket_create` builds.
+        let net_idx = pools.nets.alloc(crate::objects::Net::new(0)).unwrap();
+        inc_refcount(&mut pools, ObjectKind::Net, net_idx);
+        let net_cap = Cap {
+            badge: 0,
+            parent: CapId::ROOT,
+            generation: 0,
+            pool_index: net_idx,
+            kind: ObjectKind::Net,
+            rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
+        };
+        cs[2].slots[2] = net_cap;
+        let sock_idx = socket_with_one_cap(&mut pools, 3);
+        cs[2].slots[8] = Cap {
+            badge: 0,
+            parent: CapId::new(2, 2, 0),
+            generation: 0,
+            pool_index: sock_idx,
+            kind: ObjectKind::Socket,
+            rights: CAP_RIGHT_READ | CAP_RIGHT_WRITE,
+        };
+
+        revoke(&mut cs, &mut pools, 2, 2).unwrap();
+
+        assert!(
+            cs[2].slots[8].is_empty(),
+            "cascade must clear the socket cap"
+        );
+        assert_eq!(take_capless_socket(&mut pools), Some(3));
     }
 
     #[test]
