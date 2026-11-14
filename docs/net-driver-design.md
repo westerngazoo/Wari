@@ -395,7 +395,7 @@ Endpoint cap at the tenant-supplied slot.
 | `wari::net_socket_connect(slot, ip_be, port)` | `u32, u32, u32` | `i32` | Initiate a TCP connect or set the UDP peer |
 | `wari::net_socket_send(slot, buf_ptr, buf_len)` | `u32, u32, u32` | `i32` | Send bytes; returns bytes written or negative errno; non-blocking — partial writes possible |
 | `wari::net_socket_recv(slot, buf_ptr, max_len)` | `u32, u32, u32` | `i32` | Receive bytes; blocks until ≥1 byte available; returns byte count or negative errno |
-| `wari::net_socket_close(slot)` | `u32` | `i32` | Tear down the socket; deletes the Socket cap (cap delete cascade frees the smoltcp socket state) |
+| `wari::net_socket_close(slot)` | `u32` | `i32` | Drop the Socket cap; the driver socket is closed when this was the last cap naming it (INV-26) |
 
 **Errnos** match the existing cap-host-fn convention plus a few
 net-specific ones added to `cap/syscall.rs`:

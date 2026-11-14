@@ -13,7 +13,10 @@
 //!    must keep the socket, so one fewer is available. If the full
 //!    count is available the driver handed the same socket out twice
 //!    and the copy now names someone else's.
-//! 3. End of life, by proc id:
+//! 3. **`cap_mint`** a child of a Socket cap, then **`cap_revoke`**
+//!    the Socket cap: parent and child go in one cascade and the
+//!    socket must come back.
+//! 4. End of life, by proc id:
 //!    - the first instance **traps** holding every free socket;
 //!    - the second **`cap_revoke`s its Net cap** (which takes the
 //!      Socket caps derived from it), then traps.
@@ -57,6 +60,9 @@ mod wasi {
         pub fn net_socket_close(slot: u32) -> i32;
         /// Same-rights duplicate of the cap at `src` into `target`.
         pub fn cap_copy(src: u32, target: u32) -> i32;
+        /// Derive a child of the cap at `parent` into `target` with
+        /// `rights` (a subset of the parent's) and `badge`.
+        pub fn cap_mint(parent: u32, target: u32, rights: u32, badge: u32) -> i32;
         /// Remove the cap at `slot`, no cascade.
         pub fn cap_delete(slot: u32) -> i32;
         /// Remove the cap at `slot` and every cap derived from it.
@@ -83,9 +89,14 @@ const FIRST_SOCKET_SLOT: u32 = 8;
 /// always ends on a refusal rather than on this bound.
 const MAX_GRAB: u32 = 8;
 
-/// Slot for the duplicate in the `cap_copy` case. Outside
+/// Slot for the duplicate in the `cap_copy` case and the child in the
+/// `cap_mint` case. Outside
 /// `FIRST_SOCKET_SLOT..FIRST_SOCKET_SLOT + MAX_GRAB`.
 const COPY_SLOT: u32 = 32;
+
+/// READ | WRITE, as `wari_cap::types` numbers cap rights — what a
+/// Socket cap carries.
+const RIGHTS_READ_WRITE: u32 = 0b11;
 
 /// Slot of the kernel-installed Net cap (`cap::boot::SLOT_NET`).
 const SLOT_NET: u32 = 2;
@@ -105,6 +116,8 @@ const DELETE_OK: &[u8] = b"[sockleak] cap_delete: sockets came back\r\n";
 const DELETE_LEAK: &[u8] = b"[sockleak] cap_delete: LEAK, sockets not returned\r\n";
 const COPY_OK: &[u8] = b"[sockleak] cap_copy: the copy keeps its socket\r\n";
 const COPY_ALIAS: &[u8] = b"[sockleak] cap_copy: ALIAS, a held socket was handed out again\r\n";
+const REVOKE_OK: &[u8] = b"[sockleak] cap_revoke: sockets came back\r\n";
+const REVOKE_LEAK: &[u8] = b"[sockleak] cap_revoke: LEAK, sockets not returned\r\n";
 const HOLDING: &[u8] = b"[sockleak] holding every free socket, dying without closing\r\n";
 const REVOKING: &[u8] = b"[sockleak] holding every free socket, revoking the Net cap\r\n";
 
@@ -183,7 +196,23 @@ pub extern "C" fn _start() -> ! {
         let _ = unsafe { wasi::net_socket_close(COPY_SLOT) };
     }
 
-    // 3. End of life with every free socket still open.
+    // 3. One socket, a parent cap and a minted child; revoke the
+    //    parent. The cascade takes both, so all `total` come back.
+    // SAFETY (whole block): extern host fns; each validates its own
+    // arguments.
+    if unsafe { wasi::net_socket_create(PROTO_TCP, FIRST_SOCKET_SLOT) } == 0 {
+        let _ = unsafe { wasi::cap_mint(FIRST_SOCKET_SLOT, COPY_SLOT, RIGHTS_READ_WRITE, 0) };
+        let _ = unsafe { wasi::cap_revoke(FIRST_SOCKET_SLOT) };
+        let back = grab_all();
+        print(if back == total {
+            REVOKE_OK
+        } else {
+            REVOKE_LEAK
+        });
+        close_grabbed(back);
+    }
+
+    // 4. End of life with every free socket still open.
     if grab_all() == 0 {
         print(NONE_LEFT);
         // SAFETY: extern host fn; terminates this instance.
@@ -208,9 +237,9 @@ pub extern "C" fn _start() -> ! {
 // one-source discipline).
 #[link_section = "wari_driver_manifest"]
 #[used]
-static WARI_MANIFEST: [u8; wari_driver_iface::manifest_size(1, 8)] = {
+static WARI_MANIFEST: [u8; wari_driver_iface::manifest_size(1, 9)] = {
     use wari_driver_iface::FuncSig::{U32Unit, U32x4I32, U32xU32I32, UnitI32, UnitUnit, U32I32};
-    wari_driver_iface::build_manifest::<{ wari_driver_iface::manifest_size(1, 8) }>(
+    wari_driver_iface::build_manifest::<{ wari_driver_iface::manifest_size(1, 9) }>(
         wari_driver_iface::DriverKind::Tier1App,
         &[(b"_start", UnitUnit)],
         &[
@@ -219,6 +248,7 @@ static WARI_MANIFEST: [u8; wari_driver_iface::manifest_size(1, 8)] = {
             (b"wari", b"net_socket_create", U32xU32I32),
             (b"wari", b"net_socket_close", U32I32),
             (b"wari", b"cap_copy", U32xU32I32),
+            (b"wari", b"cap_mint", U32x4I32),
             (b"wari", b"cap_delete", U32I32),
             (b"wari", b"cap_revoke", U32I32),
             (b"wari", b"proc_self", UnitI32),

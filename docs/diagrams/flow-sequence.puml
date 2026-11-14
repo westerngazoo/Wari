@@ -1,0 +1,13 @@
+@startuml
+title wari — secuencia principal
+
+participant "Boot" as Boot0
+participant "Runtime" as Runtime1
+participant "Syscall" as Syscall2
+participant "Driver" as Driver3
+
+Boot0 -> Runtime1: WASM engine loads signed Tier-1/Tier-2 modules.
+Runtime1 -> Syscall2: cap check → dispatch → driver IPC for MMIO/IRQ.
+Syscall2 -> Driver3: Tier-2 signed WASM (uart/net) via host functions + grants.
+
+@enduml

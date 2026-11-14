@@ -173,6 +173,14 @@ pub mod markers {
     /// again — two caps, possibly of two tenants, on one socket.
     pub const SOCKLEAK_COPY_ALIAS: &str = "cap_copy: ALIAS";
 
+    /// `apps/sockleak`: after `cap_revoke` of a Socket cap with a
+    /// minted child, all the sockets were available again.
+    pub const SOCKLEAK_REVOKE_OK: &str = "[sockleak] cap_revoke: sockets came back";
+
+    /// `apps/sockleak`: `cap_revoke` freed the caps but not the
+    /// driver socket.
+    pub const SOCKLEAK_REVOKE_LEAK: &str = "cap_revoke: LEAK";
+
     /// Tail of the kernel's line after a `cap_revoke` took the last
     /// cap of some sockets and the kernel closed them
     /// (`kernel/src/cap/syscall.rs`: `[cap] proc_id=<n> revoke left

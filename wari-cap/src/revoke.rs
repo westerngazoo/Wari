@@ -106,7 +106,8 @@ impl RevokeSet {
 ///   - The cap at `(proc_id, slot)` and every descendant are empty.
 ///   - Every cleared slot's generation counter has been bumped.
 ///   - Every kernel object whose refcount dropped to zero has been
-///     returned to its pool.
+///     returned to its pool — except Sockets, which are left capless
+///     for [`take_capless_socket`] (INV-26).
 /// - **Errors**: `KernelError::InvalidArgument` if the initial slot
 ///   is empty or out of range.
 /// - **Panics**: never.

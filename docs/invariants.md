@@ -486,11 +486,11 @@ kernel and fills `dma_addr_regs` for the DWMAC list/tail registers.
 
 ### INV-26 · A Driver Socket Lives Exactly As Long As a Cap Names It *(Phase 2)*
 
-> A socket in the Tier-2 net driver is open if and only if its kernel
-> `Socket` object has at least one capability naming it. The driver
-> socket is closed, and the object freed, when the last cap goes —
+> A driver socket created through `net_socket_create` stays open
+> while its kernel `Socket` object has at least one capability naming
+> it, and is closed, and the object freed, when the last cap goes —
 > by `net_socket_close`, `cap_delete`, `cap_revoke` or the death of
-> its holder — and never while a cap remains.
+> its holder.
 
 **Why it is an invariant and not a convention.** Every socket host
 function resolves the driver handle through the cap's `Socket` object.
@@ -516,7 +516,11 @@ silicon: `apps/sockleak`, read by
 `socket_release_on_fault.rs`.
 
 **Not covered.** A living tenant may still hold every socket the
-driver has: there is no per-tenant quota.
+driver has: there is no per-tenant quota. If the driver itself fails
+to close a socket the kernel reports it on the console and the driver
+socket may stay allocated; the kernel object is freed regardless. The
+boot self-test's own driver socket (`runtime::run_tier2_net`) has no
+`Socket` object and is outside this invariant.
 
 ### INV-24 · Wire-Format Literals Are Derived, Never Transcribed *(Phase 1c)*
 

@@ -16,9 +16,13 @@
 //!   socket. Before the fix the driver socket was closed under the
 //!   copy and handed out again, leaving the stale copy naming a
 //!   socket that could by then belong to another tenant.
-//! - **`cap_revoke`** of the Net cap (second instance): the Socket
-//!   caps derived from it go with it, and the kernel must close their
-//!   sockets.
+//! - **`cap_mint`** a child of a Socket cap, then **`cap_revoke`**
+//!   the Socket cap: the cascade takes parent and child, and the
+//!   socket must come back.
+//! - **`cap_revoke`** of the Net cap (second instance, its last act):
+//!   the Socket caps derived from it go with it. That instance cannot
+//!   ask for sockets afterwards, so here the evidence is the kernel's
+//!   own count of driver sockets it closed.
 //!
 //! `socket_release_on_fault.rs` covers the remaining way: dying with
 //! the caps still held.
@@ -64,7 +68,19 @@ fn socket_is_closed_when_its_last_cap_goes_and_not_before() {
         "expected the cap_copy case to pass in both probes, got {copy_ok}:\n{text}",
     );
 
-    // cap_revoke: the kernel closed the sockets the cascade orphaned.
+    // cap_mint + cap_revoke of the Socket cap: the socket came back.
+    assert!(
+        !text.contains(markers::SOCKLEAK_REVOKE_LEAK),
+        "cap_revoke of a Socket cap left the driver socket allocated:\n{text}",
+    );
+    let revoke_ok = text.matches(markers::SOCKLEAK_REVOKE_OK).count();
+    assert_eq!(
+        revoke_ok, 2,
+        "expected the cap_revoke case to pass in both probes, got {revoke_ok}:\n{text}",
+    );
+
+    // cap_revoke of the Net cap: the kernel closed the sockets the
+    // cascade orphaned.
     assert!(
         text.contains(markers::SOCKETS_CLOSED_AT_REVOKE),
         "cap_revoke of the Net cap did not close its sockets:\n{text}",
