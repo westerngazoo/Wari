@@ -14,7 +14,7 @@
 //! lines and focused on its assertion.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,7 +50,22 @@ pub fn workspace_root() -> PathBuf {
 /// - The QEMU child is killed at the end of the budget — no
 ///   indefinite hangs.
 pub fn boot_kernel_capture(wallclock: Duration) -> String {
-    boot_capture(wallclock, &[])
+    boot_capture(&default_kernel(), wallclock, &[])
+}
+
+/// [`boot_kernel_capture`] for a kernel ELF other than the one
+/// `make build` produces — a test that needs its own kernel variant
+/// builds it elsewhere and boots it through here.
+///
+/// # Panics
+///
+/// If `kernel` does not exist or QEMU cannot be spawned.
+pub fn boot_kernel_capture_at(kernel: &Path, wallclock: Duration) -> String {
+    boot_capture(kernel, wallclock, &[])
+}
+
+fn default_kernel() -> PathBuf {
+    workspace_root().join(KERNEL_ELF_REL)
 }
 
 /// QEMU device arguments that give the guest a VirtIO-net NIC on the
@@ -70,12 +85,10 @@ const NET_DEVICE_ARGS: &[&str] = &[
 /// [`boot_kernel_capture`] with a VirtIO-net device attached, for
 /// tests whose property lives in the net driver's init path.
 pub fn boot_kernel_capture_with_net(wallclock: Duration) -> String {
-    boot_capture(wallclock, NET_DEVICE_ARGS)
+    boot_capture(&default_kernel(), wallclock, NET_DEVICE_ARGS)
 }
 
-fn boot_capture(wallclock: Duration, extra_args: &[&str]) -> String {
-    let root = workspace_root();
-    let kernel = root.join(KERNEL_ELF_REL);
+fn boot_capture(kernel: &Path, wallclock: Duration, extra_args: &[&str]) -> String {
     assert!(
         kernel.exists(),
         "kernel ELF not found at {:?}. Run `make build` first.",
@@ -86,7 +99,7 @@ fn boot_capture(wallclock: Duration, extra_args: &[&str]) -> String {
         .args(["-machine", "virt", "-nographic", "-bios", "default"])
         .args(extra_args)
         .arg("-kernel")
-        .arg(&kernel)
+        .arg(kernel)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -124,6 +137,15 @@ pub mod markers {
     /// If absent, signature verification or driver instantiation
     /// failed — the kernel halted in `kmain`'s wfi loop.
     pub const TIER2_LOADED: &str = "tier-2 uart driver loaded";
+
+    /// Printed by `kmain` when the Tier-2 UART driver is refused
+    /// (signature, manifest or instantiation), followed by the typed
+    /// error; the kernel then idles in `wfi`.
+    pub const TIER2_UART_REFUSED: &str = "tier-2 uart load failed";
+
+    /// Banner line of a kernel built with `--features dev-keys`: it
+    /// trusts the in-tree dev key (`kernel/src/boot.rs`).
+    pub const DEV_KEYS_BANNER: &str = "DEV SIGNING KEY ACCEPTED";
 
     /// Prefix of every per-instance line the Tier-1 runner prints
     /// (`kernel/src/runtime/tier1_pool.rs::settle`): `[t1:<proc_id>]`

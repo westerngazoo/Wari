@@ -526,7 +526,9 @@ rather than weakening it.
 ### INV-13 · Tier-2 Bytecode Is Signature-Verified Before Instantiation *(Phase 0; generalizes into INV-11 in Phase 1)*
 
 > Any `.wasm` bytecode loaded at Tier 2 passes signature verification
-> against the kernel's compiled-in ed25519 `ACCEPTED_PUBKEY` before a
+> against the kernel's compiled-in ed25519 `ACCEPTED_PUBKEY` (the
+> production key, or the dev key under `--features dev-keys` — never
+> both; see `security-model.md`, "Signing keys") before a
 > wasmi `Module::new()` is constructed from it. Verification failure
 > aborts the load and the kernel halts in Phase 0 (no Tier-2 driver =
 > no I/O).

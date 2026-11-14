@@ -192,6 +192,51 @@ graph LR
 
 ---
 
+## Signing keys
+
+INV-13 says the kernel runs a Tier-2 driver, or a module arriving at
+runtime, only if its envelope is signed by the key the kernel was
+built to accept. That guarantee is exactly as strong as the custody of
+the secret key, so the model is stated here.
+
+| Key | Public half | Secret half | Accepted by |
+|-|-|-|-|
+| **Production** | `scripts/prod-keys/wari-prod.ed25519.pub` (committed) | Held by the architect, outside every repository. Never in git, never in CI. | Kernels built **without** `dev-keys` — the default |
+| **Dev** | `scripts/dev-keys/wari-dev.ed25519.pub` (committed) | `scripts/dev-keys/wari-dev.ed25519.sec` — committed, **public** | Kernels built with `--features dev-keys` only |
+
+- **One key per image, never both.** The feature swaps the trust root
+  instead of adding to it, so a production image rejects every
+  dev-signed envelope with `BadWasm`.
+- **A dev-keyed image is not a secure image.** Anyone can sign for it.
+  It prints `!! DEV SIGNING KEY ACCEPTED - NOT FOR PRODUCTION` under
+  the boot banner. It exists so QEMU, the test suites and a
+  contributor's own board work from a clean checkout with no secret.
+- **The dev secret stays committed and is not rotated.** It has been
+  public since the first commit that carried it; a replacement in the
+  same directory would be public too. The fix is that production does
+  not trust it.
+- **The kernel image is reproducible from source** (R8): the accepted
+  public key is a tracked file. Reproducing the *signed driver blobs*
+  of a production build needs the secret — ed25519 signing is
+  deterministic, so its holder gets identical bytes.
+- **Build wiring.** `scripts/build.sh` signs VF2 profiles with the
+  file named by `WARI_SIGN_KEY` (default
+  `~/.config/wari/wari-prod.ed25519.sec`) and stops if it is missing;
+  `--dev-keys`, the `qemu` profile and every `make` target use the dev
+  pair. `sign-module` refuses to sign unless the secret derives to the
+  public key the target kernel accepts.
+- **Verification is strict** (`verify_strict`): small-order keys and
+  non-canonical signatures are rejected.
+
+Adversarial test: `tests/security/tests/signing_key_custody.rs` boots
+a production-keyed kernel carrying dev-signed drivers and requires the
+load to be refused without a panic.
+
+Not covered yet: revocation and rotation of the production key (a new
+key means a new kernel image), and hardware custody (HSM or token).
+Until the image itself is attested, whoever can replace the kernel on
+the boot medium can replace the trust root with it.
+
 ## Threat model (Phase 0–1)
 
 | Threat | Likelihood | Impact | Mitigation |

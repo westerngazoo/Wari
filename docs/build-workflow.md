@@ -43,6 +43,13 @@ scripts/build.sh <profile> [--programs a,b,c] [--no-bump] [--publish]
   highest build published from any branch. Without it only the
   release pointer is written and N is the local count.
 
+- `--dev-keys` — sign with the in-tree dev key and build a kernel that
+  accepts it (boot banner: `DEV SIGNING KEY ACCEPTED`). The `qemu`
+  profile always does. Without it, VF2 profiles sign with the
+  production key read from `$WARI_SIGN_KEY` (default
+  `~/.config/wari/wari-prod.ed25519.sec`) and the build stops if that
+  file is missing. See `security-model.md`, "Signing keys".
+
 ## What one invocation always does
 
 1. Host unit-test gate (the pure-logic crates, same as `make test-unit`)
