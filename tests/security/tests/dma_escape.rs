@@ -33,6 +33,13 @@ const TAG_DMA_IDX: &str = "tag=0x444d4169";
 /// `[net:drv] tag=0x444d416c` — 'DMAl', span that starts inside
 /// linear memory and whose length runs past its end.
 const TAG_DMA_LEN: &str = "tag=0x444d416c";
+/// `[net:drv] tag=0x444d4171` — 'DMAq', a driver write to the
+/// queue-size register (the device would walk kernel memory past the
+/// descriptor table).
+const TAG_DMA_QNUM: &str = "tag=0x444d4171";
+/// `[net:drv] tag=0x444d4166` — 'DMAf', accepting a feature that
+/// changes the ring layout the kernel validated.
+const TAG_DMA_FEAT: &str = "tag=0x444d4166";
 /// `cap::syscall::E_INVAL` (-2) as the kernel prints it.
 const E_INVAL_HEX: &str = "val=0xfffffffe";
 
@@ -45,7 +52,13 @@ fn dma_outside_linmem_is_refused() {
         "kernel did not boot:\n{text}",
     );
 
-    for tag in [TAG_DMA_OOB, TAG_DMA_IDX, TAG_DMA_LEN] {
+    for tag in [
+        TAG_DMA_OOB,
+        TAG_DMA_IDX,
+        TAG_DMA_LEN,
+        TAG_DMA_QNUM,
+        TAG_DMA_FEAT,
+    ] {
         let line = text
             .lines()
             .find(|l| l.contains(tag))

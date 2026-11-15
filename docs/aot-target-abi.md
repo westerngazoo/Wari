@@ -347,7 +347,7 @@ the existing `trap.rs` dispatch.
 | Register(s) | Role at a host call | Who preserves |
 |---|---|---|
 | `a0` | **WCTX** (explicit first argument, so the kernel side is a plain `extern "C" fn(ctx: *mut InstanceCtx, …)` — no hand-written assembly on the S-mode path) | caller-saved: compiled code re-materialises it from its own WCTX parameter, which the register allocator spills and reloads like any other live value |
-| `a1`–`a7` | wasm arguments, psABI order. Max arity in the current surface is 5 (`nic_attach_queue`), so 7 slots is ample | caller-saved |
+| `a1`–`a7` | wasm arguments, psABI order. Max arity in the current surface is 4 (`cap_mint`, `nic_attach_queue`, `nic_dma_set_buf`), so 7 slots is ample | caller-saved |
 | `a0` (ret) | result value, zero/sign-extended per psABI | — |
 | `a1` (ret) | **trap code**, 0 = no trap (§3.6) | — |
 | `t0`–`t6`, `a*`, `ft*`/`fa*` | assumed clobbered | caller-saved (psABI) |

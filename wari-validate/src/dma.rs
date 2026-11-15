@@ -163,6 +163,7 @@ mod tests {
 
     #[test]
     fn span_accepts_exact_fit() {
+        assert!(span_in_linmem(4095, 1, 4096));
         assert!(span_in_linmem(0, 4096, 4096));
         assert!(span_in_linmem(4000, 96, 4096));
     }

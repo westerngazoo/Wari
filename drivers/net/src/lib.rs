@@ -284,12 +284,22 @@ const HOST_E_INVAL: i32 = -2;
 
 /// Diagnostic tags for the INV-25 self-check: 'DMAo' (span starting
 /// outside linear memory), 'DMAi' (descriptor index past the ring)
-/// and 'DMAl' (span that starts inside linear memory and runs past
-/// its end). `val` is the kernel's return code; all must read
-/// `0xfffffffe`.
+/// 'DMAl' (span that starts inside linear memory and runs past its
+/// end), 'DMAq' (a write to the queue-size register) and 'DMAf' (a
+/// feature that changes the ring layout). `val` is the kernel's
+/// return code; all must read `0xfffffffe`.
 const TAG_DMA_OOB: u32 = 0x444D_416F;
 const TAG_DMA_IDX: u32 = 0x444D_4169;
 const TAG_DMA_LEN: u32 = 0x444D_416C;
+const TAG_DMA_QNUM: u32 = 0x444D_4171;
+const TAG_DMA_FEAT: u32 = 0x444D_4166;
+
+/// VirtIO MMIO `QueueNum` (VirtIO 1.2 §4.2.2). Kernel-owned: named
+/// here only for the self-check that the kernel refuses it.
+const VIRTIO_MMIO_QUEUE_NUM: u32 = 0x038;
+/// `VIRTIO_RING_F_EVENT_IDX` (bit 29): adds a field the device writes
+/// past the used ring. Named only for the self-check.
+const VIRTIO_RING_F_EVENT_IDX: u32 = 29;
 
 // ── Virtqueue ring storage (PR Net-4c) ───────────────────────────
 //
@@ -2230,15 +2240,20 @@ fn init_virtio() -> Result<[u8; 6], ()> {
     attach_queue(1, tx_avail_off, tx_used_off)?;
 
     // INV-25 self-check (ADR-002 step 1). The kernel must refuse to
-    // aim the DMA engine outside our linear memory. Three calls that
-    // have to fail — a span that starts past the end of memory, a
-    // descriptor index past the ring, and a span that starts inside
-    // memory but whose length runs off the end — logged as DMAo /
-    // DMAi / DMAl with the kernel's return code. If any is accepted
-    // the containment is gone, and this driver refuses to bring the
-    // device up rather than run on a kernel that no longer checks.
-    // The adversarial test `tests/security/tests/dma_escape.rs`
-    // asserts all three tags.
+    // let us aim the DMA engine outside our linear memory. Five
+    // attempts that have to fail, logged with the kernel's return
+    // code:
+    //   DMAo  a span that starts past the end of memory
+    //   DMAi  a descriptor index past the ring
+    //   DMAl  a span that starts inside memory and runs off the end
+    //   DMAq  raising the queue size, so the device would read kernel
+    //         memory beyond the descriptor table as descriptors
+    //   DMAf  accepting EVENT_IDX, which makes the device write past
+    //         the used ring the kernel validated
+    // If any is accepted the containment is gone, and this driver
+    // refuses to bring the device up rather than run on a kernel that
+    // no longer checks. The adversarial test
+    // `tests/security/tests/dma_escape.rs` asserts all five tags.
     // SAFETY: extern host-fns; on a rejected call nothing is written.
     let rc_oob = unsafe { wari_nic_dma_set_buf(RING_RX, 0, u32::MAX - 64, ETH_FRAME_MAX as u32) };
     let _ = unsafe { wari_drv_log_u32(TAG_DMA_OOB, rc_oob as u32) };
@@ -2247,7 +2262,19 @@ fn init_virtio() -> Result<[u8; 6], ()> {
     let _ = unsafe { wari_drv_log_u32(TAG_DMA_IDX, rc_idx as u32) };
     let rc_len = unsafe { wari_nic_dma_set_buf(RING_RX, 0, rx_avail_off, u32::MAX / 2) };
     let _ = unsafe { wari_drv_log_u32(TAG_DMA_LEN, rc_len as u32) };
-    if rc_oob != HOST_E_INVAL || rc_idx != HOST_E_INVAL || rc_len != HOST_E_INVAL {
+    let rc_qnum = unsafe { wari_net_mmio_write32(plat::NIC_BASE + VIRTIO_MMIO_QUEUE_NUM, 1024) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_QNUM, rc_qnum as u32) };
+    let rc_feat = unsafe {
+        wari_net_mmio_write32(
+            plat::NIC_BASE + VIRTIO_MMIO_DRIVER_FEATURES,
+            1 << VIRTIO_RING_F_EVENT_IDX,
+        )
+    };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_FEAT, rc_feat as u32) };
+    if [rc_oob, rc_idx, rc_len, rc_qnum, rc_feat]
+        .iter()
+        .any(|&rc| rc != HOST_E_INVAL)
+    {
         return Err(());
     }
 

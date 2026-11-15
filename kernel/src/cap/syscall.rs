@@ -532,15 +532,17 @@ pub fn nic_attach_queue_impl<T>(
 
     // Argument validation.
     // - queue_idx: 0 = rx, 1 = tx for VirtIO-net
-    // - queue_size: power of 2, ≤ 256 (VirtIO 1.2 §2.6 caps at 32768
-    //   but Phase 1b uses much smaller; we cap conservatively)
-    if queue_idx > 1 {
+    // - queue_size: a power of 2 (VirtIO 1.2 §2.7) no larger than the
+    //   descriptor table the kernel reserves per ring.
+    if queue_idx as usize >= crate::mmio::dma_mem::RINGS {
         return E_INVAL;
     }
-    if queue_size == 0 || queue_size > 256 || !queue_size.is_power_of_two() {
+    if !queue_size.is_power_of_two()
+        || queue_size > wari_validate::dma::KERNEL_RING_ENTRIES
+    {
         return E_INVAL;
     }
-    // VirtIO 1.2 §2.6 alignment: available ring 2-byte, used ring
+    // VirtIO 1.2 §2.7 alignment: available ring 2-byte, used ring
     // 4-byte. Reject misaligned offsets. (The descriptor table is the
     // kernel's and is aligned by construction.)
     if avail_off & 0x1 != 0 {
@@ -560,9 +562,14 @@ pub fn nic_attach_queue_impl<T>(
     let mem_len = mem_data.len();
 
     // Bounds check: every offset + the ring size it implies must fit
-    // entirely within lin-mem.
-    let avail_size = 4usize + 2 * queue_size as usize;
-    let used_size = 4usize + 8 * queue_size as usize;
+    // entirely within lin-mem. Sizes include the trailing event field
+    // (`used_event` after the available ring, `avail_event` after the
+    // used ring; VirtIO 1.2 §2.7.6, §2.7.8). The driver cannot
+    // negotiate the feature that makes the device use them
+    // (`BoardDescriptor::write_masks`), but the span the device could
+    // ever touch is what gets validated.
+    let avail_size = 6usize + 2 * queue_size as usize;
+    let used_size = 6usize + 8 * queue_size as usize;
     if (avail_off as usize)
         .checked_add(avail_size)
         .map_or(true, |end| end > mem_len)
@@ -586,15 +593,6 @@ pub fn nic_attach_queue_impl<T>(
     {
         let base = NIC_BASE_FOR_QUEUE_ATTACH;
 
-        // INV-25: the descriptor table is kernel memory. Claiming it
-        // zeroes it and binds the ring to this driver; from here on
-        // only `nic_dma_set_buf` stores to it, after validating the
-        // span. A queue larger than the kernel reserves is refused.
-        let Some(desc_pa) = crate::mmio::dma_mem::claim(queue_idx as usize, proc_id, queue_size)
-        else {
-            return E_INVAL;
-        };
-
         // Defensive: validator-narrowed range. The kernel already
         // gates net_mmio_* host fns, but this path bypasses the
         // host fn (writes happen directly inside the kernel) — so
@@ -612,7 +610,19 @@ pub fn nic_attach_queue_impl<T>(
             return E_INVAL;
         }
 
-        // Step 3 — set queue size.
+        // INV-25: the descriptor table is kernel memory. Claiming it
+        // zeroes it and binds the ring to this driver; from here on
+        // only `nic_dma_set_buf` stores to it, after validating the
+        // span. Done after every check that can refuse, so a refused
+        // attach leaves no ring claimed.
+        let Some(desc_pa) = crate::mmio::dma_mem::claim(queue_idx as usize, proc_id, queue_size)
+        else {
+            return E_INVAL;
+        };
+
+        // Step 3 — set queue size. The driver cannot change it
+        // afterwards: the queue registers are refused to it
+        // (`BoardDescriptor::dma_addr_regs`).
         write32(base + VIRTIO_MMIO_QUEUE_NUM, queue_size);
 
         // Step 4 — write the three ring physical addresses.
@@ -703,6 +713,9 @@ pub fn nic_queue_notify_impl(proc_id: u8, queue_idx: u32) -> i32 {
     }
     #[cfg(feature = "qemu")]
     {
+        // The descriptors this doorbell announces were stored to
+        // memory by earlier host calls; order them first (R6).
+        crate::mmio::barrier_before_device_write();
         write32(
             NIC_BASE_FOR_QUEUE_ATTACH + VIRTIO_MMIO_QUEUE_NOTIFY,
             queue_idx,

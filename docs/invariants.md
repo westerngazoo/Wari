@@ -479,13 +479,26 @@ The driver names a buffer by linear-memory offset and length through
 `wari::nic_dma_set_buf`; `cap::dma::nic_dma_set_buf_impl` checks the
 span and the descriptor index (`wari_validate::dma`, host-tested) and
 writes the whole descriptor — address, length, direction — itself.
-`nic_attach_queue` claims the table and programs it into the device;
-`net_mmio_write32` refuses the VirtIO queue-address registers
-(`BoardDescriptor::dma_addr_regs`). The driver's self-check at init
-makes three calls that must be refused and will not bring the device
-up if any is accepted (`tests/security/tests/dma_escape.rs`);
+`nic_attach_queue` claims the table and programs it into the device.
+The registers that decide what the device walks are the kernel's too:
+`net_mmio_write32` refuses every VirtIO queue register — addresses,
+`QueueSel`, `QueueNum`, `QueueReady`, `QueueNotify`
+(`BoardDescriptor::dma_addr_regs`) — and accepts `DriverFeatures`
+only with the bits that leave the ring layout alone
+(`BoardDescriptor::write_masks`: no `EVENT_IDX`, `INDIRECT_DESC`,
+`RING_PACKED`). A live descriptor is rewritten through a state that
+names nothing (`mmio::dma_mem::store`), and the doorbell is ordered
+after the descriptor stores (`fence w,o`). The driver's self-check at
+init makes five attempts that must be refused and will not bring the
+device up if any is accepted (`tests/security/tests/dma_escape.rs`);
 `dma_kernel_rings.rs` proves the device really uses the kernel's
 tables by passing a frame through each DMA direction.
+
+Not covered: a ring is never released (the net driver is a boot
+singleton, INV-14); and physical addresses are formed from the linear
+memory's base at call time, which is only sound while that memory
+does not move — the driver modules contain no `memory.grow`, and
+nothing yet forbids one that did.
 
 An earlier version of this fix wrote the validated address into a
 descriptor that stayed in the driver's linear memory. That was not

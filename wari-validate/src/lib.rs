@@ -177,6 +177,41 @@ pub const fn access_in_windows(addr: usize, width: usize, windows: &[MmioWindow]
     false
 }
 
+/// A register a driver may write, but only with bits inside
+/// `allowed`. Pure data, like [`MmioWindow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteMask {
+    /// Address of the 32-bit register.
+    pub addr: usize,
+    /// Bits the driver may set; any other bit refuses the write.
+    pub allowed: u32,
+}
+
+/// May a driver write `val` to the 32-bit register at `addr`, given
+/// the value guards in `masks`? A register with no guard accepts any
+/// value (its *address* is licensed elsewhere); a guarded register
+/// accepts only values within its mask.
+///
+/// ```
+/// use wari_validate::{write_value_allowed, WriteMask};
+/// const G: &[WriteMask] = &[WriteMask { addr: 0x20, allowed: 0b0011 }];
+/// assert!(write_value_allowed(0x20, 0b0001, G));   // inside the mask
+/// assert!(write_value_allowed(0x20, 0, G));        // nothing set
+/// assert!(!write_value_allowed(0x20, 0b0100, G));  // a bit outside it
+/// assert!(write_value_allowed(0x24, 0xFFFF_FFFF, G)); // not guarded
+/// ```
+#[inline]
+pub const fn write_value_allowed(addr: usize, val: u32, masks: &[WriteMask]) -> bool {
+    let mut i = 0;
+    while i < masks.len() {
+        if masks[i].addr == addr {
+            return val & !masks[i].allowed == 0;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Per-platform board descriptors (audit blocker B3) — every constant
 /// that differs by SoC, as one record per platform. See `board`.
 pub mod board;
@@ -222,14 +257,37 @@ pub mod windows {
             len: 0x8000,
         }];
 
-        /// Registers that take a DMA *address*, which the driver may
-        /// not write through `net_mmio_write32`: the kernel programs
-        /// them itself from validated offsets (ADR-002 step 1,
-        /// INV-25). VirtIO 1.2 §4.2.2: `QueueDescLow/High` (0x080,
-        /// 0x084), `QueueDriverLow/High` (0x090, 0x094),
-        /// `QueueDeviceLow/High` (0x0a0, 0x0a4), written by
-        /// `nic_attach_queue`.
+        /// Registers that decide what the device's DMA touches, which
+        /// the driver may not write through `net_mmio_write32`: the
+        /// kernel programs them itself (ADR-002 step 1, INV-25).
+        /// VirtIO 1.2 §4.2.2:
+        ///
+        /// - `QueueSel` (0x030), `QueueNum` (0x038), `QueueReady`
+        ///   (0x044) and the legacy slots between them. Addresses
+        ///   alone are not enough: a driver that could raise
+        ///   `QueueNum` past the kernel's 16-entry table would have
+        ///   the device walk kernel memory as descriptors and size
+        ///   the available and used rings past what was validated;
+        ///   one that could select a queue could re-ready it.
+        /// - `QueueNotify` (0x050): the driver notifies through
+        ///   `nic_queue_notify`, which orders the doorbell after the
+        ///   descriptor stores.
+        /// - `QueueDescLow/High` (0x080), `QueueDriverLow/High`
+        ///   (0x090), `QueueDeviceLow/High` (0x0a0): the addresses.
+        ///
+        /// All are written by `nic_attach_queue` / `nic_queue_notify`.
+        /// The driver keeps `Status`, the feature registers (value-
+        /// checked, see [`WRITE_MASKS`]), the interrupt registers and
+        /// the device config space.
         pub const DMA_ADDR_REGS: &[MmioWindow] = &[
+            MmioWindow {
+                base: 0x1000_8030,
+                len: 0x18,
+            },
+            MmioWindow {
+                base: 0x1000_8050,
+                len: 0x4,
+            },
             MmioWindow {
                 base: 0x1000_8080,
                 len: 0x8,
@@ -243,6 +301,28 @@ pub mod windows {
                 len: 0x8,
             },
         ];
+
+        /// Registers the driver may write only with a restricted
+        /// value. One entry: `DriverFeatures` (0x020).
+        ///
+        /// Feature negotiation changes the shape of the rings the
+        /// kernel validated. `VIRTIO_RING_F_EVENT_IDX` (bit 29) adds
+        /// a field the device writes after the used ring;
+        /// `VIRTIO_RING_F_INDIRECT_DESC` (bit 28) lets a descriptor
+        /// point at a driver-supplied descriptor table;
+        /// `VIRTIO_F_RING_PACKED` (bit 34) replaces the layout
+        /// altogether. The driver may therefore accept exactly what
+        /// it uses today: `VIRTIO_NET_F_MAC` (bit 5, low word) and
+        /// `VIRTIO_F_VERSION_1` (bit 32 = bit 0 of the high word).
+        /// The register is written once per word behind
+        /// `DriverFeaturesSel`; the mask is the union of both words'
+        /// allowed bits, and neither bit is a ring feature in the
+        /// other word (bit 0: `VIRTIO_NET_F_CSUM`; bit 37:
+        /// `VIRTIO_F_SR_IOV`), so the check needs no selector state.
+        pub const WRITE_MASKS: &[crate::WriteMask] = &[crate::WriteMask {
+            addr: 0x1000_8020,
+            allowed: (1 << 5) | 1,
+        }];
     }
 
     /// Orange Pi R2S (Ky X1 / SpacemiT K1) platform windows.
@@ -271,6 +351,9 @@ pub mod windows {
         /// DMA address registers the driver may not write directly.
         /// Empty until the R2S NIC is named.
         pub const DMA_ADDR_REGS: &[MmioWindow] = &[];
+
+        /// Value-restricted registers. None yet on this platform.
+        pub const WRITE_MASKS: &[crate::WriteMask] = &[];
     }
 
     /// StarFive VisionFive 2 (JH7110) platform windows.
@@ -380,6 +463,9 @@ pub mod windows {
         /// kernel in the VF2 PR, which fills this table at the same
         /// time. Filling it earlier would brick the VF2 network.
         pub const DMA_ADDR_REGS: &[MmioWindow] = &[];
+
+        /// Value-restricted registers. None yet on this platform.
+        pub const WRITE_MASKS: &[crate::WriteMask] = &[];
     }
 }
 

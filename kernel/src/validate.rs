@@ -55,6 +55,15 @@ pub const fn is_net_mmio_access(addr: usize, width: usize) -> bool {
 /// from the board descriptor. See `BoardDescriptor::dma_addr_regs`.
 pub const DMA_ADDR_REGS: &[MmioWindow] = crate::board::BOARD.dma_addr_regs;
 
+/// May the driver write `val` to the NIC register at `addr`? Some
+/// registers are licensed but value-restricted: bits in them change
+/// the DMA ring layout the kernel validated (INV-25). See
+/// `BoardDescriptor::write_masks`.
+#[inline]
+pub const fn is_net_mmio_value_allowed(addr: usize, val: u32) -> bool {
+    wari_validate::write_value_allowed(addr, val, crate::board::BOARD.write_masks)
+}
+
 /// Does a `width`-byte access at `addr` touch a register that takes
 /// a DMA address?
 ///

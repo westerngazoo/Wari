@@ -153,10 +153,16 @@ kernel checks the span and writes the whole descriptor — address,
 length and direction. Validating only the address, or validating it
 into a descriptor the driver can still write, is not containment: the
 length next to it, and the address itself after the check, would
-remain the driver's to change. On the GMAC the same reasoning extends
-to the registers that set ring length, receive buffer size and
-descriptor stride. A hardware IOPMP/PMP fence is not available on the
-JH7110.
+remain the driver's to change. The same holds for the registers
+around the table: the queue size, selection and readiness registers
+are the kernel's (a larger queue size would have the device read
+kernel memory past the table as descriptors), and the driver may only
+negotiate features that leave the ring layout as validated. On the
+GMAC the same reasoning extends to the registers that set ring
+length, receive buffer size and descriptor stride. A hardware
+IOPMP/PMP fence is not available on the JH7110. The driver can still
+learn its physical base through `lin_mem_base` until that host
+function is retired with the GMAC change.
 
 **Rule**: a feature that crosses a trust boundary (adds a host fn,
 adds a capability, widens driver MMIO surface) does not merge until

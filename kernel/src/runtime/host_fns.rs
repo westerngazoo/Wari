@@ -287,6 +287,12 @@ fn host_net_mmio_write32(_caller: Caller<'_, Tier2HostState>, addr: u32, val: u3
     if validate::is_dma_addr_register(addr as usize, 4) {
         return E_INVAL;
     }
+    // Some registers the driver does own carry bits that change the
+    // shape of the DMA rings the kernel validated (VirtIO feature
+    // negotiation). Those accept only the values the board allows.
+    if !validate::is_net_mmio_value_allowed(addr as usize, val) {
+        return E_INVAL;
+    }
     // Order every prior memory write ahead of this device write.
     //
     // This is the barrier INV-25 records as missing, and it has to

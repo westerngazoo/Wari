@@ -75,12 +75,16 @@ pub struct BoardDescriptor {
     /// for what it may touch. They coincide on VF2 and differ on QEMU
     /// (mapped `0x8000` ⊋ licensed `0x200`), so this is its own field.
     pub mmio_regions: &'static [MmioWindow],
-    /// NIC registers that take a DMA *address*. A *subset* of
-    /// [`net_windows`]: the driver may touch the window, but these
-    /// registers are written only by the kernel, from offsets it has
-    /// validated against the driver's linear memory (INV-25, ADR-002
-    /// step 1). `net_mmio_write32` refuses them.
+    /// NIC registers that decide what the device's DMA touches —
+    /// addresses, queue size, queue selection and readiness. A
+    /// *subset* of [`net_windows`]: the driver may touch the window,
+    /// but these registers are written only by the kernel (INV-25,
+    /// ADR-002 step 1). `net_mmio_write32` refuses them.
     pub dma_addr_regs: &'static [MmioWindow],
+    /// NIC registers the driver may write only with a restricted
+    /// value, because some of their bits change the ring layout the
+    /// kernel validated (INV-25). `net_mmio_write32` checks the value.
+    pub write_masks: &'static [crate::WriteMask],
     /// Is the NIC's DMA master cache-coherent with the CPU on this SoC?
     /// `true` on JH7110 (proven) and QEMU; a third board decides this
     /// by experiment. When `false`, the net driver's (future) CMO hooks
@@ -102,6 +106,7 @@ pub const QEMU: BoardDescriptor = BoardDescriptor {
     net_windows: crate::windows::qemu::NET_WINDOWS,
     mmio_regions: crate::windows::qemu::MMIO_REGIONS,
     dma_addr_regs: crate::windows::qemu::DMA_ADDR_REGS,
+    write_masks: crate::windows::qemu::WRITE_MASKS,
     dma_coherent: true,
 };
 
@@ -119,6 +124,7 @@ pub const VF2: BoardDescriptor = BoardDescriptor {
     net_windows: crate::windows::vf2::NET_WINDOWS,
     mmio_regions: crate::windows::vf2::MMIO_REGIONS,
     dma_addr_regs: crate::windows::vf2::DMA_ADDR_REGS,
+    write_masks: crate::windows::vf2::WRITE_MASKS,
     dma_coherent: true,
 };
 
@@ -156,6 +162,7 @@ pub const R2S: BoardDescriptor = BoardDescriptor {
     net_windows: crate::windows::r2s::NET_WINDOWS,   // empty until DT names the MAC
     mmio_regions: crate::windows::r2s::MMIO_REGIONS, // empty: UART+PLIC map from scalars
     dma_addr_regs: crate::windows::r2s::DMA_ADDR_REGS, // empty until DT names the MAC
+    write_masks: crate::windows::r2s::WRITE_MASKS,     // empty until DT names the MAC
     dma_coherent: false,      // UNKNOWN — conservative default; set by bring-up experiment
 };
 
@@ -249,17 +256,50 @@ mod tests {
                 );
             }
         }
-        // QEMU: the three VirtIO queue address pairs (VirtIO 1.2 §4.2.2).
+        // QEMU: every VirtIO queue register (VirtIO 1.2 §4.2.2).
         let regs = QEMU.dma_addr_regs;
-        assert_eq!(regs.len(), 3);
-        // QueueDescLow (0x080) and QueueDeviceHigh (0x0a4) are refused.
+        // The address pairs: QueueDescLow (0x080) .. QueueDeviceHigh (0x0a4).
         assert!(crate::access_in_windows(0x1000_8080, 4, regs));
+        assert!(crate::access_in_windows(0x1000_8094, 4, regs));
         assert!(crate::access_in_windows(0x1000_80a4, 4, regs));
-        // QueueNotify (0x050) stays writable by the driver.
-        assert!(!crate::access_in_windows(0x1000_8050, 4, regs));
+        // Queue shape and liveness: QueueSel, QueueNum, QueueReady.
+        assert!(crate::access_in_windows(0x1000_8030, 4, regs));
+        assert!(crate::access_in_windows(0x1000_8038, 4, regs));
+        assert!(crate::access_in_windows(0x1000_8044, 4, regs));
+        // The doorbell goes through `nic_queue_notify`.
+        assert!(crate::access_in_windows(0x1000_8050, 4, regs));
+        // What the driver keeps: features, interrupt ack, status, config.
+        for kept in [0x1000_8020, 0x1000_8024, 0x1000_8064, 0x1000_8070, 0x1000_8100] {
+            assert!(
+                !crate::access_in_windows(kept, 4, regs),
+                "{kept:#x} must stay writable by the driver"
+            );
+        }
         // VF2 is filled by the GMAC PR; until then the driver programs
         // the DWMAC list/tail registers itself (see windows::vf2).
         assert!(VF2.dma_addr_regs.is_empty());
+    }
+
+    #[test]
+    fn qemu_driver_features_accept_only_what_keeps_the_ring_layout() {
+        const DRIVER_FEATURES: usize = 0x1000_8020;
+        let m = QEMU.write_masks;
+        // What the driver negotiates today: MAC (low word), VERSION_1
+        // (bit 0 of the high word).
+        assert!(crate::write_value_allowed(DRIVER_FEATURES, 1 << 5, m));
+        assert!(crate::write_value_allowed(DRIVER_FEATURES, 1, m));
+        assert!(crate::write_value_allowed(DRIVER_FEATURES, 0, m));
+        // Ring-shape features are refused in either word.
+        assert!(!crate::write_value_allowed(DRIVER_FEATURES, 1 << 29, m)); // EVENT_IDX
+        assert!(!crate::write_value_allowed(DRIVER_FEATURES, 1 << 28, m)); // INDIRECT_DESC
+        assert!(!crate::write_value_allowed(DRIVER_FEATURES, 1 << 2, m)); // RING_PACKED (bit 34)
+        assert!(!crate::write_value_allowed(DRIVER_FEATURES, 1 << 15, m)); // MRG_RXBUF
+        assert!(!crate::write_value_allowed(DRIVER_FEATURES, u32::MAX, m));
+        // Status is not value-guarded.
+        assert!(crate::write_value_allowed(0x1000_8070, u32::MAX, m));
+        // No guards on the other boards yet.
+        assert!(VF2.write_masks.is_empty());
+        assert!(R2S.write_masks.is_empty());
     }
 
     #[test]

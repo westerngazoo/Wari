@@ -65,10 +65,12 @@ fn frames_cross_both_dma_directions_through_kernel_owned_descriptors() {
     );
     let frames = pcap_frames(&wire);
 
-    // Control: the request really went out to the guest. Without it
-    // a missing reply would say nothing about the guest.
+    // Control: a request not sent by the guest really went out.
+    // Without it a missing reply would say nothing about the guest.
     assert!(
-        frames.iter().any(|f| is_arp(f, ARP_REQUEST, None)),
+        frames
+            .iter()
+            .any(|f| is_arp(f, ARP_REQUEST, None) && !is_arp(f, ARP_REQUEST, Some(GUEST_MAC))),
         "no ARP request reached the wire ({} frames captured) — harness problem:\n{text}",
         frames.len(),
     );

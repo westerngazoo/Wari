@@ -17,6 +17,24 @@
 //!     driver lands in PR 5.
 
 pub mod dma_mem;
+
+/// Order every earlier store to memory ahead of the device write that
+/// follows (`fence w,o`).
+///
+/// A device reads descriptors from ordinary memory and is told to
+/// look by a register write. RISC-V's memory model does not order a
+/// store to memory before a later store to a device, so without this
+/// the doorbell can reach the device first: it reads a stale
+/// descriptor. That is the RX wedge build 155 exposed on the VF2
+/// (INV-25, "Ordering"). Same barrier as Linux's `__io_bw()` before
+/// `writel`. Call it immediately before a doorbell write.
+#[inline]
+pub fn barrier_before_device_write() {
+    // SAFETY: INV-7 — `fence` is unprivileged and always legal.
+    unsafe {
+        core::arch::asm!("fence w,o", options(nostack, preserves_flags));
+    }
+}
 pub mod plic;
 pub mod uart_ns16550;
 pub mod volatile;

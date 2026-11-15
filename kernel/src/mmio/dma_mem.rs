@@ -108,10 +108,10 @@ pub fn claim(ring: usize, owner: u8, entries: u32) -> Option<u64> {
 /// - Returns `false`, storing nothing, if `ring >= RINGS`, the ring
 ///   is not claimed by `owner`, or `idx` is not one of its
 ///   descriptors (`wari_validate::dma::desc_index_ok`).
-/// - Postcondition on `true`: the 16 bytes are in the table and the
-///   store is ordered before whatever the caller does next (see
-///   [`store`]). The descriptor is not live until the driver publishes
-///   its index to the device, which is a later, separate step.
+/// - Postcondition on `true`: the 16 bytes are in the table, written
+///   in an order that never exposes a half-updated descriptor (see
+///   [`store`]). Ordering against the device's doorbell is the
+///   notify path's job (`mmio::barrier_before_device_write`).
 /// - Never panics.
 pub fn write_desc(ring: usize, owner: u8, idx: u32, bytes: [u8; DESC_SIZE]) -> bool {
     if ring >= RINGS {
@@ -128,19 +128,48 @@ pub fn write_desc(ring: usize, owner: u8, idx: u32, bytes: [u8; DESC_SIZE]) -> b
 
 /// The one store into descriptor memory. `ring < RINGS` and
 /// `idx < KERNEL_RING_ENTRIES` are the callers' checks.
+///
+/// The descriptor may be **live**: a driver can ask to re-aim one the
+/// device is free to read at any moment. A 16-byte store is not
+/// atomic, and a half-written descriptor — the new address beside
+/// the old length — can name memory outside the driver's. So the
+/// update goes through a state that names nothing:
+///
+/// 1. the upper half (bytes 8..16) is zeroed;
+/// 2. the lower half (bytes 0..8, the address on both engines) is
+///    written;
+/// 3. the upper half is written.
+///
+/// With the upper half zero a VirtIO descriptor has length 0 and a
+/// DWMAC4 descriptor has OWN clear: in both cases the device has
+/// nothing to act on. Each half is one aligned 64-bit store.
 fn store(ring: usize, idx: u32, bytes: [u8; DESC_SIZE]) {
+    let lower = u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    let upper = u64::from_le_bytes([
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    ]);
     // SAFETY: INV-1 (single hart) and INV-25: MEM is kernel-owned
-    // descriptor memory that no Rust reference aliases; the pointer
-    // is in bounds by the callers' checks and aligned (u8 array
-    // inside a 64-byte-aligned struct). The device may be reading
-    // this memory, which is why the write is volatile.
-    let slot =
-        unsafe { VolatilePtr::new(addr_of_mut!((*addr_of_mut!(MEM))[ring].0[idx as usize])) };
-    slot.write(bytes);
-    // Barrier (R6): the descriptor must be in memory before the
-    // device is told about it. The driver publishes the index and
-    // notifies the device through later host calls; `fence rw,rw`
-    // here orders this store before any of those MMIO writes
-    // regardless of how the calls are inlined or reordered.
+    // descriptor memory that no Rust reference aliases. The pointers
+    // are in bounds by the callers' checks; each descriptor starts at
+    // a multiple of 16 bytes inside a 64-byte-aligned struct, so both
+    // halves are aligned for `u64`. The device may be reading this
+    // memory, which is why every write is volatile.
+    let (lo, hi) = unsafe {
+        let base = addr_of_mut!((*addr_of_mut!(MEM))[ring].0[idx as usize]) as *mut u64;
+        (VolatilePtr::new(base), VolatilePtr::new(base.add(1)))
+    };
+    // Barriers (R6): `fence rw,rw` after each store makes the three
+    // visible to the device in this order, not in whatever order the
+    // store buffer drains (RVWMO does not order a hart's stores as
+    // seen by another observer). It does **not** order them before a
+    // later device write; that is `mmio::barrier_before_device_write`
+    // on the doorbell path.
+    hi.write(0);
+    fence(Ordering::SeqCst);
+    lo.write(lower);
+    fence(Ordering::SeqCst);
+    hi.write(upper);
     fence(Ordering::SeqCst);
 }

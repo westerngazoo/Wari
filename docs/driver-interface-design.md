@@ -273,7 +273,9 @@ pub enum FuncSig {
     /// () -> u64  — rx_pop (packed return), lin_mem_base
     Unit_U64 = 6,
 
-    /// (u32, u32) -> i32 with two more u32 — nic_attach_queue
+    /// (u32, u32) -> i32 with two more u32 — formerly
+    /// nic_attach_queue, which now takes four arguments (the
+    /// descriptor table moved into the kernel)
     /// (placeholder; full N-arg signatures get explicit variants
     /// as needed)
     U32x5_I32 = 7,
