@@ -108,10 +108,13 @@ pub fn claim(ring: usize, owner: u8, entries: u32) -> Option<u64> {
 /// - Returns `false`, storing nothing, if `ring >= RINGS`, the ring
 ///   is not claimed by `owner`, or `idx` is not one of its
 ///   descriptors (`wari_validate::dma::desc_index_ok`).
+/// - Precondition: if the descriptor may be live, the caller has
+///   checked that mixing its old and new contents is safe (see
+///   [`store`]).
 /// - Postcondition on `true`: the 16 bytes are in the table, written
-///   in an order that never exposes a half-updated descriptor (see
-///   [`store`]). Ordering against the device's doorbell is the
-///   notify path's job (`mmio::barrier_before_device_write`).
+///   through a cleared state so no instant shows half of each. Ordering
+///   against the device's doorbell is the notify path's job
+///   (`mmio::barrier_before_device_write`).
 /// - Never panics.
 pub fn write_desc(ring: usize, owner: u8, idx: u32, bytes: [u8; DESC_SIZE]) -> bool {
     if ring >= RINGS {
@@ -126,6 +129,41 @@ pub fn write_desc(ring: usize, owner: u8, idx: u32, bytes: [u8; DESC_SIZE]) -> b
     true
 }
 
+/// Read back descriptor `idx` of ring `ring`, on behalf of the
+/// driver process `owner`, as the kernel last stored it.
+///
+/// For the kernel's own use (deciding whether a rewrite is safe); a
+/// driver never receives these bytes. On VirtIO the device does not
+/// write descriptors, so this is exactly what was stored.
+///
+/// Returns `None` under the same conditions [`write_desc`] returns
+/// `false`. Never panics.
+pub fn read_desc(ring: usize, owner: u8, idx: u32) -> Option<[u8; DESC_SIZE]> {
+    if ring >= RINGS {
+        return None;
+    }
+    // SAFETY: INV-1 — single hart; read of a Copy value.
+    let state = unsafe { (*addr_of_mut!(STATE))[ring] };
+    if state.owner != Some(owner) || !desc_index_ok(state.entries, idx) {
+        return None;
+    }
+    // SAFETY: as in `store`: INV-1 + INV-25, in bounds by the check
+    // above, aligned for `u64`. Volatile because a device shares this
+    // memory.
+    let (lo, hi) = unsafe {
+        let base = addr_of_mut!((*addr_of_mut!(MEM))[ring].0[idx as usize]) as *mut u64;
+        (
+            VolatilePtr::new(base).read(),
+            VolatilePtr::new(base.add(1)).read(),
+        )
+    };
+    let (l, h) = (lo.to_le_bytes(), hi.to_le_bytes());
+    Some([
+        l[0], l[1], l[2], l[3], l[4], l[5], l[6], l[7], h[0], h[1], h[2], h[3], h[4], h[5], h[6],
+        h[7],
+    ])
+}
+
 /// The one store into descriptor memory. `ring < RINGS` and
 /// `idx < KERNEL_RING_ENTRIES` are the callers' checks.
 ///
@@ -133,7 +171,11 @@ pub fn write_desc(ring: usize, owner: u8, idx: u32, bytes: [u8; DESC_SIZE]) -> b
 /// device is free to read at any moment. A 16-byte store is not
 /// atomic, and a half-written descriptor — the new address beside
 /// the old length — can name memory outside the driver's. So the
-/// update goes through a state that names nothing:
+/// update goes through a state that names nothing. This covers every
+/// instantaneous state; it cannot cover a device that reads the two
+/// halves at different times, which is why callers also refuse a
+/// re-aim whose old/new mixtures would leave the driver's memory
+/// (`wari_validate::dma::reaim_keeps_mixtures_inside`).
 ///
 /// 1. the upper half (bytes 8..16) is zeroed;
 /// 2. the lower half (bytes 0..8, the address on both engines) is

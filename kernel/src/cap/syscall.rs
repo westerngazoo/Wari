@@ -485,17 +485,18 @@ const NIC_BASE_FOR_QUEUE_ATTACH: u32 = 0x1000_8000;
 ///
 /// 1. Cap-checks `Net + WRITE` at slot 0 (the driver's root cap).
 /// 2. Resolves the calling instance's WASM linear memory.
-/// 3. Claims a kernel-owned descriptor table for the queue
-///    (`mmio::dma_mem`, INV-25). The driver supplies none: the
-///    table holds the addresses and lengths the device acts on, so
-///    it must not be storable from the sandbox.
-/// 4. Bounds-checks the two ring offsets against the lin-mem size
+/// 3. Bounds-checks the two ring offsets against the lin-mem size
 ///    and their alignment, and translates them to physical addresses
 ///    (the bump-allocator arena is identity-mapped, so kernel-virtual
 ///    = physical for everything wasmi allocates). The available ring
 ///    holds descriptor *indexes* and the used ring is written by the
 ///    device inside the span checked here; neither carries an
 ///    address, so both may stay in the driver's memory.
+/// 4. Refuses a queue that is still ready, then claims a
+///    kernel-owned descriptor table for it (`mmio::dma_mem`,
+///    INV-25). The driver supplies none: the table holds the
+///    addresses and lengths the device acts on, so it must not be
+///    storable from the sandbox.
 /// 5. Writes the VirtIO MMIO queue-config registers per VirtIO 1.2
 ///    §4.2.2.2: `QueueSel`, `QueueNum`, `QueueDescLow/High`,
 ///    `QueueDriverLow/High`, `QueueDeviceLow/High`, `QueueReady`.
@@ -603,6 +604,16 @@ pub fn nic_attach_queue_impl<T>(
 
         // Step 1 — select the queue we're configuring (§4.2.2.2).
         write32(base + VIRTIO_MMIO_QUEUE_SEL, queue_idx);
+
+        // A queue the device is using is not reconfigured (§4.2.2.2:
+        // queue registers change only while QueueReady is 0). Changing
+        // its size before its ring addresses would, for a moment,
+        // leave the device sizing the old rings with the new count,
+        // and claiming would clear a table it is reading. The driver
+        // resets the device (Status = 0) first, which drops readiness.
+        if read32(base + VIRTIO_MMIO_QUEUE_READY) != 0 {
+            return E_INVAL;
+        }
 
         // Step 2 — verify QueueNumMax ≥ our queue_size.
         let qmax = read32(base + VIRTIO_MMIO_QUEUE_NUM_MAX);

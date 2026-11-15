@@ -268,6 +268,8 @@ mod tests {
         assert!(crate::access_in_windows(0x1000_8044, 4, regs));
         // The doorbell goes through `nic_queue_notify`.
         assert!(crate::access_in_windows(0x1000_8050, 4, regs));
+        // QueueReset.
+        assert!(crate::access_in_windows(0x1000_80c0, 4, regs));
         // What the driver keeps: features, interrupt ack, status, config.
         for kept in [0x1000_8020, 0x1000_8024, 0x1000_8064, 0x1000_8070, 0x1000_8100] {
             assert!(
@@ -295,6 +297,10 @@ mod tests {
         assert!(!crate::write_value_allowed(DRIVER_FEATURES, 1 << 2, m)); // RING_PACKED (bit 34)
         assert!(!crate::write_value_allowed(DRIVER_FEATURES, 1 << 15, m)); // MRG_RXBUF
         assert!(!crate::write_value_allowed(DRIVER_FEATURES, u32::MAX, m));
+        // The selector may name word 0 or 1 only.
+        assert!(crate::write_value_allowed(0x1000_8024, 0, m));
+        assert!(crate::write_value_allowed(0x1000_8024, 1, m));
+        assert!(!crate::write_value_allowed(0x1000_8024, 2, m));
         // Status is not value-guarded.
         assert!(crate::write_value_allowed(0x1000_8070, u32::MAX, m));
         // No guards on the other boards yet.

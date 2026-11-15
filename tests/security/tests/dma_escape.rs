@@ -8,17 +8,20 @@
 //! buffer by linear-memory offset through `wari::nic_dma_set_buf`,
 //! and the kernel (`cap::dma::nic_dma_set_buf_impl`) validates the
 //! span and the descriptor index before writing the address into the
-//! descriptor. During `init_virtio` the real driver makes two calls
-//! that must be refused — a span that wraps past the end of memory
-//! and a descriptor index past the ring — and logs the kernel's
-//! answer as `DMAo` / `DMAi`. If either were accepted the driver
-//! refuses to bring the device up, so the network coming up is itself
-//! evidence that both rejections happened.
+//! descriptor, which lives in kernel memory. During `init_virtio` the
+//! real driver makes five attempts that must be refused and logs the
+//! kernel's answer to each: a span that starts past the end of memory
+//! (`DMAo`), a descriptor index past the ring (`DMAi`), a span whose
+//! length runs off the end (`DMAl`), raising the queue size register
+//! (`DMAq`) and accepting a feature that changes the ring layout
+//! (`DMAf`). If any were accepted the driver refuses to bring the
+//! device up, so the network coming up is itself evidence that all
+//! five refusals happened.
 //!
 //! The pure decisions (`wari_validate::dma`) carry their own truth
 //! tables on the host; this test proves the boundary end to end on
-//! the real driver under QEMU, with no bespoke blob: the two negative
-//! calls go through the same import, cap check and linear memory the
+//! the real driver under QEMU, with no bespoke blob: the negative
+//! calls go through the same imports, cap check and linear memory the
 //! positive path uses one line later.
 //!
 //! Not covered here (VF2 follow-up): the GMAC path still computes its

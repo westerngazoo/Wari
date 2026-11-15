@@ -29,15 +29,19 @@
 //! direction follows from the ring: RX descriptors are
 //! device-writable, TX descriptors are not. Returns 0 on success,
 //! `E_PERM` without `Net + WRITE`, `E_INVAL` if the ring is not
-//! attached by the caller, `idx` is past its end, or the span is not
-//! inside linear memory, `E_NOMEM` if the module exports no memory.
+//! attached by the caller, `idx` is past its end, the span is not
+//! inside linear memory, or re-aiming a descriptor could let the
+//! device pair its old address with the new length (or the reverse)
+//! outside linear memory; `E_NOMEM` if the module exports no memory.
 //! On any error nothing is written.
 //!
 //! A ring comes into being when the driver attaches its queue:
 //! `nic_attach_queue` (VirtIO) claims it. The GMAC path gains its own
 //! operations in the VF2 follow-up.
 
-use wari_validate::dma::{span_in_linmem, virtq_desc, RingDir};
+use wari_validate::dma::{
+    reaim_keeps_mixtures_inside, span_in_linmem, virtq_desc, virtq_desc_span, RingDir,
+};
 
 use super::cspace::MAX_PROCS;
 use super::storage::cspaces;
@@ -98,6 +102,17 @@ pub fn nic_dma_set_buf_impl<T>(
     } else {
         RingDir::DeviceReads
     };
+    // The descriptor may be live, and the device may pair the address
+    // of one version with the length of the other. Refuse a re-aim
+    // whose mixtures would leave this module's memory. `None` here is
+    // the ring/owner/index refusal `write_desc` would give anyway.
+    let Some(old) = dma_mem::read_desc(ring as usize, proc_id, idx) else {
+        return E_INVAL;
+    };
+    let (old_pa, old_len) = virtq_desc_span(&old);
+    if !reaim_keeps_mixtures_inside(old_pa, old_len, pa, len, mem_base, mem_len) {
+        return E_INVAL;
+    }
     if dma_mem::write_desc(ring as usize, proc_id, idx, virtq_desc(pa, len, dir)) {
         0
     } else {

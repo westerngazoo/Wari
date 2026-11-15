@@ -486,9 +486,13 @@ The registers that decide what the device walks are the kernel's too:
 (`BoardDescriptor::dma_addr_regs`) — and accepts `DriverFeatures`
 only with the bits that leave the ring layout alone
 (`BoardDescriptor::write_masks`: no `EVENT_IDX`, `INDIRECT_DESC`,
-`RING_PACKED`). A live descriptor is rewritten through a state that
-names nothing (`mmio::dma_mem::store`), and the doorbell is ordered
-after the descriptor stores (`fence w,o`). The driver's self-check at
+`RING_PACKED`). A queue that is still ready cannot be re-attached. A
+live descriptor is rewritten through a state that names nothing
+(`mmio::dma_mem::store`), and a re-aim is refused if pairing its old
+address with the new length, or the reverse, would leave the driver's
+memory (`reaim_keeps_mixtures_inside`) — a device need not read a
+descriptor in one step. The doorbell is ordered after the descriptor
+stores (`fence w,o`). The driver's self-check at
 init makes five attempts that must be refused and will not bring the
 device up if any is accepted (`tests/security/tests/dma_escape.rs`);
 `dma_kernel_rings.rs` proves the device really uses the kernel's
@@ -656,6 +660,9 @@ contract: caller must guarantee one-time invocation pre-runtime use.
 | `kernel/src/runtime/heap.rs` (`init`)   | `static mut HEAP_CURSOR/HEAP_END` write                            | INV-1, INV-12 | Single-hart boot-only init of the arena |
 | `kernel/src/runtime/heap.rs` (`alloc`)  | `static mut HEAP_CURSOR` read/write                                | INV-1, INV-12 | Single-hart cursor advance, post-init |
 | `kernel/src/runtime/sign.rs` (`verify`) | ed25519 verify of envelope vs. `ACCEPTED_PUBKEY`                   | INV-13       | First gate before any Tier-2 wasmi parse |
+| `kernel/src/mmio/dma_mem.rs` (`claim`, `write_desc`, `read_desc`) | `static mut STATE` read/write (ring owner, entry count) | INV-1 | Single-hart host-fn context; raw pointers only, no reference to the static |
+| `kernel/src/mmio/dma_mem.rs` (`store`, `read_desc`, `claim`) | Volatile 64-bit access to `static mut MEM` (kernel-owned DMA descriptor tables) | INV-1, INV-25 | Bounds and alignment by construction; volatile because the device reads this memory |
+| `kernel/src/mmio/mod.rs` (`barrier_before_device_write`) | `asm!("fence w,o")` | INV-7, INV-25 | Unprivileged barrier ordering descriptor stores before the doorbell |
 | `kernel/src/runtime/host_fns.rs` (`host_mmio_write8`) | `core::ptr::write_volatile` byte write to MMIO       | INV-3        | Validator-narrowed: only `is_uart_mmio_addr` addresses reach the volatile write; capability gate (`mmio_uart`) precedes |
 | `kernel/src/cap/static_caps.rs`         | `Caps` construction + `caps_for` lookup                            | INV-1        | Plain-value caps; immutable post-load on a single-hart kernel |
 | `kernel/src/cap/types.rs` (`Cap::derive`) | Pure-function rights check + kind/pool preservation                | INV-10, INV-15, INV-16 | Mint primitive; no `unsafe`; Kani-proven in `cap::proofs` |

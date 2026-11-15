@@ -148,9 +148,144 @@ pub const fn virtq_desc(pa: u64, len: u32, dir: RingDir) -> [u8; DESC_SIZE] {
     ]
 }
 
+/// The `(addr, len)` a VirtIO descriptor names — the inverse of
+/// [`virtq_desc`] for those two fields.
+///
+/// ```
+/// use wari_validate::dma::{virtq_desc, virtq_desc_span, RingDir};
+/// let d = virtq_desc(0x8000_1000, 1536, RingDir::DeviceWrites);
+/// assert_eq!(virtq_desc_span(&d), (0x8000_1000, 1536));
+/// assert_eq!(virtq_desc_span(&[0; 16]), (0, 0)); // a cleared descriptor
+/// ```
+pub const fn virtq_desc_span(desc: &[u8; DESC_SIZE]) -> (u64, u32) {
+    (
+        u64::from_le_bytes([
+            desc[0], desc[1], desc[2], desc[3], desc[4], desc[5], desc[6], desc[7],
+        ]),
+        u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]),
+    )
+}
+
+/// May a descriptor currently naming `(old_pa, old_len)` be re-aimed
+/// at `(new_pa, new_len)`, with all of them inside the physical span
+/// `[mem_pa, mem_pa + mem_len)` of the driver's linear memory?
+///
+/// A descriptor is rewritten while the device may be reading it, and
+/// a 16-byte descriptor is neither written nor necessarily read in
+/// one step. Whatever the kernel does, a reader can pair the address
+/// from one version with the length from the other. So a re-aim is
+/// accepted only when **both mixtures** — old address with new
+/// length, new address with old length — also stay inside the
+/// driver's memory. A cleared descriptor (`old_len == 0`) names
+/// nothing and mixes safely with anything valid.
+///
+/// The caller has already checked the new span on its own.
+///
+/// ```
+/// use wari_validate::dma::reaim_keeps_mixtures_inside;
+/// const BASE: u64 = 0x8000_0000;
+/// const LEN: usize = 0x1_0000;
+/// // First use of a cleared descriptor.
+/// assert!(reaim_keeps_mixtures_inside(0, 0, BASE + 0x100, 1536, BASE, LEN));
+/// // Re-arming the same buffer, and moving between mid-memory buffers.
+/// assert!(reaim_keeps_mixtures_inside(BASE + 0x100, 1536, BASE + 0x100, 1536, BASE, LEN));
+/// assert!(reaim_keeps_mixtures_inside(BASE + 0x100, 64, BASE + 0x800, 1536, BASE, LEN));
+/// // A one-byte buffer at the very end, after a long one at the start:
+/// // new address + old length would run off the end.
+/// assert!(!reaim_keeps_mixtures_inside(BASE, 0x1_0000, BASE + 0xFFFF, 1, BASE, LEN));
+/// // And the mirror image: old address + new length.
+/// assert!(!reaim_keeps_mixtures_inside(BASE + 0xFFFF, 1, BASE, 0x1_0000, BASE, LEN));
+/// ```
+pub const fn reaim_keeps_mixtures_inside(
+    old_pa: u64,
+    old_len: u32,
+    new_pa: u64,
+    new_len: u32,
+    mem_pa: u64,
+    mem_len: usize,
+) -> bool {
+    if old_len == 0 {
+        return true;
+    }
+    pa_span_inside(old_pa, new_len, mem_pa, mem_len)
+        && pa_span_inside(new_pa, old_len, mem_pa, mem_len)
+}
+
+/// Is `[pa, pa + len)` inside `[mem_pa, mem_pa + mem_len)`? Checked
+/// arithmetic; an overflowing span is outside.
+const fn pa_span_inside(pa: u64, len: u32, mem_pa: u64, mem_len: usize) -> bool {
+    let Some(end) = pa.checked_add(len as u64) else {
+        return false;
+    };
+    let Some(mem_end) = mem_pa.checked_add(mem_len as u64) else {
+        return false;
+    };
+    pa >= mem_pa && end <= mem_end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reaim_accepts_what_the_driver_does_and_refuses_edge_mixtures() {
+        const BASE: u64 = 0x8000_0000;
+        const LEN: usize = 0x11_0000; // 17 pages, as the net driver has
+        let buf = |i: u64| BASE + 0x2_0000 + i * 1536;
+        // RX: every buffer the same size, re-armed in place.
+        assert!(reaim_keeps_mixtures_inside(
+            buf(3),
+            1536,
+            buf(3),
+            1536,
+            BASE,
+            LEN
+        ));
+        // TX: one descriptor, varying buffers and lengths.
+        assert!(reaim_keeps_mixtures_inside(
+            buf(0),
+            42,
+            buf(5),
+            1514,
+            BASE,
+            LEN
+        ));
+        assert!(reaim_keeps_mixtures_inside(
+            buf(5),
+            1514,
+            buf(0),
+            42,
+            BASE,
+            LEN
+        ));
+        // An old descriptor that somehow names memory below the base
+        // (the memory moved) makes every re-aim to a real length unsafe.
+        assert!(!reaim_keeps_mixtures_inside(
+            BASE - 16,
+            64,
+            buf(0),
+            64,
+            BASE,
+            LEN
+        ));
+        // Overflowing spans are outside, not wrapped.
+        assert!(!reaim_keeps_mixtures_inside(
+            u64::MAX,
+            8,
+            buf(0),
+            8,
+            BASE,
+            LEN
+        ));
+    }
+
+    #[test]
+    fn desc_span_round_trips_the_encoding() {
+        for (pa, len) in [(0u64, 0u32), (0x8000_1000, 1536), (u64::MAX, u32::MAX)] {
+            let d = virtq_desc(pa, len, RingDir::DeviceReads);
+            assert_eq!(virtq_desc_span(&d), (pa, len));
+        }
+    }
 
     #[test]
     fn span_rejects_wrap_and_zero_and_spill() {

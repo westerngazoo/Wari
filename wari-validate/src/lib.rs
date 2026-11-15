@@ -300,6 +300,13 @@ pub mod windows {
                 base: 0x1000_80a0,
                 len: 0x8,
             },
+            // `QueueReset` (0x0c0). Needs a feature the driver cannot
+            // negotiate; listed so that every queue register is the
+            // kernel's, without exception.
+            MmioWindow {
+                base: 0x1000_80c0,
+                len: 0x4,
+            },
         ];
 
         /// Registers the driver may write only with a restricted
@@ -319,10 +326,22 @@ pub mod windows {
         /// allowed bits, and neither bit is a ring feature in the
         /// other word (bit 0: `VIRTIO_NET_F_CSUM`; bit 37:
         /// `VIRTIO_F_SR_IOV`), so the check needs no selector state.
-        pub const WRITE_MASKS: &[crate::WriteMask] = &[crate::WriteMask {
-            addr: 0x1000_8020,
-            allowed: (1 << 5) | 1,
-        }];
+        ///
+        /// Second entry: `DriverFeaturesSel` (0x024) may only select
+        /// word 0 or word 1. The reasoning above covers those two
+        /// words; a transport that offered further feature words
+        /// would otherwise let the same mask through for bits it was
+        /// never checked against.
+        pub const WRITE_MASKS: &[crate::WriteMask] = &[
+            crate::WriteMask {
+                addr: 0x1000_8020,
+                allowed: (1 << 5) | 1,
+            },
+            crate::WriteMask {
+                addr: 0x1000_8024,
+                allowed: 1,
+            },
+        ];
     }
 
     /// Orange Pi R2S (Ky X1 / SpacemiT K1) platform windows.
