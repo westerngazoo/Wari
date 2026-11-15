@@ -17,6 +17,7 @@
 //!     driver lands in PR 5.
 
 pub mod dma_mem;
+pub mod dwmac;
 
 /// Order every earlier store to memory ahead of the device write that
 /// follows (`fence w,o`).

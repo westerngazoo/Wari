@@ -100,6 +100,40 @@ pub fn claim(ring: usize, owner: u8, entries: u32) -> Option<u64> {
     Some(table as u64)
 }
 
+/// Has any driver claimed ring `ring`? `false` for an out-of-range
+/// ring. Never panics.
+pub fn is_claimed(ring: usize) -> bool {
+    if ring >= RINGS {
+        return false;
+    }
+    // SAFETY: INV-1 — single hart; read of a Copy value.
+    unsafe { (*addr_of_mut!(STATE))[ring].owner.is_some() }
+}
+
+/// Are all the kernel's rings claimed? This is "the NIC's DMA rings
+/// are attached", which the board's attach-ordered register tables
+/// key on (`wari_validate::attach_state_allows`). Never panics.
+pub fn all_claimed() -> bool {
+    (0..RINGS).all(is_claimed)
+}
+
+/// The table address and descriptor count of ring `ring`, if
+/// `owner` claimed it; `None` otherwise (including `ring >= RINGS`).
+/// The address is what [`claim`] returned. Never panics.
+pub fn owned(ring: usize, owner: u8) -> Option<(u64, u32)> {
+    if ring >= RINGS {
+        return None;
+    }
+    // SAFETY: INV-1 — single hart; read of a Copy value.
+    let state = unsafe { (*addr_of_mut!(STATE))[ring] };
+    if state.owner != Some(owner) {
+        return None;
+    }
+    // SAFETY: INV-1. Address-of only; nothing is read or written.
+    let table = unsafe { addr_of_mut!((*addr_of_mut!(MEM))[ring]) };
+    Some((table as u64, state.entries))
+}
+
 /// Store `bytes` as descriptor `idx` of ring `ring`, on behalf of the
 /// driver process `owner`.
 ///
@@ -132,9 +166,11 @@ pub fn write_desc(ring: usize, owner: u8, idx: u32, bytes: [u8; DESC_SIZE]) -> b
 /// Read back descriptor `idx` of ring `ring`, on behalf of the
 /// driver process `owner`, as the kernel last stored it.
 ///
-/// For the kernel's own use (deciding whether a rewrite is safe); a
-/// driver never receives these bytes. On VirtIO the device does not
-/// write descriptors, so this is exactly what was stored.
+/// For the kernel's own use (deciding whether a rewrite is safe, and
+/// the DWMAC4 status word); a driver never receives the address
+/// words. On VirtIO the device does not write descriptors, so this is
+/// exactly what was stored; a DWMAC4 engine writes its status back
+/// over a descriptor it is done with (clearing OWN).
 ///
 /// Returns `None` under the same conditions [`write_desc`] returns
 /// `false`. Never panics.

@@ -803,7 +803,7 @@ macro_rules! wari_uart_driver {
 }
 
 /// Total manifest size for the Tier-2 net driver. Computed from
-/// ABI v2: `manifest_size(11, 9)` = 16 + 11*36 + 9*60 = 952 bytes. Exported
+/// ABI v2: `manifest_size(11, 12)` = 16 + 11*36 + 12*60 = 1132 bytes. Exported
 /// so the macro and external tooling agree on the byte length.
 ///
 /// 9 exports: `_start`, `poll`, `tx_send`, `rx_pop`, `rx_recycle`
@@ -811,13 +811,15 @@ macro_rules! wari_uart_driver {
 /// (PR Net-6a), `socket_bind`, `socket_listen` (PR Net-6c —
 /// TCP server side of the socket API).
 ///
-/// 9 imports cover what the smoltcp-backed driver actually calls
+/// 12 imports cover what the smoltcp-backed driver actually calls
 /// (or `#[used]`-pins) today: `net_mmio_write32`, `net_mmio_read32`,
 /// `nic_set_mac`, `nic_attach_queue`, `nic_queue_notify`,
-/// `nic_dma_set_buf` (kernel-written descriptor addresses, ADR-002
-/// step 1), `lin_mem_base` (GMAC path only, until that step's VF2
-/// follow-up), `drv_log_u32` (boot milestones, always-on) and
-/// `drv_trace_u32` (per-frame RX/TX tags, debug-kernel gated).
+/// `nic_dma_set_buf` (kernel-written descriptors, ADR-002 step 1),
+/// `nic_dma_status`, `nic_attach_ring`, `nic_ring_kick`,
+/// `nic_ring_rewind` (the DWMAC4 side of that step), `drv_log_u32`
+/// (boot milestones, always-on) and `drv_trace_u32` (per-frame RX/TX
+/// tags, debug-kernel gated). `lin_mem_base` is gone: no driver
+/// forms a physical address any more.
 /// The `notification_wait` / `notification_ack`
 /// host fns are declared in the driver source for a future PR
 /// but not yet invoked, so LTO strips the imports from the WASM —
@@ -827,7 +829,7 @@ macro_rules! wari_uart_driver {
 /// (Platform-asymmetric imports must be `#[used]`-pinned on the
 /// platform that doesn't call them — see `vf2_keep_imports` /
 /// `qemu_keep_imports` in `drivers/net/src/lib.rs`.)
-pub const NET_MANIFEST_SIZE: usize = manifest_size(11, 9);
+pub const NET_MANIFEST_SIZE: usize = manifest_size(11, 12);
 
 /// Declare a Tier-2 network driver.
 ///
@@ -963,7 +965,10 @@ macro_rules! wari_net_driver {
                     (b"wari", b"nic_attach_queue", $crate::FuncSig::U32x4I32),
                     (b"wari", b"nic_queue_notify", $crate::FuncSig::U32I32),
                     (b"wari", b"nic_dma_set_buf", $crate::FuncSig::U32x4I32),
-                    (b"wari", b"lin_mem_base", $crate::FuncSig::UnitU64),
+                    (b"wari", b"nic_dma_status", $crate::FuncSig::U32x3I32),
+                    (b"wari", b"nic_attach_ring", $crate::FuncSig::U32I32),
+                    (b"wari", b"nic_ring_kick", $crate::FuncSig::U32xU32I32),
+                    (b"wari", b"nic_ring_rewind", $crate::FuncSig::U32I32),
                     (b"wari", b"drv_log_u32", $crate::FuncSig::U32xU32I32),
                     (b"wari", b"drv_trace_u32", $crate::FuncSig::U32xU32I32),
                 ],
@@ -1083,15 +1088,17 @@ mod tests {
 
     #[test]
     fn worked_net_manifest_size() {
-        // Net = 11 exports + 9 imports (7 original + drv_trace_u32,
+        // Net = 11 exports + 12 imports (7 original + drv_trace_u32,
         // the debug-gated hot-path trace added when the per-frame
         // RX/TX tags were demoted off the always-on drv_log_u32, +
-        // nic_dma_set_buf from ADR-002 step 1):
-        // ABI v2 (MODULE_MAX 24): 16 + 11*36 + 9*60 = 952. Locks
+        // nic_dma_set_buf from ADR-002 step 1, + the four DWMAC4 ring
+        // operations of the same step, − lin_mem_base, which no
+        // driver calls once neither NIC path forms an address):
+        // ABI v2 (MODULE_MAX 24): 16 + 11*36 + 12*60 = 1132. Locks
         // NET_MANIFEST_SIZE to the declared counts so an import-table
         // edit that forgets the constant (or vice versa) fails here
         // before the sign-tool.
-        assert_eq!(NET_MANIFEST_SIZE, 952);
-        assert_eq!(manifest_size(11, 9), NET_MANIFEST_SIZE);
+        assert_eq!(NET_MANIFEST_SIZE, 1132);
+        assert_eq!(manifest_size(11, 12), NET_MANIFEST_SIZE);
     }
 }
