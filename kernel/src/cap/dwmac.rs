@@ -24,14 +24,15 @@
 //!   cleared) and points the channel at it. `E_INVAL` if the ring is
 //!   already claimed — by anyone, the caller included: re-pointing a
 //!   live ring is what `nic_ring_rewind` is for — or if the channel
-//!   is running.
+//!   is running (start bit set).
 //! - `nic_ring_kick(ring, idx)` sets the tail pointer to descriptor
 //!   `idx` ("everything before `idx` is ready"; `idx == 16` is the
 //!   end of the ring). `E_INVAL` unless the caller holds the ring and
 //!   `idx <= 16`. Ordered after every earlier descriptor store.
 //! - `nic_ring_rewind(ring)` re-points a stopped channel at the head
 //!   of its ring, for the receive-wedge recovery. `E_INVAL` unless
-//!   the caller holds the ring and the channel is stopped.
+//!   the caller holds the ring and the channel's start bit is clear
+//!   (see `mmio::dwmac::program_ring` on what that does not wait for).
 
 use wari_validate::board::DmaEngine;
 use wari_validate::dma::{dwmac_ring_regs, dwmac_tail_offset, DwmacRingRegs, KERNEL_RING_ENTRIES};

@@ -48,9 +48,15 @@ pub fn channel_running(base: usize, regs: &DwmacRingRegs) -> bool {
 /// # Contract
 ///
 /// - Preconditions: the caller holds the ring (`dma_mem::owned`),
-///   `1 <= entries <= KERNEL_RING_ENTRIES`, and the channel is
-///   stopped ([`channel_running`] is false) — the databook allows
-///   the list address to change only then.
+///   `1 <= entries <= KERNEL_RING_ENTRIES`, and the channel's start
+///   bit is clear ([`channel_running`] is false). The databook allows
+///   the list address to change only once the engine has *stopped*,
+///   which can lag the start bit by a frame in flight
+///   (`DMA_DEBUG_STATUS0`); the kernel does not wait for it. That
+///   affects only whether the engine resynchronises to the ring head
+///   (the receive-recovery path's concern, unchanged from when the
+///   driver wrote these registers), not containment: the engine only
+///   ever walks descriptors in the kernel's table.
 /// - Postcondition: the engine, once started, walks exactly that
 ///   table and fills at most `DWMAC_RBSZ` bytes per receive buffer.
 /// - Never panics. `entries == 0` cannot reach here (`dma_mem::claim`

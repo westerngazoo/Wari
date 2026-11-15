@@ -415,7 +415,7 @@ them**, so they are not R1 violations — but they should take real
 numbers when the registered-fastpath work lands rather than staying
 Greek.
 
-### INV-25 · DMA Descriptor Ownership *(Phase 1c)* — **partially unenforced, see Status**
+### INV-25 · DMA Descriptor Ownership *(Phase 1c)* — **enforced on both NICs (GMAC: silicon run pending), see Status**
 
 > Once software sets the OWN bit on a descriptor, it does not read or
 > write that descriptor or its buffer until the engine clears OWN.
@@ -523,9 +523,14 @@ mechanism, DWMAC4 descriptors. The two rings live in `mmio::dma_mem`;
 size `RBSZ`. `nic_dma_set_buf` writes `RDES`/`TDES` words from an
 offset: a receive buffer must be exactly `RBSZ` long (the engine fills
 that much whatever the descriptor says), a transmit length must fit
-`TDES2`, and a descriptor the engine still owns (OWN set) is refused —
-the engine may be reading it, which is why this engine needs no
-mixture rule. `nic_ring_kick` moves the tail pointer after a
+`TDES2`, a receive buffer must start on a 16-byte boundary, and a
+descriptor the engine still owns (OWN set) is refused. The engine
+also reads descriptors it does not own (it fetches the one at its
+position and suspends on OWN=0), so a rewrite is safe only because
+of a **per-SoC assumption**, recorded here beside `dma_coherent`: the
+engine fetches a 16-byte descriptor in one coherent read of its
+64-byte-aligned cache line, and cannot pair the new OWN bit with the
+old address words. A third SoC re-decides it. `nic_ring_kick` moves the tail pointer after a
 `fence w,o`; `nic_ring_rewind` re-points a stopped channel for the
 receive-wedge recovery; `nic_dma_status` returns only the status word
 (words 0-1 of an unwritten-back descriptor are the physical address).
@@ -538,9 +543,10 @@ until both rings are attached, and the DMA reset plus the clock/reset
 windows after (`needs_attach`, `frozen_after_attach`): a start before
 attach would walk the reset list address 0, and a reset after it
 clears the kernel's registers. No signed driver imports `lin_mem_base`
-any more. The driver's self-check makes eight attempts that must be
-refused on silicon (`vf2_inv25_self_check`: tags `DMAo`, `DMAl`,
-`DMAb`, `DMAn`, `DMAw`, `DMAz`, `DMAs`, `DMAr`). QEMU cannot run this
+any more. The driver's self-check makes fourteen attempts that must be
+refused on silicon (`vf2_inv25_self_check`: `DMAo`, `DMAl`, `DMAb`,
+`DMAx`, `DMAn`, `DMAw`, `DMAz`, `DMAs`, `DMAt`, `DMAr`, `DMAc`,
+`DMAk`, `DMAa`), plus `DMAe` before attach (starting the engine). QEMU cannot run this
 path; the pure decisions are host-tested in `wari_validate`.
 
 ### INV-26 · A Driver Socket Lives Exactly As Long As a Cap Names It *(Phase 2)*

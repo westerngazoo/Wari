@@ -48,8 +48,20 @@
 //! the store itself. A descriptor the engine still owns is **refused**:
 //! the engine may be reading it, and on this engine the driver never
 //! needs to take one back (it waits for the writeback that clears
-//! OWN). That refusal is what makes a live rewrite impossible here,
-//! where VirtIO needs the mixture rule above.
+//! OWN).
+//!
+//! That refusal does not by itself make every read of a rewrite
+//! safe. The engine also reads descriptors that are *not* owned (it
+//! fetches the one at its current position and suspends on OWN=0),
+//! and if it read the two halves of one at different times it could
+//! pair the new OWN bit with the old words 0-1 — which after a receive
+//! writeback hold frame metadata, partly chosen by a remote sender.
+//! What closes that is a **per-SoC assumption**: the engine fetches a
+//! descriptor in one coherent read of its cache line (tables are
+//! 64-byte aligned, a descriptor is 16 bytes, so it never straddles a
+//! line). It holds for the JH7110 GMAC as far as we know and is
+//! recorded in INV-25 beside `dma_coherent`; a third SoC re-decides
+//! it rather than inheriting it.
 //!
 //! ```text
 //! (import "wari" "nic_dma_status" (func (param i32 i32 i32) (result i32)))
@@ -67,8 +79,9 @@
 
 use wari_validate::board::DmaEngine;
 use wari_validate::dma::{
-    dwmac_desc_status, dwmac_rx_desc, dwmac_tx_desc, dwmac_tx_len_ok, reaim_keeps_mixtures_inside,
-    span_in_linmem, virtq_desc, virtq_desc_span, RingDir, DWMAC_DESC_OWN, DWMAC_RBSZ,
+    dwmac_desc_status, dwmac_rx_buf_aligned, dwmac_rx_desc, dwmac_tx_desc, dwmac_tx_len_ok,
+    reaim_keeps_mixtures_inside, span_in_linmem, virtq_desc, virtq_desc_span, RingDir,
+    DWMAC_DESC_OWN, DWMAC_RBSZ,
 };
 
 use super::cspace::MAX_PROCS;
@@ -158,8 +171,11 @@ pub fn nic_dma_set_buf_impl<T>(
             }
             match dir {
                 // The engine fills RBSZ bytes; the span checked above
-                // must be exactly that.
-                RingDir::DeviceWrites if len == DWMAC_RBSZ => dwmac_rx_desc(pa),
+                // must be exactly that, starting on a bus-width
+                // boundary so no burst beat spills past either end.
+                RingDir::DeviceWrites if len == DWMAC_RBSZ && dwmac_rx_buf_aligned(buf_off) => {
+                    dwmac_rx_desc(pa)
+                }
                 RingDir::DeviceReads if dwmac_tx_len_ok(len) => dwmac_tx_desc(pa, len),
                 _ => return E_INVAL,
             }
@@ -200,6 +216,10 @@ pub fn nic_dma_status_impl<T>(
     let Some(desc) = dma_mem::read_desc(ring as usize, proc_id, idx) else {
         return E_INVAL;
     };
+    // Order the status read before anything the driver reads next:
+    // once it sees OWN clear it reads the buffer the engine wrote
+    // (Linux `dma_rmb()` after the OWN check). R6.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     let status = dwmac_desc_status(&desc).to_le_bytes();
     match memory.write(&mut *caller, out_off as usize, &status) {
         Ok(()) => 0,

@@ -312,6 +312,9 @@ const TAG_DMA_LEN: u32 = 0x444D_416C;
 const TAG_DMA_QNUM: u32 = 0x444D_4171;
 const TAG_DMA_FEAT: u32 = 0x444D_4166;
 const TAG_DMA_GMAC: u32 = 0x444D_4167;
+const TAG_DMA_GKICK: u32 = 0x444D_4168;
+const TAG_DMA_GREWIND: u32 = 0x444D_416A;
+const TAG_DMA_GSTATUS: u32 = 0x444D_4175;
 
 /// VirtIO MMIO `QueueNum` (VirtIO 1.2 §4.2.2). Kernel-owned: named
 /// here only for the self-check that the kernel refuses it.
@@ -451,7 +454,7 @@ static mut VF2_STATUS_OUT: u32 = 0;
 /// INV-25 self-check on the GMAC (ADR-002 step 1).
 ///
 /// Runs with both rings attached, RX descriptor 0 armed and the RX
-/// engine stopped. Eight attempts the kernel must refuse, each logged
+/// engine stopped. Thirteen attempts the kernel must refuse, each logged
 /// with its return code (all must read `0xfffffffe`):
 ///
 /// | tag    | attempt |
@@ -459,11 +462,19 @@ static mut VF2_STATUS_OUT: u32 = 0;
 /// | `DMAo` | a receive buffer starting past the end of our memory |
 /// | `DMAl` | a receive buffer starting inside it and running off the end |
 /// | `DMAb` | a receive buffer of any size but RBSZ |
+/// | `DMAx` | a receive buffer not on a 16-byte boundary |
 /// | `DMAn` | rewriting a descriptor the engine owns |
 /// | `DMAw` | writing the receive list address |
 /// | `DMAz` | changing RBSZ through `RX_CONTROL` |
 /// | `DMAs` | a descriptor skip length in `DMA_CH0_CONTROL` |
+/// | `DMAt` | TSO in `TX_CONTROL` (start bit clear) |
 /// | `DMAr` | the DMA software reset, now that the rings are attached |
+/// | `DMAc` | a clock-controller write (its current value, written back) |
+/// | `DMAk` | a tail pointer past the end of the ring |
+/// | `DMAa` | attaching a ring a second time |
+///
+/// (`DMAe`, starting the engine before attach, runs in `driver_start`
+/// just before the attach.)
 ///
 /// If any is accepted the containment is gone, and the driver refuses
 /// to bring the device up rather than run on a kernel that no longer
@@ -485,11 +496,20 @@ fn vf2_inv25_self_check() -> Result<(), ()> {
     const TAG_DMA_RBSZ: u32 = 0x444D_417A;
     const TAG_DMA_DSL: u32 = 0x444D_4173;
     const TAG_DMA_RESET: u32 = 0x444D_4172;
+    const TAG_DMA_ALIGN: u32 = 0x444D_4178;
+    const TAG_DMA_TSO: u32 = 0x444D_4174;
+    const TAG_DMA_CLOCK: u32 = 0x444D_4163;
+    const TAG_DMA_KICK: u32 = 0x444D_416B;
+    const TAG_DMA_REATTACH: u32 = 0x444D_4161;
+    const TX_CONTROL_TSO: (u32, u32) = (0x1104, 1 << 12);
+    /// A SYSCRG register the driver wrote during bring-up (GMAC1 AHB
+    /// clock); writing its own value back changes nothing if accepted.
+    const SYSCRG_GMAC1_CLK: u32 = 0x1302_0184;
 
     let mem_end = (core::arch::wasm32::memory_size::<0>() * WASM_PAGE) as u32;
     // SAFETY: addr-of on module statics; extern host fns. A refused
     // call writes nothing.
-    let checks: [(u32, i32); 8] = unsafe {
+    let checks: [(u32, i32); 13] = unsafe {
         let buf0 = core::ptr::addr_of!(VF2_RX_BUFS.bufs[0]) as u32;
         let buf1 = core::ptr::addr_of!(VF2_RX_BUFS.bufs[1]) as u32;
         let base = plat::NIC_BASE;
@@ -504,6 +524,10 @@ fn vf2_inv25_self_check() -> Result<(), ()> {
             ),
             (TAG_DMA_BSZ, wari_nic_dma_set_buf(RING_RX, 1, buf1, 2048)),
             (
+                TAG_DMA_ALIGN,
+                wari_nic_dma_set_buf(RING_RX, 1, buf1 + 4, VF2_RBSZ),
+            ),
+            (
                 TAG_DMA_OWN,
                 wari_nic_dma_set_buf(RING_RX, 0, buf0, VF2_RBSZ),
             ),
@@ -517,9 +541,22 @@ fn vf2_inv25_self_check() -> Result<(), ()> {
                 wari_net_mmio_write32(base + CH0_CONTROL_DSL1.0, CH0_CONTROL_DSL1.1),
             ),
             (
+                TAG_DMA_TSO,
+                wari_net_mmio_write32(base + TX_CONTROL_TSO.0, TX_CONTROL_TSO.1),
+            ),
+            (
                 TAG_DMA_RESET,
                 wari_net_mmio_write32(base + DMA_MODE_SWR.0, DMA_MODE_SWR.1),
             ),
+            (
+                TAG_DMA_CLOCK,
+                wari_net_mmio_write32(SYSCRG_GMAC1_CLK, wari_net_mmio_read32(SYSCRG_GMAC1_CLK)),
+            ),
+            (
+                TAG_DMA_KICK,
+                wari_nic_ring_kick(RING_RX, VF2_RING_LEN as u32 + 1),
+            ),
+            (TAG_DMA_REATTACH, wari_nic_attach_ring(RING_RX)),
         ]
     };
     let mut held = true;
@@ -2311,11 +2348,12 @@ fn init_virtio() -> Result<[u8; 6], ()> {
     //   DMAf  accepting EVENT_IDX, which makes the device write past
     //         the used ring the kernel validated
     //   DMAg  attaching a GMAC ring on a board whose NIC is not a
-    //         GMAC (the DWMAC4 operations exist on every board)
+    //         GMAC (the DWMAC4 operations exist on every board), and
+    //   DMAh / DMAj / DMAu  the other three: kick, rewind, status
     // If any is accepted the containment is gone, and this driver
     // refuses to bring the device up rather than run on a kernel that
     // no longer checks. The adversarial test
-    // `tests/security/tests/dma_escape.rs` asserts all six tags.
+    // `tests/security/tests/dma_escape.rs` asserts all nine tags.
     // SAFETY: extern host-fns; on a rejected call nothing is written.
     let rc_oob = unsafe { wari_nic_dma_set_buf(RING_RX, 0, u32::MAX - 64, ETH_FRAME_MAX as u32) };
     let _ = unsafe { wari_drv_log_u32(TAG_DMA_OOB, rc_oob as u32) };
@@ -2335,9 +2373,17 @@ fn init_virtio() -> Result<[u8; 6], ()> {
     let _ = unsafe { wari_drv_log_u32(TAG_DMA_FEAT, rc_feat as u32) };
     let rc_gmac = unsafe { wari_nic_attach_ring(RING_RX) };
     let _ = unsafe { wari_drv_log_u32(TAG_DMA_GMAC, rc_gmac as u32) };
-    if [rc_oob, rc_idx, rc_len, rc_qnum, rc_feat, rc_gmac]
-        .iter()
-        .any(|&rc| rc != HOST_E_INVAL)
+    let rc_gkick = unsafe { wari_nic_ring_kick(RING_RX, 1) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_GKICK, rc_gkick as u32) };
+    let rc_grewind = unsafe { wari_nic_ring_rewind(RING_RX) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_GREWIND, rc_grewind as u32) };
+    let rc_gstatus = unsafe { wari_nic_dma_status(RING_RX, 0, rx_avail_off) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_GSTATUS, rc_gstatus as u32) };
+    if [
+        rc_oob, rc_idx, rc_len, rc_qnum, rc_feat, rc_gmac, rc_gkick, rc_grewind, rc_gstatus,
+    ]
+    .iter()
+    .any(|&rc| rc != HOST_E_INVAL)
     {
         return Err(());
     }
@@ -3247,6 +3293,18 @@ pub fn driver_start() {
         // answers (TX in the high half, RX in the low half); either
         // refusal aborts bring-up, which the kernel reports as an
         // uninitialized interface.
+        //
+        // First, 'DMAe': starting the RX engine before the rings are
+        // attached must be refused (it would walk the reset list
+        // address, 0). Part of the INV-25 self-check below; if it is
+        // accepted, bring-up stops here.
+        let rc_early = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1108, 0x0001_0000 | (VF2_RBSZ << 1) | 1)
+        };
+        let _ = unsafe { wari_drv_log_u32(0x444D_4165, rc_early as u32) }; // 'DMAe'
+        if rc_early != HOST_E_INVAL {
+            return;
+        }
         let rc_attach_tx = unsafe { wari_nic_attach_ring(RING_TX) };
         let rc_attach_rx = unsafe { wari_nic_attach_ring(RING_RX) };
         let _ = unsafe {
@@ -3759,15 +3817,8 @@ mod vf2_keep_imports {
 #[cfg(feature = "qemu")]
 mod qemu_keep_imports {
     use super::*;
-    // The DWMAC4 ring operations (ADR-002 step 1): only the GMAC
-    // path calls them (`nic_attach_ring` is also called here, by the
-    // INV-25 self-check, which expects a refusal).
-    #[used]
-    static S: unsafe extern "C" fn(u32, u32, u32) -> i32 = wari_nic_dma_status;
-    #[used]
-    static K: unsafe extern "C" fn(u32, u32) -> i32 = wari_nic_ring_kick;
-    #[used]
-    static R: unsafe extern "C" fn(u32) -> i32 = wari_nic_ring_rewind;
+    // (The DWMAC4 ring operations need no pin here: the INV-25
+    // self-check in `init_virtio` calls all four, expecting refusals.)
     #[used]
     static G: unsafe extern "C" fn(u32, u32) -> i32 = wari_drv_trace_u32;
 }

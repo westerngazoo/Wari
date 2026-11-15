@@ -342,6 +342,25 @@ pub const fn dwmac_rx_control_with_rbsz(cur: u32) -> u32 {
 /// plus a VLAN tag, rounded to the bus width.
 pub const DWMAC_RBSZ: u32 = 1536;
 
+/// Alignment, in bytes, of a DWMAC4 receive buffer: the AXI bus
+/// width on the JH7110 (128 bits), rounded up to the descriptor size.
+/// An aligned buffer of `DWMAC_RBSZ` bytes (a multiple of it) cannot
+/// have a burst beat that extends past either end.
+pub const DWMAC_RX_BUF_ALIGN: u32 = 16;
+
+/// Does a receive buffer at linear-memory offset `off` start on a
+/// [`DWMAC_RX_BUF_ALIGN`] boundary? (Linear memory itself starts on
+/// a page, so offset alignment is physical alignment.)
+///
+/// ```
+/// use wari_validate::dma::dwmac_rx_buf_aligned;
+/// assert!(dwmac_rx_buf_aligned(0x2_0000));
+/// assert!(!dwmac_rx_buf_aligned(0x2_0004));
+/// ```
+pub const fn dwmac_rx_buf_aligned(off: u32) -> bool {
+    off % DWMAC_RX_BUF_ALIGN == 0
+}
+
 /// Largest transmit buffer a DWMAC4 descriptor can name: `TDES2`
 /// bits 13:0.
 pub const DWMAC_TX_BUF_MAX: u32 = 0x3FFF;
