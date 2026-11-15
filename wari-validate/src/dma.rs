@@ -37,6 +37,18 @@
 //! VirtIO 1.2 §2.7.5 `struct virtq_desc`, 16 bytes, little-endian:
 //! `addr: u64`, `len: u32`, `flags: u16`, `next: u16`.
 //! [`virtq_desc`] is the only place that layout is written down.
+//!
+//! DWMAC4 (Synopsys DesignWare Ethernet QoS, the JH7110 GMAC) normal
+//! descriptors, read format, four little-endian 32-bit words:
+//! receive `RDES0/1` buffer address, `RDES2` second buffer (unused,
+//! zero), `RDES3` `OWN | IOC | BUF1V`; transmit `TDES0/1` buffer
+//! address, `TDES2` buffer length, `TDES3` `OWN | FD | LD | frame
+//! length`. The receive buffer has no length field: the engine fills
+//! up to `DMA_CH0_RX_CONTROL.RBSZ`, which the kernel sets
+//! ([`DWMAC_RBSZ`]). [`dwmac_rx_desc`] and [`dwmac_tx_desc`] are the
+//! only places that layout is written down (Linux
+//! `drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.c` is the
+//! reference we checked it against).
 
 /// Size in bytes of one DMA descriptor, on both engines Wari drives
 /// (VirtIO `virtq_desc`; DWMAC4 `TDES0..3` / `RDES0..3`).
@@ -223,9 +235,263 @@ const fn pa_span_inside(pa: u64, len: u32, mem_pa: u64, mem_len: usize) -> bool 
     pa >= mem_pa && end <= mem_end
 }
 
+/// DWMAC4 DMA register offsets from the GMAC base, and the bits the
+/// kernel and the board tables care about (Synopsys Ethernet QoS
+/// databook; Linux `stmmac/dwmac4_dma.h`). The one place they are
+/// written down: the VF2 register tables and the kernel's ring
+/// programming both read them from here.
+pub mod dwmac_reg {
+    /// `DMA_MODE`: bit 0 is the software reset of the whole DMA.
+    pub const DMA_MODE: usize = 0x1000;
+    /// `DMA_CH0_CONTROL`: descriptor skip length, split header, PBLx8.
+    pub const CH0_CONTROL: usize = 0x1100;
+    /// `DMA_CH0_TX_CONTROL`.
+    pub const TX_CONTROL: usize = 0x1104;
+    /// `DMA_CH0_RX_CONTROL`.
+    pub const RX_CONTROL: usize = 0x1108;
+    /// `DMA_CH0_TXDESC_LIST_ADDR_HI` — the first of the block of
+    /// list, tail and length registers.
+    pub const TX_LIST_HI: usize = 0x1110;
+    /// `DMA_CH0_TXDESC_LIST_ADDR`.
+    pub const TX_LIST_LO: usize = 0x1114;
+    /// `DMA_CH0_RXDESC_LIST_ADDR_HI`.
+    pub const RX_LIST_HI: usize = 0x1118;
+    /// `DMA_CH0_RXDESC_LIST_ADDR`.
+    pub const RX_LIST_LO: usize = 0x111C;
+    /// `DMA_CH0_TXDESC_TAIL_POINTER`.
+    pub const TX_TAIL: usize = 0x1120;
+    /// `DMA_CH0_RXDESC_TAIL_POINTER`.
+    pub const RX_TAIL: usize = 0x1128;
+    /// `DMA_CH0_TXDESC_RING_LENGTH` (entries − 1).
+    pub const TX_RING_LEN: usize = 0x112C;
+    /// `DMA_CH0_RXDESC_RING_LENGTH` (entries − 1) — the last of the
+    /// block.
+    pub const RX_RING_LEN: usize = 0x1130;
+    /// First register of channel 1; channels are 0x80 apart.
+    pub const CH1_FIRST: usize = 0x1180;
+    /// One past the last register of channel 7.
+    pub const CH7_END: usize = 0x1500;
+    /// Start (`ST` in TX control, `SR` in RX control).
+    pub const CONTROL_START: u32 = 1;
+    /// `RX_CONTROL.RBSZ`, bits 14:1, the receive buffer size in bytes.
+    pub const RX_CONTROL_RBSZ_MASK: u32 = 0x7FFE;
+}
+
+/// The channel-0 registers that program one ring, by the kernel's
+/// ring id (0 = receive, 1 = transmit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DwmacRingRegs {
+    /// Control register (start bit 0).
+    pub control: usize,
+    /// List address, high word.
+    pub list_hi: usize,
+    /// List address, low word.
+    pub list_lo: usize,
+    /// Tail pointer.
+    pub tail: usize,
+    /// Ring length (entries − 1).
+    pub ring_len: usize,
+}
+
+/// The registers of ring `ring`, or `None` for a ring id the kernel
+/// does not hold.
+///
+/// ```
+/// use wari_validate::dma::dwmac_ring_regs;
+/// assert_eq!(dwmac_ring_regs(0).unwrap().tail, 0x1128); // receive
+/// assert_eq!(dwmac_ring_regs(1).unwrap().tail, 0x1120); // transmit
+/// assert!(dwmac_ring_regs(2).is_none());
+/// ```
+pub const fn dwmac_ring_regs(ring: u32) -> Option<DwmacRingRegs> {
+    use dwmac_reg::*;
+    match ring {
+        0 => Some(DwmacRingRegs {
+            control: RX_CONTROL,
+            list_hi: RX_LIST_HI,
+            list_lo: RX_LIST_LO,
+            tail: RX_TAIL,
+            ring_len: RX_RING_LEN,
+        }),
+        1 => Some(DwmacRingRegs {
+            control: TX_CONTROL,
+            list_hi: TX_LIST_HI,
+            list_lo: TX_LIST_LO,
+            tail: TX_TAIL,
+            ring_len: TX_RING_LEN,
+        }),
+        _ => None,
+    }
+}
+
+/// `RX_CONTROL` value `cur` with its buffer-size field set to
+/// [`DWMAC_RBSZ`] and every other bit kept.
+///
+/// ```
+/// use wari_validate::dma::dwmac_rx_control_with_rbsz;
+/// assert_eq!(dwmac_rx_control_with_rbsz(0x0001_0000), 0x0001_0C00);
+/// assert_eq!(dwmac_rx_control_with_rbsz(0x0001_7FFE), 0x0001_0C00);
+/// ```
+pub const fn dwmac_rx_control_with_rbsz(cur: u32) -> u32 {
+    (cur & !dwmac_reg::RX_CONTROL_RBSZ_MASK) | (DWMAC_RBSZ << 1)
+}
+
+/// Receive buffer size the kernel programs into
+/// `DMA_CH0_RX_CONTROL.RBSZ`, in bytes. The engine writes up to this
+/// many bytes into every receive buffer whatever the driver thinks,
+/// so a receive buffer is exactly this long: an Ethernet frame (1518)
+/// plus a VLAN tag, rounded to the bus width.
+pub const DWMAC_RBSZ: u32 = 1536;
+
+/// Largest transmit buffer a DWMAC4 descriptor can name: `TDES2`
+/// bits 13:0.
+pub const DWMAC_TX_BUF_MAX: u32 = 0x3FFF;
+
+/// `RDES3`/`TDES3` bit 31: the engine owns the descriptor. Set by
+/// the kernel when it hands a descriptor over; cleared by the engine
+/// in its writeback.
+pub const DWMAC_DESC_OWN: u32 = 1 << 31;
+/// `RDES3` bit 30 (read format): interrupt on completion.
+const DWMAC_RDES3_IOC: u32 = 1 << 30;
+/// `RDES3` bit 24 (read format): buffer 1 address valid. Buffer 2 is
+/// never marked valid, so `RDES2` is never followed.
+const DWMAC_RDES3_BUF1V: u32 = 1 << 24;
+/// `TDES3` bit 29 (read format): last descriptor of the frame.
+const DWMAC_TDES3_LD: u32 = 1 << 29;
+/// `TDES3` bit 28 (read format): first descriptor of the frame.
+const DWMAC_TDES3_FD: u32 = 1 << 28;
+
+/// May a driver transmit `len` bytes from one DWMAC4 descriptor?
+///
+/// ```
+/// use wari_validate::dma::{dwmac_tx_len_ok, DWMAC_TX_BUF_MAX};
+/// assert!(dwmac_tx_len_ok(64));
+/// assert!(dwmac_tx_len_ok(DWMAC_TX_BUF_MAX));
+/// assert!(!dwmac_tx_len_ok(0));                    // nothing to send
+/// assert!(!dwmac_tx_len_ok(DWMAC_TX_BUF_MAX + 1)); // does not fit TDES2
+/// ```
+pub const fn dwmac_tx_len_ok(len: u32) -> bool {
+    len != 0 && len <= DWMAC_TX_BUF_MAX
+}
+
+/// The 16 bytes of a DWMAC4 receive descriptor handing the engine
+/// the buffer at physical address `pa`, which must be
+/// [`DWMAC_RBSZ`] bytes long and already validated.
+///
+/// ```
+/// use wari_validate::dma::{dwmac_desc_status, dwmac_rx_desc, DWMAC_DESC_OWN};
+/// let d = dwmac_rx_desc(0x4079_b880);
+/// assert_eq!(&d[0..8], &0x4079_b880u64.to_le_bytes()); // RDES0/1
+/// assert_eq!(&d[8..12], &[0, 0, 0, 0]);                // RDES2: no buffer 2
+/// assert_eq!(dwmac_desc_status(&d), 0xC100_0000);      // OWN | IOC | BUF1V
+/// assert!(dwmac_desc_status(&d) & DWMAC_DESC_OWN != 0);
+/// ```
+pub const fn dwmac_rx_desc(pa: u64) -> [u8; DESC_SIZE] {
+    dwmac_desc(pa, 0, DWMAC_DESC_OWN | DWMAC_RDES3_IOC | DWMAC_RDES3_BUF1V)
+}
+
+/// The 16 bytes of a DWMAC4 transmit descriptor sending one whole
+/// frame of `len` bytes from physical address `pa`. `len` must
+/// satisfy [`dwmac_tx_len_ok`] and the span must already be
+/// validated; this function only encodes.
+///
+/// ```
+/// use wari_validate::dma::{dwmac_desc_status, dwmac_tx_desc};
+/// let d = dwmac_tx_desc(0x407a_1980, 64);
+/// assert_eq!(&d[0..8], &0x407a_1980u64.to_le_bytes()); // TDES0/1
+/// assert_eq!(&d[8..12], &64u32.to_le_bytes());         // TDES2: buffer length
+/// assert_eq!(dwmac_desc_status(&d), 0xB000_0040);      // OWN | LD | FD | 64
+/// ```
+pub const fn dwmac_tx_desc(pa: u64, len: u32) -> [u8; DESC_SIZE] {
+    let len = len & DWMAC_TX_BUF_MAX;
+    dwmac_desc(
+        pa,
+        len,
+        DWMAC_DESC_OWN | DWMAC_TDES3_LD | DWMAC_TDES3_FD | len,
+    )
+}
+
+/// Word 3 (`RDES3`/`TDES3`) of a DWMAC4 descriptor: the ownership and
+/// status word, the only one a driver needs back.
+pub const fn dwmac_desc_status(desc: &[u8; DESC_SIZE]) -> u32 {
+    u32::from_le_bytes([desc[12], desc[13], desc[14], desc[15]])
+}
+
+/// Byte offset from a DWMAC4 ring's base that the tail-pointer
+/// register gets when the driver says "descriptors before `idx` are
+/// ready", or `None` if `idx` is past the end of a ring of `entries`.
+/// `idx == entries` is allowed: it is the end of the ring, which is
+/// how the receive side says "all of them".
+///
+/// ```
+/// use wari_validate::dma::dwmac_tail_offset;
+/// assert_eq!(dwmac_tail_offset(16, 1), Some(16));
+/// assert_eq!(dwmac_tail_offset(16, 16), Some(256)); // end of the ring
+/// assert_eq!(dwmac_tail_offset(16, 17), None);      // past it
+/// assert_eq!(dwmac_tail_offset(0, 0), None);        // ring not claimed
+/// ```
+pub const fn dwmac_tail_offset(entries: u32, idx: u32) -> Option<u64> {
+    if ring_entries_ok(entries) && idx <= entries {
+        Some(idx as u64 * DESC_SIZE as u64)
+    } else {
+        None
+    }
+}
+
+const fn dwmac_desc(pa: u64, word2: u32, word3: u32) -> [u8; DESC_SIZE] {
+    let a = pa.to_le_bytes();
+    let w2 = word2.to_le_bytes();
+    let w3 = word3.to_le_bytes();
+    [
+        a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], w2[0], w2[1], w2[2], w2[3], w3[0], w3[1],
+        w3[2], w3[3],
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dwmac_descriptors_match_what_the_silicon_proven_driver_wrote() {
+        // The words the GMAC driver stored itself up to build 184.
+        let rx = dwmac_rx_desc(0x0000_0001_4079_b880);
+        assert_eq!(&rx[0..4], &0x4079_b880u32.to_le_bytes());
+        assert_eq!(&rx[4..8], &1u32.to_le_bytes());
+        assert_eq!(&rx[8..12], &[0; 4]);
+        assert_eq!(dwmac_desc_status(&rx), 0xC100_0000);
+        let tx = dwmac_tx_desc(0x407a_1980, 1514);
+        assert_eq!(&tx[8..12], &1514u32.to_le_bytes());
+        assert_eq!(
+            dwmac_desc_status(&tx),
+            0x8000_0000 | 0x2000_0000 | 0x1000_0000 | 1514
+        );
+    }
+
+    #[test]
+    fn dwmac_tx_length_never_leaks_into_the_flag_bits() {
+        // A caller that skipped `dwmac_tx_len_ok` still cannot set
+        // context, interrupt or checksum-insertion bits through len.
+        let d = dwmac_tx_desc(0, u32::MAX);
+        assert_eq!(&d[8..12], &DWMAC_TX_BUF_MAX.to_le_bytes());
+        assert_eq!(
+            dwmac_desc_status(&d) & !(DWMAC_DESC_OWN | DWMAC_TDES3_LD | DWMAC_TDES3_FD),
+            DWMAC_TX_BUF_MAX
+        );
+    }
+
+    #[test]
+    fn dwmac_tail_offset_bounds() {
+        for entries in 1..=KERNEL_RING_ENTRIES {
+            assert_eq!(dwmac_tail_offset(entries, 0), Some(0));
+            assert_eq!(
+                dwmac_tail_offset(entries, entries),
+                Some(entries as u64 * 16)
+            );
+            assert_eq!(dwmac_tail_offset(entries, entries + 1), None);
+        }
+        assert_eq!(dwmac_tail_offset(KERNEL_RING_ENTRIES + 1, 0), None);
+        assert_eq!(dwmac_tail_offset(16, u32::MAX), None);
+    }
 
     #[test]
     fn reaim_accepts_what_the_driver_does_and_refuses_edge_mixtures() {
