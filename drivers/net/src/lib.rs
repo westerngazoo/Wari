@@ -665,7 +665,38 @@ fn fill_first_pkt() {
 /// would call `rx_pop()` repeatedly until it returns 0.
 static mut RX_USED_SEEN: u16 = 0;
 static mut RX_AVAIL_NEXT: u16 = 0;
-static mut TX_USED_SEEN: u16 = 0;
+/// Free-running index of the next TX available-ring entry: the value
+/// `avail.idx` takes after the next publish (VirtIO 1.2 §2.7.13.2).
+/// The device has consumed every published TX frame exactly when its
+/// `used.idx` equals this.
+static mut TX_AVAIL_NEXT: u16 = 0;
+
+/// Scratch target for a frame smoltcp hands us while the single TX
+/// buffer is still being read by the device. Never published; the
+/// frame is dropped and the sender's retransmission recovers it. Same
+/// role as the GMAC path's `VF2_TX_SCRATCH`.
+#[cfg(feature = "qemu")]
+static mut TX_SCRATCH: [u8; ETH_FRAME_MAX] = [0u8; ETH_FRAME_MAX];
+
+/// Is a published TX frame still waiting for the device?
+///
+/// The driver has one TX buffer (`TX_BUF`), and QEMU reads it some
+/// time after the notify, not during it. Overwriting it before the
+/// device's `used.idx` catches up would send the new bytes in place of
+/// the old frame — or both copies of the new one.
+///
+/// `used.idx` is written by the device behind the compiler's back, so
+/// the read is volatile (the build-155..160 GMAC stall was a
+/// non-volatile read of device-written state).
+fn tx_in_flight() -> bool {
+    let used_idx_off = core::ptr::addr_of_mut!(TX_USED) as u32 + 2;
+    // SAFETY: `TX_USED` is this module's static; offset 2 is its
+    // `idx: le16`, 2-byte aligned (the ring is 4-byte aligned). INV-14:
+    // single-threaded singleton, the device is the only other writer.
+    let device_idx = unsafe { core::ptr::read_volatile(used_idx_off as *const u16) };
+    // SAFETY: single-threaded driver.
+    device_idx != unsafe { TX_AVAIL_NEXT }
+}
 
 /// Write a 16-bit little-endian value to a lin-mem offset.
 fn write_u16_le(off: u32, val: u16) {
@@ -804,6 +835,11 @@ pub fn driver_tx_send(buf_off: u32, len: u32) -> i32 {
     if len > ETH_FRAME_MAX as u32 {
         return -1;
     }
+    // Descriptor 0 and its buffer are the device's until it reports
+    // the previous frame used. Rewriting either now would corrupt it.
+    if tx_in_flight() {
+        return -1;
+    }
 
     let tx_desc_off = core::ptr::addr_of_mut!(TX_DESC) as u32;
     let tx_avail_off = core::ptr::addr_of_mut!(TX_AVAIL) as u32;
@@ -821,16 +857,21 @@ pub fn driver_tx_send(buf_off: u32, len: u32) -> i32 {
     // write. flags = 0.
     write_desc_meta(tx_desc_off, desc_idx, len, 0, 0);
 
-    // Available ring: bump idx to publish the descriptor.
+    // Available ring: put descriptor 0 in the next entry, then bump
+    // idx by exactly one to publish it. (Up to PM-78 the entry index
+    // was derived from a counter nothing ever advanced: the first
+    // frame was published twice and every later one not at all.)
     let avail_idx = unsafe {
-        let new_idx = (TX_USED_SEEN.wrapping_add(1)) % QUEUE_SIZE as u16;
+        let next = TX_AVAIL_NEXT;
         write_u16_le(
-            tx_avail_off + 4 + ((new_idx % QUEUE_SIZE as u16) as u32) * 2,
+            tx_avail_off + 4 + ((next % QUEUE_SIZE as u16) as u32) * 2,
             desc_idx,
         );
-        new_idx
+        let new_next = next.wrapping_add(1);
+        TX_AVAIL_NEXT = new_next;
+        new_next
     };
-    write_u16_le(tx_avail_off + 2, avail_idx.wrapping_add(1));
+    write_u16_le(tx_avail_off + 2, avail_idx);
 
     // SAFETY: extern host-fn, kernel cap-checks.
     unsafe { wari_nic_queue_notify(1) }
@@ -1333,7 +1374,10 @@ pub fn driver_poll(timestamp_ms: u64) -> i32 {
 pub mod phy {
     use core::sync::atomic::{compiler_fence, Ordering};
 
-    use super::{rx_pop, rx_recycle, tx_send, ETH_FRAME_MAX, RX_BUFS, TX_BUF, VIRTIO_NET_HDR_LEN};
+    use super::{
+        rx_pop, rx_recycle, tx_in_flight, tx_send, ETH_FRAME_MAX, RX_BUFS, TX_BUF, TX_SCRATCH,
+        VIRTIO_NET_HDR_LEN,
+    };
     use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
     use smoltcp::time::Instant;
 
@@ -1403,9 +1447,13 @@ pub mod phy {
         }
 
         fn transmit(&mut self, _timestamp: Instant) -> Option<NicTxToken> {
-            // Phase 1b uses a single TX_BUF; smoltcp can always
-            // get a tx token. Future PRs may add tx-ring
-            // back-pressure (return None when tx queue saturated).
+            // One TX buffer: while the device has not consumed the
+            // last frame there is nowhere to put the next one. `None`
+            // is smoltcp's back-pressure — it keeps the frame and
+            // retries on a later poll.
+            if tx_in_flight() {
+                return None;
+            }
             Some(NicTxToken)
         }
     }
@@ -1461,6 +1509,17 @@ pub mod phy {
         where
             F: FnOnce(&mut [u8]) -> R,
         {
+            // A token minted by `receive()` comes without the
+            // `transmit()` check (smoltcp takes both tokens or none),
+            // so check here: if the device still holds TX_BUF, the
+            // closure gets a scratch buffer and the frame is dropped
+            // rather than written over one in flight.
+            if tx_in_flight() {
+                // SAFETY: TX_SCRATCH is never published to the device;
+                // single-threaded driver, this is its only user.
+                let scratch = unsafe { &mut *core::ptr::addr_of_mut!(TX_SCRATCH) };
+                return f(&mut scratch[..len.min(ETH_FRAME_MAX)]);
+            }
             // Frame goes after the 12-byte VirtIO-net header.
             let total_len = len + VIRTIO_NET_HDR_LEN;
             let tx_buf_off = core::ptr::addr_of_mut!(TX_BUF) as u32;
