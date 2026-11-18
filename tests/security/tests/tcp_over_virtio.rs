@@ -10,12 +10,14 @@
 //! The client is the host side of a QEMU `hostfwd`; the server is the
 //! Tier-1 `apps/hello` demo behind the Tier-2 net driver. Passing
 //! needs the handshake, the request, the response and its close to
-//! cross both queues, several frames each way, so it also catches a
-//! transmit buffer reused before the device has read it.
+//! cross both queues, several frames each way. (Whether it would also
+//! catch the single transmit buffer being reused before the device has
+//! read it is not demonstrated: that depends on QEMU's TX timing.)
 
 use std::time::Duration;
 
 use wari_security_tests::boot_kernel_http_get;
+use wari_security_tests::markers::{ACCEPT_WINDOW_OPEN, HTTP_SERVED};
 
 /// Boot plus the first accept window opening takes about a second;
 /// the exchange itself is milliseconds. Generous for loaded CI hosts.
@@ -25,7 +27,7 @@ const WALLCLOCK: Duration = Duration::from_secs(20);
 fn http_get_over_virtio_gets_the_demo_reply() {
     let (uart, response) = boot_kernel_http_get(WALLCLOCK);
     assert!(
-        uart.contains("[accept] window open h=0"),
+        uart.contains(ACCEPT_WINDOW_OPEN),
         "the HTTP demo never opened its accept window:\n{uart}"
     );
     assert!(
@@ -38,7 +40,7 @@ fn http_get_over_virtio_gets_the_demo_reply() {
         "reply truncated or corrupted: {response:?}"
     );
     assert!(
-        uart.contains("http: served 200 OK"),
+        uart.contains(HTTP_SERVED),
         "the tenant did not report serving the request:\n{uart}"
     );
 }

@@ -73,7 +73,7 @@ fn default_kernel() -> PathBuf {
 /// QEMU device arguments that give the guest a VirtIO-net NIC on the
 /// same subnet `make run` uses (`Makefile` `QEMU_ARGS`), minus the
 /// host port forward so parallel test binaries never contend for a
-/// host port. Without a NIC the Tier-2 net driver's VirtIO init fails
+/// host port ([`boot_kernel_http_get`] adds one, on a free port). Without a NIC the Tier-2 net driver's VirtIO init fails
 /// at the magic-value read and nothing past it runs.
 const NET_DEVICE_ARGS: &[&str] = &[
     "-global",
@@ -93,13 +93,7 @@ pub fn boot_kernel_capture_with_net(wallclock: Duration) -> String {
 /// Guest TCP port the Tier-1 HTTP demo listens on (`apps/hello`).
 const GUEST_HTTP_PORT: u16 = 7000;
 
-/// UART marker printed when the first accept window opens: from here
-/// a client connection reaches a listening socket.
-const ACCEPT_WINDOW_OPEN: &str = "[accept] window open h=0";
-
-/// UART marker the demo tenant prints after its reply went out. The
-/// client can read the reply before the tenant gets to print this.
-const TENANT_SERVED: &str = "http: served";
+use markers::{ACCEPT_WINDOW_OPEN, HTTP_SERVED};
 
 /// Boot the kernel with a VirtIO-net NIC whose guest port 7000 is
 /// forwarded to a free host port, wait for the HTTP demo's accept
@@ -174,12 +168,15 @@ pub fn boot_kernel_http_get(wallclock: Duration) -> (String, String) {
     });
 
     let start = Instant::now();
-    let wait_for = |marker: &str| loop {
+    // Stops early if QEMU exits (e.g. another process took the port
+    // before QEMU bound the forward), so that failure is reported at
+    // once and with QEMU's own message rather than as a timeout.
+    let mut wait_for = |marker: &str| loop {
         let text = String::from_utf8_lossy(&uart.lock().expect("uart lock")).into_owned();
         if text.contains(marker) {
             break true;
         }
-        if start.elapsed() >= wallclock {
+        if start.elapsed() >= wallclock || matches!(child.try_wait(), Ok(Some(_))) {
             break false;
         }
         thread::sleep(Duration::from_millis(50));
@@ -199,13 +196,23 @@ pub fn boot_kernel_http_get(wallclock: Duration) -> (String, String) {
         }
     }
     if !response.is_empty() {
-        let _ = wait_for(TENANT_SERVED);
+        let _ = wait_for(HTTP_SERVED);
     }
 
     let _ = child.kill();
     let _ = child.wait();
     let _ = reader.join();
-    let text = String::from_utf8_lossy(&uart.lock().expect("uart lock")).into_owned();
+    let mut text = String::from_utf8_lossy(&uart.lock().expect("uart lock")).into_owned();
+    if !opened {
+        if let Some(mut err) = child.stderr.take() {
+            let mut msg = String::new();
+            let _ = err.read_to_string(&mut msg);
+            if !msg.is_empty() {
+                text.push_str("\n[qemu stderr] ");
+                text.push_str(&msg);
+            }
+        }
+    }
     (text, String::from_utf8_lossy(&response).into_owned())
 }
 
@@ -254,6 +261,14 @@ fn boot_capture(kernel: &Path, wallclock: Duration, extra_args: &[&str]) -> Stri
 /// Markers the kernel emits during a Phase-0 boot. Tests assert their
 /// presence/absence to verify the kernel survived an adversarial input.
 pub mod markers {
+    /// Printed when the HTTP demo's first accept window opens: from
+    /// here a client connection reaches a listening socket.
+    pub const ACCEPT_WINDOW_OPEN: &str = "[accept] window open h=0";
+
+    /// Printed by the HTTP demo tenant after its reply went out. A
+    /// client can read the reply before the tenant gets to print it.
+    pub const HTTP_SERVED: &str = "http: served 200 OK";
+
     /// Printed by the kernel after `runtime::run_tier2_uart` succeeds.
     /// If absent, signature verification or driver instantiation
     /// failed — the kernel halted in `kmain`'s wfi loop.

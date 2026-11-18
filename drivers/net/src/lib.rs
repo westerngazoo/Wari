@@ -694,7 +694,8 @@ fn tx_in_flight() -> bool {
     // `idx: le16`, 2-byte aligned (the ring is 4-byte aligned). INV-14:
     // single-threaded singleton, the device is the only other writer.
     let device_idx = unsafe { core::ptr::read_volatile(used_idx_off as *const u16) };
-    // SAFETY: single-threaded driver.
+    // SAFETY: INV-14 — single-threaded singleton; plain read of a
+    // static only this module writes.
     device_idx != unsafe { TX_AVAIL_NEXT }
 }
 
@@ -824,9 +825,15 @@ fn populate_rx() -> Result<(), ()> {
 // ── Exported RX/TX helpers (consumed by PR Net-5 / smoltcp) ──────
 
 /// Send a frame from `buf_off` of length `len` bytes. Phase-1b
-/// allows only one in-flight tx at a time (no descriptor pool); the
-/// caller must wait for the previous send to retire before calling
-/// again. Returns 0 on success, -1 on host-fn failure.
+/// allows only one in-flight tx at a time (no descriptor pool).
+/// Returns 0 on success; -1, publishing nothing, if `len` is too
+/// long, the previous frame is still in flight (`tx_in_flight`) or
+/// the kernel refuses the descriptor; or the kernel's errno if the
+/// notify itself fails — the frame is then published but the device
+/// was never told, `tx_in_flight` stays true and TX is dead. That
+/// notify only fails when the driver has lost its `Net + WRITE` cap,
+/// which `nic_dma_set_buf` checked a moment earlier in this same
+/// single-threaded call, so in practice the network is already gone.
 ///
 /// Caller is responsible for prepending the 12-byte VirtIO-net
 /// header to the frame (per §5.1.6); Phase-1b's smoltcp wrapper
@@ -1422,6 +1429,16 @@ pub mod phy {
         }
 
         fn receive(&mut self, _timestamp: Instant) -> Option<(NicRxToken, NicTxToken)> {
+            // smoltcp answers a received frame (ARP reply, ICMP echo,
+            // TCP RST/ACK) through the TX token paired with it. With
+            // the one TX buffer still in flight that answer would have
+            // nowhere to go, so leave the frame on the RX ring for the
+            // next poll rather than take it and drop the answer
+            // (embassy-net's drivers make the same both-or-neither
+            // check).
+            if tx_in_flight() {
+                return None;
+            }
             let packed = rx_pop();
             if packed == 0 {
                 return None;
@@ -1509,16 +1526,17 @@ pub mod phy {
         where
             F: FnOnce(&mut [u8]) -> R,
         {
-            // A token minted by `receive()` comes without the
-            // `transmit()` check (smoltcp takes both tokens or none),
-            // so check here: if the device still holds TX_BUF, the
-            // closure gets a scratch buffer and the frame is dropped
-            // rather than written over one in flight.
+            // Defence in depth: both token sources check
+            // `tx_in_flight`, but a receive-paired token is consumed
+            // after the frame is processed, and smoltcp may have sent
+            // something in between. If the device still holds TX_BUF,
+            // the closure gets a scratch buffer and the frame is
+            // dropped rather than written over one in flight.
             if tx_in_flight() {
-                // SAFETY: TX_SCRATCH is never published to the device;
-                // single-threaded driver, this is its only user.
+                // SAFETY: INV-14 — TX_SCRATCH is never published to the
+                // device; single-threaded driver, this is its only user.
                 let scratch = unsafe { &mut *core::ptr::addr_of_mut!(TX_SCRATCH) };
-                return f(&mut scratch[..len.min(ETH_FRAME_MAX)]);
+                return f(&mut scratch[..len]);
             }
             // Frame goes after the 12-byte VirtIO-net header.
             let total_len = len + VIRTIO_NET_HDR_LEN;
