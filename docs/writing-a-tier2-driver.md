@@ -32,8 +32,10 @@ has drawn blood already (see §6):
    CPU instruction, you're doing it wrong — cross the boundary instead.
 2. **Hardware is touched only through host functions** the kernel
    imports for you (`wari_net_mmio_read32`, `wari_net_mmio_write32`,
-   `mdio_*`, `lin_mem_base`, …). The driver has no raw pointers to
-   device memory.
+   `mdio_*`, `nic_dma_set_buf`, …). The driver has no raw pointers to
+   device memory, and never learns a physical address: DMA buffers
+   are named by linear-memory offset and the kernel writes the
+   descriptors (INV-25).
 3. **The driver is built as a *separate cargo crate*** and embedded into
    the kernel as a signed blob. You **must** build through `make` /
    `scripts/build.sh` or you will ship a stale driver under a

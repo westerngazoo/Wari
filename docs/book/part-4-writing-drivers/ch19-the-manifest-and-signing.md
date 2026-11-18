@@ -99,10 +99,12 @@ a shape is an ABI change.
 The net driver's manifest is assembled at compile time by the
 `wari_net_driver!` macro (`lib.rs:802`) from two descriptor lists: eleven
 exports (`lib.rs:886`) — `_start`, `poll`, `tx_send`, `rx_pop`,
-`rx_recycle`, and the six socket calls — and eight imports (`lib.rs:906`)
-— `net_mmio_write32`, `net_mmio_read32`, `nic_set_mac`,
-`nic_attach_queue`, `nic_queue_notify`, `lin_mem_base`, `drv_log_u32`,
-and `drv_trace_u32`. The total size is a compile-time constant,
+`rx_recycle`, and the six socket calls — and twelve imports —
+`net_mmio_write32`, `net_mmio_read32`, `nic_set_mac`,
+`nic_attach_queue`, `nic_queue_notify`, the five kernel-owned DMA
+operations (`nic_dma_set_buf`, `nic_dma_status`, `nic_attach_ring`,
+`nic_ring_kick`, `nic_ring_rewind`), `drv_log_u32` and
+`drv_trace_u32`. The total size is a compile-time constant,
 `NET_MANIFEST_SIZE` (`lib.rs:776`):
 
 ```rust

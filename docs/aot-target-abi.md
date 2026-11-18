@@ -67,7 +67,7 @@ were read out of the source, not assumed:
    plain `*_impl(proc_id, args…)` functions in `cap::`; only the ones that
    touch tenant memory take the `Caller` (`cap_lookup_impl`,
    `ring_submit_impl`, `ipc_*_impl`, `nic_attach_queue_impl`,
-   `lin_mem_base_impl`).
+   `nic_dma_set_buf_impl`, `nic_dma_status_impl`).
 5. **Memory-touching host fns resolve linear memory by string lookup on every
    call** — `caller.get_export("memory")`, twice per `fd_write` counting
    `write_nwritten`. This is the cost the AOT ABI deletes for free (§3.5).

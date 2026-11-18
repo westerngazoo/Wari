@@ -99,6 +99,16 @@ of the others.
    check, and it holds even if the driver is compromised. Gate: an
    adversarial test where a driver submits an offset outside its
    memory and is refused, on the host, in QEMU and on the VF2.
+
+   *Implemented* (VirtIO and GMAC; the GMAC silicon run gates its
+   merge). Two departures from the text above, both stricter: the
+   kernel owns the descriptor **tables**, not only the addresses
+   written into them (a validated address in a descriptor the driver
+   can still store to is not containment), and it owns, or
+   value-checks, every register that changes what the engine walks —
+   queue size and readiness, feature bits, ring length, buffer size,
+   descriptor format, and the start and reset ordering around attach.
+   See INV-25 for the mechanism and its per-SoC assumption.
 2. **The driver is split by responsibility, then the stack leaves
    it.** First a behaviour-preserving split of the file into
    hardware, stack, sockets, demo and diagnostics, so each part has a

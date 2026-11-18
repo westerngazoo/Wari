@@ -82,7 +82,7 @@ code for exactly this reason (Chapter 20).
 **Rule 2 — hardware is touched only through host functions.** The kernel
 imports a small set of functions into the driver's linker
 (`net_mmio_read32`, `net_mmio_write32`, `nic_attach_queue`,
-`lin_mem_base`, and so on). The driver has no pointer to a device
+`nic_dma_set_buf`, and so on). The driver has no pointer to a device
 register; it passes an *address* to a host function that is
 capability-gated and range-validated before it pokes anything. More on
 the mechanics below.
@@ -312,7 +312,7 @@ extern "C" {
     fn wari_drv_log_u32(tag: u32, val: u32) -> i32;         // boot milestones (always on)
     #[link_name = "drv_trace_u32"]
     fn wari_drv_trace_u32(tag: u32, val: u32) -> i32;       // hot path (debug-kernel only)
-    // … nic_set_mac, nic_attach_queue, nic_queue_notify, lin_mem_base
+    // … nic_set_mac, nic_attach_queue, nic_queue_notify, nic_dma_set_buf, …
 }
 ```
 
