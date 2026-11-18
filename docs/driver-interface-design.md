@@ -270,7 +270,7 @@ pub enum FuncSig {
     /// u64 -> i32  — net poll
     U64_I32 = 5,
 
-    /// () -> u64  — rx_pop (packed return), lin_mem_base
+    /// () -> u64  — rx_pop (packed return)
     Unit_U64 = 6,
 
     /// (u32, u32) -> i32 with two more u32 — formerly

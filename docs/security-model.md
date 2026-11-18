@@ -200,9 +200,10 @@ graph LR
   function is an attack vector. Audited host-fn-by-host-fn.
 - **Tier-2 → Tier-0**: narrower; Tier-2 modules are signed + attested,
   but still sandboxed (they run inside wasmi). Their data paths into
-  Tier 0 are cap-gated host functions (MMIO windows, `lin_mem_base`,
-  `nic_attach_queue`, …) — and, for a driver of a bus-master device,
-  the DMA it programs, which no host function mediates today (§"DMA").
+  Tier 0 are cap-gated host functions (MMIO windows, `nic_attach_queue`,
+  `nic_dma_set_buf`, …) — and, for a driver of a bus-master device,
+  the DMA it programs, which the kernel now mediates: it owns the
+  descriptor tables and the registers that aim the engine (§"DMA").
 - **Tier-0 → Hardware**: trusted; the kernel is the silicon's peer.
 - **Between Tier-1 instances**: zero direct path while Layer 1 holds.
   Shared state only through Tier-0 (via IPC) or Tier-2 (via drivers).

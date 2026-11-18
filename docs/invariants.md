@@ -555,8 +555,10 @@ which gained a required-value field); refuses those control registers
 until both rings are attached, and the DMA reset plus the clock/reset
 windows after (`needs_attach`, `frozen_after_attach`): a start before
 attach would walk the reset list address 0, and a reset after it
-clears the kernel's registers. No signed driver imports `lin_mem_base`
-any more. The driver's self-check makes fourteen attempts that must be
+clears the kernel's registers. `lin_mem_base` is gone from the kernel:
+no Tier-2 module can ask for its physical base, and a driver that
+imports it fails to instantiate (`tests/security/tests/no_physical_base.rs`
+checks that the shipped drivers do not). The driver's self-check makes fourteen attempts that must be
 refused on silicon (`vf2_inv25_self_check`: `DMAo`, `DMAl`, `DMAb`,
 `DMAx`, `DMAn`, `DMAw`, `DMAz`, `DMAs`, `DMAt`, `DMAr`, `DMAc`,
 `DMAk`, `DMAa`), plus `DMAe` before attach (starting the engine). QEMU cannot run this
