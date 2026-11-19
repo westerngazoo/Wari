@@ -56,14 +56,27 @@ locked access.
 
 ### INV-2 · Trap Frame Exclusivity
 
-> While a syscall handler runs, the current hart owns the `TrapFrame`
-> it was handed. No other code path touches it until sret.
+> While a trap handler runs, the current hart owns the `TrapFrame`
+> it was handed. No other code path touches it until sret (or, for a
+> U-mode process that ends, until the leave path returns from
+> `__umode_enter`).
+>
+> `sscratch` tells the trap entry which mode trapped: it is **0 while
+> the kernel runs** and **the kernel stack pointer while U-mode runs**.
+> `trap::install` zeroes it before the first trap can arrive; only
+> `__umode_enter` and the U-mode resume path in `trap.S` set it
+> non-zero, immediately before `sret` to U-mode, and the U-mode entry
+> path zeroes it again before calling Rust.
 
-**Consequence**: `&mut TrapFrame` parameters in syscall handlers do
-not alias.
+**Consequence**: `&mut TrapFrame` parameters in trap handlers do not
+alias, and a trap from U-mode always lands on a kernel stack — never
+on the stack pointer U-mode left behind (ADR-004 step 1).
 
-**When this breaks**: nested interrupts (reentrant traps). Prevented
-by SIE=0 during S-mode trap service.
+**When this breaks**: nested interrupts (reentrant traps), prevented
+by SIE=0 during trap service; or a non-zero `sscratch` while the kernel
+runs, which would make an S-mode trap switch to a stale stack. Tested
+by `tests/security/tests/umode_kernel_read.rs`, which exercises both
+modes on every boot.
 
 ### INV-3 · MMIO Address Validity
 
@@ -623,6 +636,12 @@ contract: caller must guarantee one-time invocation pre-runtime use.
 | `kernel/src/trap.rs` (`install`, ~95)   | `csrw stvec` write                                                 | INV-7        | Privileged S-mode CSR write |
 | `kernel/src/trap.rs` (`ack_timer`, ~150)| `csrc sip` clear                                                   | INV-7        | Privileged S-mode CSR clear |
 | `kernel/src/trap.S` (`_trap_entry`)     | Privileged register save/restore + `sret`                          | INV-7        | S-mode trap-vector asm |
+| `kernel/src/trap.S` (`_trap_entry` U-mode path, `__umode_enter`) | `sscratch` swap, `sret` to U-mode, leave path restoring the kernel context | INV-2, INV-7 | U→S entry on the kernel stack; GPRs zeroed before entering U-mode (ADR-004 step 1) |
+| `kernel/src/trap.rs` (`install`)        | `csrw sscratch, zero`                                              | INV-2, INV-7 | Marks "kernel running" before the first trap |
+| `kernel/src/trap.rs` (`handle_user_trap`) | `&mut TrapFrame` parameter                                       | INV-2        | Trap-frame exclusivity during U-mode trap service |
+| `kernel/src/mem/kvm.rs` (`map_user_stub`) | `copy_nonoverlapping` into a fresh page; `fence.i` + `sfence.vma` | INV-5, INV-7 | Stub code copied while the page is still U=0; fetch and TLB ordered after the remap (R6). Feature `umode` |
+| `kernel/src/mem/kvm.rs` (`unmap_user_stub`, `free_page`) | `sfence.vma`; `page_alloc::get`                     | INV-1, INV-7, INV-8 | No stale U=1 entry once the pages return to the allocator. Feature `umode` |
+| `kernel/src/umode.rs` (`self_test`, `run_stub`) | linker-symbol reads; `__umode_enter` call                  | INV-2, INV-4, INV-7 | Boot self-test; the only U=1 pages in the table exist while it runs. Feature `umode` |
 | `kernel/src/mem/kvm.rs` (`init`, runtime-heap symbols) | `sym_addr(&_runtime_heap_start/_end)`             | INV-4        | Linker-symbol addresses for the bump arena |
 | `kernel/src/mem/kvm.rs` (`init`, end)   | `runtime::heap::init(runtime_heap_start, runtime_heap_end)`        | INV-1, INV-12 | One-time boot install of the bump arena |
 | `kernel/src/runtime/heap.rs` (`init`)   | `static mut HEAP_CURSOR/HEAP_END` write                            | INV-1, INV-12 | Single-hart boot-only init of the arena |
