@@ -28,15 +28,27 @@
 #   stval    at offset  0x118
 # Total: 288 bytes.
 #
-# Kernel context saved by `__umode_enter` (UCTX_*): ra, s0..s11 and
-# sstatus — 14 words, 112 bytes. The U-mode trap frame sits directly
-# below it, which is how the leave path finds it.
+# Kernel context saved by `__umode_enter` (UCTX_*): ra, s0..s11,
+# sstatus, gp and tp — 16 words, 128 bytes. The U-mode trap frame sits
+# directly below it, which is how the U-mode entry and leave paths find
+# it.
+#
+# U-mode never sees kernel state: every GPR is zeroed before `sret`,
+# and `sstatus.FS` is Off while U-mode runs, so the FP registers are
+# neither readable nor writable from U-mode (an FP instruction there is
+# an illegal-instruction fault, which ends the process). The kernel's
+# gp/tp are reloaded from the context before any Rust runs on a U-mode
+# trap, so kernel code never executes with U-mode's gp/tp.
 
 .equ FRAME_SIZE, 288
-.equ UCTX_SIZE, 112
+.equ UCTX_SIZE, 128
 .equ UCTX_SSTATUS, 104
+.equ UCTX_GP, 112
+.equ UCTX_TP, 120
+.equ SSTATUS_SIE, 1 << 1
 .equ SSTATUS_SPIE, 1 << 5
 .equ SSTATUS_SPP, 1 << 8
+.equ SSTATUS_FS, 3 << 13
 
 # Save every GPR except x0 and x2 (sp) into the frame at sp.
 .macro SAVE_GPRS
@@ -163,6 +175,13 @@ _trap_entry:
     # handler runs is classified as an S-mode trap.
     csrw    sscratch, zero
     SAVE_CSRS
+    # Kernel gp/tp and the kernel's FP access (FS) back before any Rust.
+    ld      gp, (FRAME_SIZE + UCTX_GP)(sp)
+    ld      tp, (FRAME_SIZE + UCTX_TP)(sp)
+    ld      t0, (FRAME_SIZE + UCTX_SSTATUS)(sp)
+    li      t1, SSTATUS_FS
+    and     t0, t0, t1
+    csrs    sstatus, t0
 
     mv      a0, sp
     call    handle_user_trap
@@ -182,6 +201,8 @@ _trap_entry:
     addi    sp, sp, FRAME_SIZE
     ld      t0, UCTX_SSTATUS(sp)
     csrw    sstatus, t0
+    ld      gp, UCTX_GP(sp)
+    ld      tp, UCTX_TP(sp)
     ld      ra,    0(sp)
     ld      s0,    8(sp)
     ld      s1,   16(sp)
@@ -200,11 +221,12 @@ _trap_entry:
 
 # u64 __umode_enter(const UserEntry *e)  -- e = [pc, sp, a0], three words
 #
-# Saves the kernel's callee-saved registers and sstatus, points
+# Saves the kernel's callee-saved registers, gp, tp and sstatus, points
 # sscratch at them, and srets to `e->pc` in U-mode with `e->sp` and
-# `e->a0`. Every other GPR is zeroed so no kernel value leaks into
-# U-mode. Returns (through `.Luser_leave`) the non-zero exit word
-# `handle_user_trap` produced when the process ended.
+# `e->a0`. Every other GPR is zeroed and FS is Off, so no kernel value
+# leaks into U-mode. Returns (through `.Luser_leave`) the non-zero exit
+# word `handle_user_trap` produced when the process ended; sstatus
+# (SIE and FS included), gp and tp are as they were on entry.
 .global __umode_enter
 __umode_enter:
     addi    sp, sp, -UCTX_SIZE
@@ -221,15 +243,21 @@ __umode_enter:
     sd      s9,   80(sp)
     sd      s10,  88(sp)
     sd      s11,  96(sp)
+    sd      gp, UCTX_GP(sp)
+    sd      tp, UCTX_TP(sp)
     csrr    t0, sstatus
     sd      t0, UCTX_SSTATUS(sp)
+    # No interrupt between here and sret: one taken with sscratch != 0
+    # but SPP = 1 would be misrouted to the U-mode path.
+    csrci   sstatus, SSTATUS_SIE
     csrw    sscratch, sp
 
     ld      t0,  0(a0)
     csrw    sepc, t0
     # SPP = 0: sret lands in U-mode. SPIE = 0: deterministic SIE after
-    # the next trap (S-mode interrupts reach U-mode regardless).
-    li      t0, SSTATUS_SPP | SSTATUS_SPIE
+    # the next trap (S-mode interrupts reach U-mode regardless). FS = Off:
+    # the kernel's FP registers stay out of U-mode's reach.
+    li      t0, SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_FS
     csrc    sstatus, t0
 
     ld      t0,  8(a0)

@@ -236,6 +236,12 @@ mod tests {
     #[test]
     fn cause_names() {
         assert_eq!(cause_name(CAUSE_LOAD_PAGE_FAULT), "load page fault");
+        assert_eq!(cause_name(CAUSE_STORE_PAGE_FAULT), "store page fault");
+        assert_eq!(
+            cause_name(CAUSE_INSTRUCTION_PAGE_FAULT),
+            "instruction page fault"
+        );
+        assert_eq!(cause_name(CAUSE_ILLEGAL_INSTRUCTION), "illegal instruction");
         assert_eq!(cause_name(1), "exception");
     }
 }

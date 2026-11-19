@@ -274,8 +274,18 @@ pub fn map_user_stub(code: &[u8]) -> Result<UserStubPages, KernelError> {
     unsafe {
         core::ptr::copy_nonoverlapping(code.as_ptr(), code_page as *mut u8, code.len());
     }
-    map_page(root, code_page, code_page, USER_RX)?;
-    map_page(root, stack_page, stack_page, USER_RW)?;
+    // The heap is already mapped at 4 KiB (see `init`), so these walks
+    // only rewrite leaves; should one fail anyway, give both pages back
+    // as ordinary kernel heap rather than leave a U=1 page behind.
+    if let Err(e) = map_page(root, code_page, code_page, USER_RX)
+        .and_then(|()| map_page(root, stack_page, stack_page, USER_RW))
+    {
+        let _ = unmap_user_stub(UserStubPages {
+            code: code_page,
+            stack: stack_page,
+        });
+        return Err(e);
+    }
     // SAFETY: INV-7. `fence.i` and `sfence.vma` are permitted in S-mode.
     // Memory ordering (R6): `fence.i` makes the instruction bytes just
     // stored visible to this hart's instruction fetch; `sfence.vma`

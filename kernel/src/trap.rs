@@ -173,7 +173,7 @@ fn dispatch_interrupt(code: usize, sepc: usize) {
 /// behalf — a U-mode fault ends only the process (ADR-004 step 1).
 #[no_mangle]
 pub extern "C" fn handle_user_trap(frame: &mut TrapFrame) -> u64 {
-    // SAFETY (R1): INV-2. The frame was saved by `_trap_entry` on the
+    // INV-2: the frame was saved by `_trap_entry` on the
     // kernel stack sscratch named; interrupts are masked while we run,
     // so nothing else touches it until sret or the leave path.
     match decide(frame.scause as u64, frame.a7 as u64, frame.a0 as u64) {
