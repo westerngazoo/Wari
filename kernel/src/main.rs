@@ -73,6 +73,8 @@ mod runtime;
 mod sbi;
 mod sched;
 mod trap;
+#[cfg(feature = "umode")]
+mod umode;
 mod validate;
 
 /// Build identifier string — supplied by the Makefile via the
@@ -222,6 +224,10 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
     r2s_first_light(_hart_id); // diverges; the boot stack below is unreachable on r2s
 
     trap::install();
+    // ADR-004 step 1: U-mode round trip and hostile-stub kill, before any
+    // interrupt source is enabled.
+    #[cfg(feature = "umode")]
+    umode::self_test();
     mmio::plic::init();
     kprintln!("mmu OK, traps installed, plic up");
 

@@ -133,6 +133,20 @@ fn boot_capture(kernel: &Path, wallclock: Duration, extra_args: &[&str]) -> Stri
 /// Markers the kernel emits during a Phase-0 boot. Tests assert their
 /// presence/absence to verify the kernel survived an adversarial input.
 pub mod markers {
+    /// `kernel/src/umode.rs`: the well-behaved U-mode stub made its
+    /// `ecall`, got the right answer back and exited 0 (ADR-004 step 1).
+    pub const UMODE_STUB_OK: &str = "[umode] stub: ecall 0 returned, exit 0";
+
+    /// `kernel/src/umode.rs`: the hostile stub's read of a kernel
+    /// address faulted in U-mode and only the stub was ended.
+    pub const UMODE_HOSTILE_KILLED: &str = "[umode] hostile stub killed: load page fault";
+
+    /// `kernel/src/umode.rs`: printed after both stubs, from S-mode.
+    pub const UMODE_KERNEL_CONTINUES: &str = "[umode] kernel continues";
+
+    /// Any self-test outcome other than the expected one.
+    pub const UMODE_FAILED: &str = "FAILED, got";
+
     /// Printed by the kernel after `runtime::run_tier2_uart` succeeds.
     /// If absent, signature verification or driver instantiation
     /// failed — the kernel halted in `kmain`'s wfi loop.

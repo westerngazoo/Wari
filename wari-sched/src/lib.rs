@@ -21,6 +21,7 @@ pub mod fuel;
 pub mod net_wait;
 pub mod policy;
 pub mod process;
+pub mod utrap;
 
 pub use fuel::TIER1_FUEL_PER_STEP;
 pub use policy::{count_blocked, pick_next_tenant};

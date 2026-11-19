@@ -18,10 +18,17 @@
 
 use crate::error::KernelError;
 use crate::kprintln;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use wari_mem::page_alloc::{self, AllocError, BitmapAllocator, PAGE_SIZE};
 use wari_mem::page_table::{
     make_satp, va_parts, Pte, PteFlags, KERNEL_RO, KERNEL_RW, KERNEL_RX, PT_ENTRIES,
 };
+#[cfg(feature = "umode")]
+use wari_mem::page_table::{USER_RW, USER_RX};
+
+/// Physical address of the kernel root page table, published by
+/// [`init`] once the MMU is on. 0 before that.
+static KERNEL_ROOT: AtomicUsize = AtomicUsize::new(0);
 
 /// Console UART base, from the active board descriptor (B3) — the same
 /// value `mmio::uart_ns16550` reads. Mapped as one RW page below.
@@ -187,6 +194,7 @@ pub fn init() -> Result<(), KernelError> {
     }
 
     kprintln!("  [kvm] root pt at {:#x}", root);
+    KERNEL_ROOT.store(root, Ordering::Relaxed);
 
     // Enable the MMU.
     let satp = make_satp(root, 0);
@@ -218,6 +226,107 @@ pub fn init() -> Result<(), KernelError> {
     }
 
     Ok(())
+}
+
+// ── U-mode stub pages (ADR-004 step 1, feature `umode`) ─────────
+
+/// The two U=1 pages a U-mode stub runs in: code (RX) and stack (RW).
+/// Identity-mapped, so each address is both the VA and the PA.
+#[cfg(feature = "umode")]
+pub struct UserStubPages {
+    /// First byte of the copied code; the stub's entry point.
+    pub code: usize,
+    /// Lowest address of the stack page; the stack grows down from
+    /// `stack + PAGE_SIZE`.
+    pub stack: usize,
+}
+
+/// Copy `code` into a fresh page and map it, plus a fresh stack page,
+/// with U=1 in the kernel table.
+///
+/// Step 1 has no per-process address spaces yet (step 2): these are
+/// the only U=1 pages in the table, and they exist only while a stub
+/// runs. Everything else stays U=0, and `sstatus.SUM` stays 0, so the
+/// stub can reach nothing of the kernel and the kernel touches nothing
+/// of the stub's after the copy.
+///
+/// Preconditions: [`init`] has run; `code.len() <= PAGE_SIZE`.
+/// Errors: `InvalidArgument` if the code does not fit in one page or
+/// the MMU is not up; `OutOfPages` if the allocator is empty.
+/// Postconditions: on `Ok`, undo with [`unmap_user_stub`].
+#[cfg(feature = "umode")]
+pub fn map_user_stub(code: &[u8]) -> Result<UserStubPages, KernelError> {
+    let root = KERNEL_ROOT.load(Ordering::Relaxed);
+    if root == 0 || code.len() > PAGE_SIZE {
+        return Err(KernelError::InvalidArgument);
+    }
+    let code_page = alloc_zeroed_page()?;
+    let stack_page = match alloc_zeroed_page() {
+        Ok(p) => p,
+        Err(e) => {
+            free_page(code_page);
+            return Err(e);
+        }
+    };
+    // SAFETY: INV-5. `code_page` is a fresh allocator page in the
+    // identity-mapped, kernel-writable heap (still KERNEL_RW here, U=0);
+    // `code.len() <= PAGE_SIZE`, and a fresh page cannot overlap `code`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(code.as_ptr(), code_page as *mut u8, code.len());
+    }
+    map_page(root, code_page, code_page, USER_RX)?;
+    map_page(root, stack_page, stack_page, USER_RW)?;
+    // SAFETY: INV-7. `fence.i` and `sfence.vma` are permitted in S-mode.
+    // Memory ordering (R6): `fence.i` makes the instruction bytes just
+    // stored visible to this hart's instruction fetch; `sfence.vma`
+    // orders the PTE writes before any later translation, so the stub's
+    // first fetch sees U=1 and the kernel's next access sees U=1 too.
+    unsafe {
+        core::arch::asm!("fence.i", "sfence.vma zero, zero");
+    }
+    Ok(UserStubPages {
+        code: code_page,
+        stack: stack_page,
+    })
+}
+
+/// Give the stub pages back: remap them U=0 as ordinary heap, flush the
+/// TLB, and free them.
+///
+/// Preconditions: `pages` came from [`map_user_stub`] and no U-mode
+/// code is running (it ran on this hart and has ended).
+/// Errors: `InvalidArgument` if the MMU is not up or a table walk
+/// finds a malformed table.
+#[cfg(feature = "umode")]
+pub fn unmap_user_stub(pages: UserStubPages) -> Result<(), KernelError> {
+    let root = KERNEL_ROOT.load(Ordering::Relaxed);
+    if root == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    map_page(root, pages.code, pages.code, KERNEL_RW)?;
+    map_page(root, pages.stack, pages.stack, KERNEL_RW)?;
+    // SAFETY: INV-7. Memory ordering (R6): the PTE writes above are
+    // ordered before every later translation, so no stale U=1 entry
+    // survives in the TLB once the pages return to the allocator.
+    unsafe {
+        core::arch::asm!("sfence.vma zero, zero");
+    }
+    free_page(pages.code);
+    free_page(pages.stack);
+    Ok(())
+}
+
+/// Return one page to the global allocator. A failure means the page
+/// was not allocated, which `map_user_stub`'s callers cannot cause; it
+/// is logged rather than escalated (R5).
+#[cfg(feature = "umode")]
+fn free_page(page: usize) {
+    // SAFETY: INV-1, INV-8. Single-hart; the allocator was installed by
+    // `init()` before any caller reaches here.
+    let alloc = unsafe { page_alloc::get() };
+    if alloc.free(page).is_err() {
+        kprintln!("  [kvm] free of {:#x} refused", page);
+    }
 }
 
 // ── Internal helpers ────────────────────────────────────────────
