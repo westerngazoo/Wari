@@ -177,6 +177,97 @@ pub const fn access_in_windows(addr: usize, width: usize, windows: &[MmioWindow]
     false
 }
 
+/// A register a driver may write, but only with bits inside
+/// `allowed`, and with the bits in `required_mask` equal to
+/// `required`. Pure data, like [`MmioWindow`].
+///
+/// `required_mask` exists for registers that pack a field the kernel
+/// owns beside bits the driver owns: the DWMAC4 receive control
+/// register holds both start/stop (the driver's) and the receive
+/// buffer size (the kernel's). The driver keeps writing the whole
+/// register, and a write that would change the kernel's field is
+/// refused rather than silently corrected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteMask {
+    /// Address of the 32-bit register.
+    pub addr: usize,
+    /// Bits the driver may set; any other bit refuses the write.
+    pub allowed: u32,
+    /// Bits whose value is fixed; `0` for none.
+    pub required_mask: u32,
+    /// The value those bits must have. Has no bits outside
+    /// `required_mask`.
+    pub required: u32,
+}
+
+/// May a driver write `val` to the 32-bit register at `addr`, given
+/// the value guards in `masks`? A register with no guard accepts any
+/// value (its *address* is licensed elsewhere); a guarded register
+/// accepts only values within its mask whose fixed bits have their
+/// fixed value.
+///
+/// ```
+/// use wari_validate::{write_value_allowed, WriteMask};
+/// const G: &[WriteMask] = &[
+///     WriteMask { addr: 0x20, allowed: 0b0011, required_mask: 0, required: 0 },
+///     WriteMask { addr: 0x28, allowed: 0b1111, required_mask: 0b1100, required: 0b0100 },
+/// ];
+/// assert!(write_value_allowed(0x20, 0b0001, G));   // inside the mask
+/// assert!(write_value_allowed(0x20, 0, G));        // nothing set
+/// assert!(!write_value_allowed(0x20, 0b0100, G));  // a bit outside it
+/// assert!(write_value_allowed(0x24, 0xFFFF_FFFF, G)); // not guarded
+/// assert!(write_value_allowed(0x28, 0b0101, G));   // fixed field as required
+/// assert!(!write_value_allowed(0x28, 0b1001, G));  // fixed field changed
+/// assert!(!write_value_allowed(0x28, 0b0001, G));  // fixed field cleared
+/// ```
+#[inline]
+pub const fn write_value_allowed(addr: usize, val: u32, masks: &[WriteMask]) -> bool {
+    let mut i = 0;
+    while i < masks.len() {
+        if masks[i].addr == addr {
+            let m = masks[i];
+            return val & !m.allowed == 0 && val & m.required_mask == m.required;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// May a driver write the `width`-byte register at `addr` now, given
+/// whether the kernel has attached the NIC's DMA rings?
+///
+/// Two board tables decide it. `needs_attach` registers are refused
+/// until the rings are attached: they start the engine, which before
+/// the kernel has programmed the descriptor lists would walk whatever
+/// the list registers hold after reset (address 0). `frozen` registers
+/// are refused once the rings are attached: they reset the engine or
+/// the MAC, which clears the list registers the kernel programmed.
+///
+/// ```
+/// use wari_validate::{attach_state_allows, MmioWindow};
+/// const START: &[MmioWindow] = &[MmioWindow { base: 0x1104, len: 8 }];
+/// const RESET: &[MmioWindow] = &[MmioWindow { base: 0x1000, len: 4 }];
+/// assert!(!attach_state_allows(0x1104, 4, false, START, RESET)); // start before attach
+/// assert!(attach_state_allows(0x1104, 4, true, START, RESET));
+/// assert!(attach_state_allows(0x1000, 4, false, START, RESET));  // reset during bring-up
+/// assert!(!attach_state_allows(0x1000, 4, true, START, RESET));  // reset after attach
+/// assert!(attach_state_allows(0x1160, 4, true, START, RESET));   // in neither table
+/// ```
+#[inline]
+pub const fn attach_state_allows(
+    addr: usize,
+    width: usize,
+    attached: bool,
+    needs_attach: &[MmioWindow],
+    frozen: &[MmioWindow],
+) -> bool {
+    if attached {
+        !access_in_windows(addr, width, frozen)
+    } else {
+        !access_in_windows(addr, width, needs_attach)
+    }
+}
+
 /// Per-platform board descriptors (audit blocker B3) — every constant
 /// that differs by SoC, as one record per platform. See `board`.
 pub mod board;
@@ -222,14 +313,37 @@ pub mod windows {
             len: 0x8000,
         }];
 
-        /// Registers that take a DMA *address*, which the driver may
-        /// not write through `net_mmio_write32`: the kernel programs
-        /// them itself from validated offsets (ADR-002 step 1,
-        /// INV-25). VirtIO 1.2 §4.2.2: `QueueDescLow/High` (0x080,
-        /// 0x084), `QueueDriverLow/High` (0x090, 0x094),
-        /// `QueueDeviceLow/High` (0x0a0, 0x0a4), written by
-        /// `nic_attach_queue`.
+        /// Registers that decide what the device's DMA touches, which
+        /// the driver may not write through `net_mmio_write32`: the
+        /// kernel programs them itself (ADR-002 step 1, INV-25).
+        /// VirtIO 1.2 §4.2.2:
+        ///
+        /// - `QueueSel` (0x030), `QueueNum` (0x038), `QueueReady`
+        ///   (0x044) and the legacy slots between them. Addresses
+        ///   alone are not enough: a driver that could raise
+        ///   `QueueNum` past the kernel's 16-entry table would have
+        ///   the device walk kernel memory as descriptors and size
+        ///   the available and used rings past what was validated;
+        ///   one that could select a queue could re-ready it.
+        /// - `QueueNotify` (0x050): the driver notifies through
+        ///   `nic_queue_notify`, which orders the doorbell after the
+        ///   descriptor stores.
+        /// - `QueueDescLow/High` (0x080), `QueueDriverLow/High`
+        ///   (0x090), `QueueDeviceLow/High` (0x0a0): the addresses.
+        ///
+        /// All are written by `nic_attach_queue` / `nic_queue_notify`.
+        /// The driver keeps `Status`, the feature registers (value-
+        /// checked, see [`WRITE_MASKS`]), the interrupt registers and
+        /// the device config space.
         pub const DMA_ADDR_REGS: &[MmioWindow] = &[
+            MmioWindow {
+                base: 0x1000_8030,
+                len: 0x18,
+            },
+            MmioWindow {
+                base: 0x1000_8050,
+                len: 0x4,
+            },
             MmioWindow {
                 base: 0x1000_8080,
                 len: 0x8,
@@ -242,7 +356,59 @@ pub mod windows {
                 base: 0x1000_80a0,
                 len: 0x8,
             },
+            // `QueueReset` (0x0c0). Needs a feature the driver cannot
+            // negotiate; listed so that every queue register is the
+            // kernel's, without exception.
+            MmioWindow {
+                base: 0x1000_80c0,
+                len: 0x4,
+            },
         ];
+
+        /// Registers the driver may write only with a restricted
+        /// value. One entry: `DriverFeatures` (0x020).
+        ///
+        /// Feature negotiation changes the shape of the rings the
+        /// kernel validated. `VIRTIO_RING_F_EVENT_IDX` (bit 29) adds
+        /// a field the device writes after the used ring;
+        /// `VIRTIO_RING_F_INDIRECT_DESC` (bit 28) lets a descriptor
+        /// point at a driver-supplied descriptor table;
+        /// `VIRTIO_F_RING_PACKED` (bit 34) replaces the layout
+        /// altogether. The driver may therefore accept exactly what
+        /// it uses today: `VIRTIO_NET_F_MAC` (bit 5, low word) and
+        /// `VIRTIO_F_VERSION_1` (bit 32 = bit 0 of the high word).
+        /// The register is written once per word behind
+        /// `DriverFeaturesSel`; the mask is the union of both words'
+        /// allowed bits, and neither bit is a ring feature in the
+        /// other word (bit 0: `VIRTIO_NET_F_CSUM`; bit 37:
+        /// `VIRTIO_F_SR_IOV`), so the check needs no selector state.
+        ///
+        /// Second entry: `DriverFeaturesSel` (0x024) may only select
+        /// word 0 or word 1. The reasoning above covers those two
+        /// words; a transport that offered further feature words
+        /// would otherwise let the same mask through for bits it was
+        /// never checked against.
+        pub const WRITE_MASKS: &[crate::WriteMask] = &[
+            crate::WriteMask {
+                addr: 0x1000_8020,
+                allowed: (1 << 5) | 1,
+                required_mask: 0,
+                required: 0,
+            },
+            crate::WriteMask {
+                addr: 0x1000_8024,
+                allowed: 1,
+                required_mask: 0,
+                required: 0,
+            },
+        ];
+
+        /// No attach-ordered registers: the VirtIO queue registers
+        /// are all the kernel's ([`DMA_ADDR_REGS`]), so there is
+        /// nothing for the driver to start early or reset late.
+        pub const NEEDS_ATTACH: &[MmioWindow] = &[];
+        /// See [`NEEDS_ATTACH`].
+        pub const FROZEN_AFTER_ATTACH: &[MmioWindow] = &[];
     }
 
     /// Orange Pi R2S (Ky X1 / SpacemiT K1) platform windows.
@@ -271,6 +437,13 @@ pub mod windows {
         /// DMA address registers the driver may not write directly.
         /// Empty until the R2S NIC is named.
         pub const DMA_ADDR_REGS: &[MmioWindow] = &[];
+
+        /// Value-restricted registers. None yet on this platform.
+        pub const WRITE_MASKS: &[crate::WriteMask] = &[];
+        /// Attach-ordered registers. None yet on this platform.
+        pub const NEEDS_ATTACH: &[MmioWindow] = &[];
+        /// Attach-ordered registers. None yet on this platform.
+        pub const FROZEN_AFTER_ATTACH: &[MmioWindow] = &[];
     }
 
     /// StarFive VisionFive 2 (JH7110) platform windows.
@@ -372,14 +545,128 @@ pub mod windows {
             },
         ];
 
-        /// DMA address registers the driver may not write directly.
+        /// The GMAC the kernel drives: GMAC1 (`eth1`), the one every
+        /// `scripts/build.sh` variant builds the driver for (`gmac1`).
+        pub const GMAC_BASE: usize = 0x1604_0000;
+        /// The other GMAC. Its DMA block is refused outright: the
+        /// kernel programs no rings for it, so nothing it could be
+        /// started on is validated.
+        const GMAC0_BASE: usize = 0x1603_0000;
+
+        use crate::dma::dwmac_reg::{
+            CH0_CONTROL as DMA_CH0_CONTROL, CH1_FIRST as DMA_CH1_FIRST, CH7_END as DMA_CH7_END,
+            CONTROL_START, DMA_MODE, RX_CONTROL as DMA_CH0_RX_CONTROL, RX_CONTROL_RBSZ_MASK,
+            RX_RING_LEN, TX_CONTROL as DMA_CH0_TX_CONTROL, TX_LIST_HI as DMA_CH0_LIST_FIRST,
+        };
+        /// One past the block of list, tail and length registers
+        /// (`TX_LIST_HI` 0x1110 .. `RX_RING_LEN` 0x1130). Channels
+        /// 1..7 (`DMA_CH1_FIRST`..`DMA_CH7_END`): `MAC_HW_FEATURE2` on
+        /// this SoC reports one channel each way, so these are not
+        /// expected to exist; refusing them costs nothing if they do
+        /// not and closes an unvalidated engine if they do.
+        const DMA_CH0_LIST_END: usize = RX_RING_LEN + 4;
+
+        /// `OSF` (TX bit 4); burst length (`TXPBL`/`RXPBL`, bits
+        /// 21:16); `RPF` (RX bit 31). Start is bit 0 of both.
+        const TX_CONTROL_OSF: u32 = 1 << 4;
+        const CONTROL_PBL: u32 = 0x3F << 16;
+        const RX_CONTROL_RPF: u32 = 1 << 31;
+
+        /// Registers that decide what the GMAC's DMA touches, which
+        /// the driver may not write: the kernel programs them itself
+        /// (ADR-002 step 1, INV-25).
         ///
-        /// **Empty for now, on purpose.** The GMAC driver still
-        /// programs `DMA_CH0_{TX,RX}DESC_LIST_ADDR{,_HI}` and the two
-        /// tail pointers itself; ADR-002 step 1 moves that into the
-        /// kernel in the VF2 PR, which fills this table at the same
-        /// time. Filling it earlier would brick the VF2 network.
-        pub const DMA_ADDR_REGS: &[MmioWindow] = &[];
+        /// - `DMA_CH0_CONTROL` (0x1100): descriptor skip length (DSL,
+        ///   bits 20:18) spaces descriptors apart, so the engine would
+        ///   read past the kernel's table; split header (SPH, bit 24)
+        ///   follows buffer 2. Written to zero at attach.
+        /// - 0x1110..0x1134: list addresses, tail pointers, ring
+        ///   lengths. Written by `nic_attach_ring`, `nic_ring_kick`
+        ///   and `nic_ring_rewind`.
+        /// - Channels 1..7, and GMAC0's whole DMA block (see
+        ///   [`GMAC0_BASE`]).
+        pub const DMA_ADDR_REGS: &[MmioWindow] = &[
+            MmioWindow {
+                base: GMAC0_BASE + DMA_MODE,
+                len: 0x1000,
+            },
+            MmioWindow {
+                base: GMAC_BASE + DMA_CH0_CONTROL,
+                len: 4,
+            },
+            MmioWindow {
+                base: GMAC_BASE + DMA_CH0_LIST_FIRST,
+                len: DMA_CH0_LIST_END - DMA_CH0_LIST_FIRST,
+            },
+            MmioWindow {
+                base: GMAC_BASE + DMA_CH1_FIRST,
+                len: DMA_CH7_END - DMA_CH1_FIRST,
+            },
+        ];
+
+        /// Value-restricted registers: the two channel control
+        /// registers. The driver starts and stops the engine and
+        /// sets its burst length; it may not enable anything that
+        /// changes the descriptor format (TX: TSO, enhanced
+        /// descriptors), and in the receive control register the
+        /// buffer size must stay the kernel's
+        /// ([`crate::dma::DWMAC_RBSZ`]): a larger one would have the
+        /// engine write past every buffer the kernel validated.
+        pub const WRITE_MASKS: &[crate::WriteMask] = &[
+            crate::WriteMask {
+                addr: GMAC_BASE + DMA_CH0_TX_CONTROL,
+                allowed: CONTROL_START | TX_CONTROL_OSF | CONTROL_PBL,
+                required_mask: 0,
+                required: 0,
+            },
+            crate::WriteMask {
+                addr: GMAC_BASE + DMA_CH0_RX_CONTROL,
+                allowed: CONTROL_START | RX_CONTROL_RBSZ_MASK | CONTROL_PBL | RX_CONTROL_RPF,
+                required_mask: RX_CONTROL_RBSZ_MASK,
+                required: crate::dma::DWMAC_RBSZ << 1,
+            },
+        ];
+
+        /// Refused until the kernel has attached both rings: the two
+        /// channel control registers, whose start bits would set the
+        /// engine walking whatever the list registers hold after
+        /// reset.
+        pub const NEEDS_ATTACH: &[MmioWindow] = &[MmioWindow {
+            base: GMAC_BASE + DMA_CH0_TX_CONTROL,
+            len: 8,
+        }];
+
+        /// Refused once the kernel has attached the rings: everything
+        /// that can reset the DMA engine and so clear the list
+        /// registers the kernel programmed — `DMA_MODE` (software
+        /// reset) and `DMA_SYSBUS_MODE`, and the clock, reset and
+        /// syscon windows the driver needs only during bring-up.
+        pub const FROZEN_AFTER_ATTACH: &[MmioWindow] = &[
+            MmioWindow {
+                base: GMAC_BASE + DMA_MODE,
+                len: 8,
+            },
+            MmioWindow {
+                base: 0x1023_0000,
+                len: 0x1_0000,
+            },
+            MmioWindow {
+                base: 0x1302_0000,
+                len: 0x1_0000,
+            },
+            MmioWindow {
+                base: 0x1303_0000,
+                len: 0x1000,
+            },
+            MmioWindow {
+                base: 0x1700_0000,
+                len: 0x1_0000,
+            },
+            MmioWindow {
+                base: 0x1701_0000,
+                len: 0x1000,
+            },
+        ];
     }
 }
 

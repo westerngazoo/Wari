@@ -236,19 +236,15 @@ extern "C" {
     #[link_name = "notification_ack"]
     fn wari_notification_ack(slot: u32) -> i32;
 
-    /// Driver → kernel: bind a virtqueue's three rings (descriptor
-    /// table, available ring, used ring) to the NIC. The driver
-    /// passes lin-mem offsets; the kernel translates to physical
-    /// addresses and writes the VirtIO MMIO queue config registers.
+    /// Driver → kernel: bind a virtqueue to the NIC. The driver
+    /// passes the lin-mem offsets of its available and used rings;
+    /// the descriptor table is the kernel's (INV-25) and never
+    /// appears in this module's memory. The kernel translates the
+    /// offsets and writes the VirtIO MMIO queue config registers.
     /// PR Net-4c host fn.
     #[link_name = "nic_attach_queue"]
-    fn wari_nic_attach_queue(
-        queue_idx: u32,
-        desc_off: u32,
-        avail_off: u32,
-        used_off: u32,
-        queue_size: u32,
-    ) -> i32;
+    fn wari_nic_attach_queue(queue_idx: u32, avail_off: u32, used_off: u32, queue_size: u32)
+        -> i32;
 
     /// Kick the device's QueueNotify register for `queue_idx`
     /// (0 = rx, 1 = tx) after the driver has updated the available
@@ -256,22 +252,40 @@ extern "C" {
     #[link_name = "nic_queue_notify"]
     fn wari_nic_queue_notify(queue_idx: u32) -> i32;
 
-    /// Point descriptor `idx` of ring `ring` (`RING_RX` / `RING_TX`)
+    /// Aim descriptor `idx` of ring `ring` (`RING_RX` / `RING_TX`)
     /// at `[buf_off, buf_off + len)` of this module's linear memory.
     /// The kernel validates the span against our memory and writes
-    /// the physical address into the descriptor itself; the driver
-    /// never forms one (ADR-002 step 1, INV-25). Returns 0, or
+    /// the whole descriptor — address, length, direction — into a
+    /// table it keeps in its own memory; the driver never forms a
+    /// physical address and cannot store to a descriptor (ADR-002
+    /// step 1, INV-25). Returns 0, or
     /// `HOST_E_INVAL` / E_PERM / E_NOMEM with nothing written.
     #[link_name = "nic_dma_set_buf"]
     fn wari_nic_dma_set_buf(ring: u32, idx: u32, buf_off: u32, len: u32) -> i32;
 
-    /// Return the driver's WASM lin-mem physical address. Still used
-    /// by the GMAC (vf2) path to compute ring and buffer addresses;
-    /// the VirtIO path uses `nic_dma_set_buf` instead. Goes away with
-    /// the VF2 follow-up of ADR-002 step 1. Cap-gated by Net + READ;
-    /// returns 0 on cap denial.
-    #[link_name = "lin_mem_base"]
-    fn wari_lin_mem_base() -> u64;
+    /// DWMAC4 (vf2): store descriptor `idx`'s status word (RDES3 /
+    /// TDES3) as 4 bytes at `out_off` in this module's memory. The
+    /// descriptor itself stays in kernel memory. Returns 0, or
+    /// `HOST_E_INVAL` / E_PERM / E_NOMEM with nothing written.
+    #[link_name = "nic_dma_status"]
+    fn wari_nic_dma_status(ring: u32, idx: u32, out_off: u32) -> i32;
+
+    /// DWMAC4 (vf2): have the kernel claim ring `ring` (16 cleared
+    /// descriptors in its own memory) and point the stopped channel
+    /// at it — list address, ring length, receive buffer size.
+    #[link_name = "nic_attach_ring"]
+    fn wari_nic_attach_ring(ring: u32) -> i32;
+
+    /// DWMAC4 (vf2): set ring `ring`'s tail pointer to descriptor
+    /// `idx` (`idx == 16` = end of the ring), ordered after every
+    /// earlier descriptor store.
+    #[link_name = "nic_ring_kick"]
+    fn wari_nic_ring_kick(ring: u32, idx: u32) -> i32;
+
+    /// DWMAC4 (vf2): re-point ring `ring`'s stopped channel at the
+    /// head of its ring (receive-wedge recovery).
+    #[link_name = "nic_ring_rewind"]
+    fn wari_nic_ring_rewind(ring: u32) -> i32;
 }
 
 /// Ring ids for `nic_dma_set_buf`: VirtIO-net §5.1.6.1 numbers
@@ -284,11 +298,30 @@ const RING_TX: u32 = 1;
 /// The INV-25 self-check in `init_virtio` expects exactly this.
 const HOST_E_INVAL: i32 = -2;
 
-/// Diagnostic tags for the INV-25 self-check: 'DMAo' (span outside
-/// linear memory) and 'DMAi' (descriptor index past the ring). `val`
-/// is the kernel's return code; both must read `0xfffffffe`.
+/// Diagnostic tags for the INV-25 self-check: 'DMAo' (span starting
+/// outside linear memory), 'DMAi' (descriptor index past the ring)
+/// 'DMAl' (span that starts inside linear memory and runs past its
+/// end), 'DMAq' (a write to the queue-size register), 'DMAf' (a
+/// feature that changes the ring layout) and 'DMAg' (a GMAC ring
+/// operation on a VirtIO board). `val` is the kernel's return code;
+/// all must read `0xfffffffe`. The GMAC self-check reuses 'DMAo' and
+/// 'DMAl' and adds its own (`vf2_inv25_self_check`).
 const TAG_DMA_OOB: u32 = 0x444D_416F;
 const TAG_DMA_IDX: u32 = 0x444D_4169;
+const TAG_DMA_LEN: u32 = 0x444D_416C;
+const TAG_DMA_QNUM: u32 = 0x444D_4171;
+const TAG_DMA_FEAT: u32 = 0x444D_4166;
+const TAG_DMA_GMAC: u32 = 0x444D_4167;
+const TAG_DMA_GKICK: u32 = 0x444D_4168;
+const TAG_DMA_GREWIND: u32 = 0x444D_416A;
+const TAG_DMA_GSTATUS: u32 = 0x444D_4175;
+
+/// VirtIO MMIO `QueueNum` (VirtIO 1.2 §4.2.2). Kernel-owned: named
+/// here only for the self-check that the kernel refuses it.
+const VIRTIO_MMIO_QUEUE_NUM: u32 = 0x038;
+/// `VIRTIO_RING_F_EVENT_IDX` (bit 29): adds a field the device writes
+/// past the used ring. Named only for the self-check.
+const VIRTIO_RING_F_EVENT_IDX: u32 = 29;
 
 // ── Virtqueue ring storage (PR Net-4c) ───────────────────────────
 //
@@ -303,12 +336,9 @@ const TAG_DMA_IDX: u32 = 0x444D_4169;
 
 const QUEUE_SIZE: u32 = 8;
 
-/// Descriptor table — `virtq_desc[QUEUE_SIZE]`. Each desc is 16
-/// bytes; alignment 16 (VirtIO 1.2 §2.6).
-#[repr(C, align(16))]
-struct DescTable {
-    bytes: [u8; 16 * QUEUE_SIZE as usize],
-}
+// The descriptor table (`virtq_desc[QUEUE_SIZE]`) is not here: it
+// holds the addresses and lengths the device acts on, so it lives in
+// kernel memory and is written only by `nic_dma_set_buf` (INV-25).
 
 /// Available ring — `flags : u16, idx : u16, ring : u16[QUEUE_SIZE]`.
 /// 4 + 2*8 = 20 bytes. Alignment 2.
@@ -325,9 +355,6 @@ struct UsedRing {
     bytes: [u8; 4 + 8 * QUEUE_SIZE as usize],
 }
 
-static mut RX_DESC: DescTable = DescTable {
-    bytes: [0; 16 * QUEUE_SIZE as usize],
-};
 static mut RX_AVAIL: AvailRing = AvailRing {
     bytes: [0; 4 + 2 * QUEUE_SIZE as usize],
 };
@@ -335,9 +362,6 @@ static mut RX_USED: UsedRing = UsedRing {
     bytes: [0; 4 + 8 * QUEUE_SIZE as usize],
 };
 
-static mut TX_DESC: DescTable = DescTable {
-    bytes: [0; 16 * QUEUE_SIZE as usize],
-};
 static mut TX_AVAIL: AvailRing = AvailRing {
     bytes: [0; 4 + 2 * QUEUE_SIZE as usize],
 };
@@ -346,14 +370,15 @@ static mut TX_USED: UsedRing = UsedRing {
 };
 
 /// Set up one virtqueue: select it on the device, choose queue size,
-/// hand the kernel offsets for the three rings via `nic_attach_queue`
-/// (which writes the VirtIO MMIO queue-config registers).
+/// hand the kernel the offsets of the available and used rings via
+/// `nic_attach_queue` (which supplies the descriptor table itself
+/// and writes the VirtIO MMIO queue-config registers).
 ///
 /// `queue_idx`: 0 = rx, 1 = tx (VirtIO-net §5.1.6.1 convention).
-fn attach_queue(queue_idx: u32, desc_off: u32, avail_off: u32, used_off: u32) -> Result<(), ()> {
+fn attach_queue(queue_idx: u32, avail_off: u32, used_off: u32) -> Result<(), ()> {
     // SAFETY: extern host-fn call. Kernel does cap check + bounds
     // check on the offsets, then writes VirtIO MMIO queue regs.
-    let r = unsafe { wari_nic_attach_queue(queue_idx, desc_off, avail_off, used_off, QUEUE_SIZE) };
+    let r = unsafe { wari_nic_attach_queue(queue_idx, avail_off, used_off, QUEUE_SIZE) };
     if r == 0 {
         Ok(())
     } else {
@@ -371,9 +396,6 @@ fn attach_queue(queue_idx: u32, desc_off: u32, avail_off: u32, used_off: u32) ->
 
 const ETH_FRAME_MAX: usize = 1536;
 const RX_BUF_COUNT: usize = QUEUE_SIZE as usize;
-
-/// VirtIO descriptor flag — buffer is device-write (rx).
-const VIRTQ_DESC_F_WRITE: u16 = 0x2;
 
 /// VirtIO-net packet header per §5.1.6. The device prepends this
 /// to every frame on rx, and expects it on every tx frame. We
@@ -403,63 +425,177 @@ pub static mut TX_BUF: PacketBuffer = PacketBuffer {
     bytes: [0; ETH_FRAME_MAX],
 };
 
-// PR Phase-1c-6e — VF2 GMAC0 DMA descriptor rings.
-// 16 descriptors × 16 bytes = 256 B each. repr(C, align(16))
-// satisfies the DWMAC4 16-byte alignment requirement; the
-// physical address handed to the DMA engine is `lin_mem_base()
-// + (&VF2_TX_RING.descs[0] as u32)`.
+// VF2 GMAC DMA descriptor rings: 16 descriptors each, held by the
+// kernel in its own memory (ADR-002 step 1, INV-25). This module
+// never sees a descriptor or a physical address: it attaches the
+// rings (`nic_attach_ring`), hands buffers to the engine by
+// linear-memory offset (`nic_dma_set_buf`), reads back status words
+// (`nic_dma_status`) and moves tail pointers (`nic_ring_kick`).
+
+/// Descriptors per GMAC ring (the kernel reserves exactly this many).
 #[cfg(feature = "vf2")]
-#[repr(C, align(16))]
-pub struct VF2DmaRing {
-    pub descs: [[u32; 4]; 16],
+const VF2_RING_LEN: usize = 16;
+
+/// Receive buffer size: what the kernel programs into `RBSZ` and
+/// requires every receive buffer to be (`DWMAC_RBSZ`).
+#[cfg(feature = "vf2")]
+const VF2_RBSZ: u32 = 1536;
+
+/// What [`vf2_desc_status`] returns when the kernel refuses: OWN set,
+/// so every caller treats it as a descriptor it may not touch.
+#[cfg(feature = "vf2")]
+const VF2_STATUS_REFUSED: u32 = 0xFFFF_FFFF;
+
+/// Landing slot for `nic_dma_status`: the kernel stores the status
+/// word here.
+#[cfg(feature = "vf2")]
+static mut VF2_STATUS_OUT: u32 = 0;
+
+/// INV-25 self-check on the GMAC (ADR-002 step 1).
+///
+/// Runs with both rings attached, RX descriptor 0 armed and the RX
+/// engine stopped. Thirteen attempts the kernel must refuse, each logged
+/// with its return code (all must read `0xfffffffe`):
+///
+/// | tag    | attempt |
+/// |--------|---------|
+/// | `DMAo` | a receive buffer starting past the end of our memory |
+/// | `DMAl` | a receive buffer starting inside it and running off the end |
+/// | `DMAb` | a receive buffer of any size but RBSZ |
+/// | `DMAx` | a receive buffer not on a 16-byte boundary |
+/// | `DMAn` | rewriting a descriptor the engine owns |
+/// | `DMAw` | writing the receive list address |
+/// | `DMAz` | changing RBSZ through `RX_CONTROL` |
+/// | `DMAs` | a descriptor skip length in `DMA_CH0_CONTROL` |
+/// | `DMAt` | TSO in `TX_CONTROL` (start bit clear) |
+/// | `DMAr` | the DMA software reset, now that the rings are attached |
+/// | `DMAc` | a clock-controller write (its current value, written back) |
+/// | `DMAk` | a tail pointer past the end of the ring |
+/// | `DMAa` | attaching a ring a second time |
+///
+/// (`DMAe`, starting the engine before attach, runs in `driver_start`
+/// just before the attach.)
+///
+/// If any is accepted the containment is gone, and the driver refuses
+/// to bring the device up rather than run on a kernel that no longer
+/// checks. (An accepted reset or register write has already happened
+/// by then; stopping is the point.) Same idea as the VirtIO check in
+/// `init_virtio`.
+#[cfg(feature = "vf2")]
+fn vf2_inv25_self_check() -> Result<(), ()> {
+    const DMA_MODE_SWR: (u32, u32) = (0x1000, 1);
+    const CH0_CONTROL_DSL1: (u32, u32) = (0x1100, 1 << 18);
+    const RX_LIST_LO: u32 = 0x111C;
+    const RX_CONTROL: u32 = 0x1108;
+    /// A buffer size the kernel did not program (SR clear).
+    const RX_CONTROL_RBSZ_2048: u32 = 0x0001_0000 | (2048 << 1);
+    const WASM_PAGE: usize = 65_536;
+    const TAG_DMA_BSZ: u32 = 0x444D_4162;
+    const TAG_DMA_OWN: u32 = 0x444D_416E;
+    const TAG_DMA_LIST: u32 = 0x444D_4177;
+    const TAG_DMA_RBSZ: u32 = 0x444D_417A;
+    const TAG_DMA_DSL: u32 = 0x444D_4173;
+    const TAG_DMA_RESET: u32 = 0x444D_4172;
+    const TAG_DMA_ALIGN: u32 = 0x444D_4178;
+    const TAG_DMA_TSO: u32 = 0x444D_4174;
+    const TAG_DMA_CLOCK: u32 = 0x444D_4163;
+    const TAG_DMA_KICK: u32 = 0x444D_416B;
+    const TAG_DMA_REATTACH: u32 = 0x444D_4161;
+    const TX_CONTROL_TSO: (u32, u32) = (0x1104, 1 << 12);
+    /// A SYSCRG register the driver wrote during bring-up (GMAC1 AHB
+    /// clock); writing its own value back changes nothing if accepted.
+    const SYSCRG_GMAC1_CLK: u32 = 0x1302_0184;
+
+    let mem_end = (core::arch::wasm32::memory_size::<0>() * WASM_PAGE) as u32;
+    // SAFETY: addr-of on module statics; extern host fns. A refused
+    // call writes nothing.
+    let checks: [(u32, i32); 13] = unsafe {
+        let buf0 = core::ptr::addr_of!(VF2_RX_BUFS.bufs[0]) as u32;
+        let buf1 = core::ptr::addr_of!(VF2_RX_BUFS.bufs[1]) as u32;
+        let base = plat::NIC_BASE;
+        [
+            (
+                TAG_DMA_OOB,
+                wari_nic_dma_set_buf(RING_RX, 1, mem_end, VF2_RBSZ),
+            ),
+            (
+                TAG_DMA_LEN,
+                wari_nic_dma_set_buf(RING_RX, 1, mem_end - 64, VF2_RBSZ),
+            ),
+            (TAG_DMA_BSZ, wari_nic_dma_set_buf(RING_RX, 1, buf1, 2048)),
+            (
+                TAG_DMA_ALIGN,
+                wari_nic_dma_set_buf(RING_RX, 1, buf1 + 4, VF2_RBSZ),
+            ),
+            (
+                TAG_DMA_OWN,
+                wari_nic_dma_set_buf(RING_RX, 0, buf0, VF2_RBSZ),
+            ),
+            (TAG_DMA_LIST, wari_net_mmio_write32(base + RX_LIST_LO, buf0)),
+            (
+                TAG_DMA_RBSZ,
+                wari_net_mmio_write32(base + RX_CONTROL, RX_CONTROL_RBSZ_2048),
+            ),
+            (
+                TAG_DMA_DSL,
+                wari_net_mmio_write32(base + CH0_CONTROL_DSL1.0, CH0_CONTROL_DSL1.1),
+            ),
+            (
+                TAG_DMA_TSO,
+                wari_net_mmio_write32(base + TX_CONTROL_TSO.0, TX_CONTROL_TSO.1),
+            ),
+            (
+                TAG_DMA_RESET,
+                wari_net_mmio_write32(base + DMA_MODE_SWR.0, DMA_MODE_SWR.1),
+            ),
+            (
+                TAG_DMA_CLOCK,
+                wari_net_mmio_write32(SYSCRG_GMAC1_CLK, wari_net_mmio_read32(SYSCRG_GMAC1_CLK)),
+            ),
+            (
+                TAG_DMA_KICK,
+                wari_nic_ring_kick(RING_RX, VF2_RING_LEN as u32 + 1),
+            ),
+            (TAG_DMA_REATTACH, wari_nic_attach_ring(RING_RX)),
+        ]
+    };
+    let mut held = true;
+    for (tag, rc) in checks {
+        // SAFETY: extern host fn (log only).
+        let _ = unsafe { wari_drv_log_u32(tag, rc as u32) };
+        held &= rc == HOST_E_INVAL;
+    }
+    if held {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
-#[cfg(feature = "vf2")]
-#[no_mangle]
-pub static mut VF2_TX_RING: VF2DmaRing = VF2DmaRing {
-    descs: [[0u32; 4]; 16],
-};
-
-#[cfg(feature = "vf2")]
-#[no_mangle]
-pub static mut VF2_RX_RING: VF2DmaRing = VF2DmaRing {
-    descs: [[0u32; 4]; 16],
-};
-
-/// Read one word of a DMA descriptor.
+/// Status word (`RDES3` / `TDES3`) of descriptor `idx` of ring
+/// `ring`, as the kernel reads it from its table, or
+/// [`VF2_STATUS_REFUSED`].
 ///
-/// **Must be volatile.** These rings are written by the GMAC's DMA
-/// engine, which the Rust abstract machine knows nothing about: no
-/// Rust code ever stores to the OWN bit the hardware clears, so a
-/// plain load is one LLVM is free to hoist out of the polling loop and
-/// keep in a register indefinitely. `receive()` then spins forever on
-/// a stale OWN bit, reporting "no frame" while the MAC is delivering
-/// packets normally and `DMA_CH0_STATUS` shows a perfectly healthy
-/// channel — the exact stall seen on builds 155-160.
-///
-/// Whether it bites depends on inlining decisions, which is why it
-/// looked like an intermittent hardware fault and moved between
-/// builds. `addr_of!` keeps us off `&`/`&mut` to a `static mut`.
+/// Read volatile: the kernel stores it behind the compiler's back,
+/// exactly as the engine used to store to the rings this module held
+/// (the build-155..160 stall was a non-volatile read of OWN).
 #[cfg(feature = "vf2")]
-#[inline(always)]
-unsafe fn desc_rd(ring: *const VF2DmaRing, i: usize, w: usize) -> u32 {
-    // SAFETY: caller passes addr_of!(ring static); i < 16, w < 4.
-    unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*ring).descs[i][w])) }
-}
-
-/// Write one word of a DMA descriptor. Volatile for the mirror of the
-/// reason in [`desc_rd`]: the engine reads these, so the store must
-/// not be elided, sunk, or reordered by the compiler.
-#[cfg(feature = "vf2")]
-#[inline(always)]
-unsafe fn desc_wr(ring: *mut VF2DmaRing, i: usize, w: usize, v: u32) {
-    // SAFETY: as above.
-    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!((*ring).descs[i][w]), v) }
+fn vf2_desc_status(ring: u32, idx: usize) -> u32 {
+    let out = core::ptr::addr_of_mut!(VF2_STATUS_OUT);
+    // SAFETY: extern host fn; on success the kernel has written the 4
+    // bytes at `out`, a static of this module (INV-14: single-threaded
+    // singleton, no concurrent reader).
+    unsafe {
+        if wari_nic_dma_status(ring, idx as u32, out as u32) != 0 {
+            return VF2_STATUS_REFUSED;
+        }
+        core::ptr::read_volatile(out)
+    }
 }
 
 /// PR Phase-1c-7 — TX buffer pool for the vf2 GMAC0 path. Mirrors
 /// the RX pool: 16 × 1536 byte buffers, each bound to one entry
-/// in VF2_TX_RING. The smoltcp Device::transmit token writes into
+/// in the kernel's TX ring. The smoltcp Device::transmit token writes into
 /// the next slot, hands the buffer to smoltcp's `consume(len, f)`
 /// closure, then publishes the descriptor to the DMA engine and
 /// bumps the TX tail pointer.
@@ -491,10 +627,6 @@ static mut VF2_TX_SCRATCH: [u8; ETH_FRAME_MAX] = [0u8; ETH_FRAME_MAX];
 /// poll/transmit call.
 #[cfg(feature = "vf2")]
 pub mod vf2_state {
-    /// Linear-memory physical-base reported by the kernel via
-    /// `wari_lin_mem_base()`. Added to wasm32 linmem offsets to
-    /// produce kernel-visible PAs for descriptor pointers.
-    pub static mut LIN_BASE: u64 = 0;
     /// Round-robin TX descriptor index. Wraps at 16.
     pub static mut TX_NEXT: usize = 0;
     /// Round-robin RX descriptor index for the receive walk.
@@ -565,7 +697,7 @@ pub mod vf2_state {
 /// PR Phase-1c-6g — RX buffers, one per descriptor.
 ///
 /// 16 buffers × 1536 bytes = 24 KiB. Each RX descriptor in
-/// VF2_RX_RING points to one of these slots; the GMAC writes
+/// the kernel's RX ring points to one of these slots; the GMAC writes
 /// incoming frames into them and clears the OWN bit when done.
 ///
 /// 1536 B = standard Ethernet MTU (1500) + headroom for VLAN
@@ -686,42 +818,16 @@ fn read_u16_le(off: u32) -> u16 {
     unsafe { p.read() as u16 | ((p.add(1).read() as u16) << 8) }
 }
 
-/// Write a 32-bit little-endian value to a lin-mem offset.
-fn write_u32_le(off: u32, val: u32) {
-    let p = off as *mut u8;
-    // SAFETY: same as write_u16_le.
-    unsafe {
-        p.write(val as u8);
-        p.add(1).write((val >> 8) as u8);
-        p.add(2).write((val >> 16) as u8);
-        p.add(3).write((val >> 24) as u8);
-    }
-}
-
 #[allow(dead_code)]
 fn read_u32_le(off: u32) -> u32 {
     let p = off as *const u8;
-    // SAFETY: same as write_u32_le.
+    // SAFETY: same as write_u16_le.
     unsafe {
         p.read() as u32
             | ((p.add(1).read() as u32) << 8)
             | ((p.add(2).read() as u32) << 16)
             | ((p.add(3).read() as u32) << 24)
     }
-}
-
-/// Fill the non-address fields of the VirtIO descriptor at
-/// `desc_off + idx*16`. The `addr` field (first 8 bytes) is written
-/// by the kernel through `nic_dma_set_buf`, never by the driver
-/// (INV-25).
-///
-/// VirtIO 1.2 §2.6.5:
-///   struct virtq_desc { le64 addr; le32 len; le16 flags; le16 next; }
-fn write_desc_meta(desc_off: u32, idx: u16, len: u32, flags: u16, next: u16) {
-    let off = desc_off + (idx as u32) * 16;
-    write_u32_le(off + 8, len); // len
-    write_u16_le(off + 12, flags); // flags
-    write_u16_le(off + 14, next); // next
 }
 
 /// Populate the rx queue: build 8 descriptors, each pointing at a
@@ -736,7 +842,6 @@ fn write_desc_meta(desc_off: u32, idx: u16, len: u32, flags: u16, next: u16) {
 /// idle loop or worker to drain them).
 fn populate_rx() -> Result<(), ()> {
     // Offsets in lin-mem.
-    let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
     let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
     // SAFETY: addr_of_mut! over indexed static doesn't deref, but
     // Rust's E0133 still flags the index expression. Single-thread
@@ -744,8 +849,9 @@ fn populate_rx() -> Result<(), ()> {
     let rx_buf0_off = unsafe { core::ptr::addr_of_mut!(RX_BUFS[0]) } as u32;
 
     // Build 8 descriptors, one per rx buffer. The kernel writes each
-    // descriptor's address from the offset we hand it (INV-25: the
-    // driver never forms a physical address); we fill length + flags.
+    // one whole — address, length, device-writable — from the offset
+    // and length we hand it (INV-25: the driver never forms a
+    // physical address and cannot store to a descriptor).
     for i in 0..RX_BUF_COUNT {
         let buf_off = rx_buf0_off + (i as u32) * (ETH_FRAME_MAX as u32);
         // SAFETY: extern host-fn — kernel cap-checks Net + WRITE and
@@ -753,13 +859,6 @@ fn populate_rx() -> Result<(), ()> {
         if unsafe { wari_nic_dma_set_buf(RING_RX, i as u32, buf_off, ETH_FRAME_MAX as u32) } != 0 {
             return Err(());
         }
-        write_desc_meta(
-            rx_desc_off,
-            i as u16,
-            ETH_FRAME_MAX as u32,
-            VIRTQ_DESC_F_WRITE,
-            0,
-        );
     }
 
     // Available ring layout (§2.6.6):
@@ -805,21 +904,18 @@ pub fn driver_tx_send(buf_off: u32, len: u32) -> i32 {
         return -1;
     }
 
-    let tx_desc_off = core::ptr::addr_of_mut!(TX_DESC) as u32;
     let tx_avail_off = core::ptr::addr_of_mut!(TX_AVAIL) as u32;
 
     // Always reuse descriptor 0 — Phase-1b has no in-flight queue.
     let desc_idx: u16 = 0;
 
     // The kernel validates `[buf_off, buf_off + len)` against our
-    // lin-mem and writes the descriptor's address field (INV-25).
+    // lin-mem and writes the descriptor (INV-25). On the TX ring it
+    // is never device-writable: the device reads, doesn't write.
     // SAFETY: extern host-fn, kernel cap-checks Net + WRITE.
     if unsafe { wari_nic_dma_set_buf(RING_TX, desc_idx as u32, buf_off, len) } != 0 {
         return -1;
     }
-    // VIRTQ_DESC_F_WRITE not set on tx — device reads, doesn't
-    // write. flags = 0.
-    write_desc_meta(tx_desc_off, desc_idx, len, 0, 0);
 
     // Available ring: bump idx to publish the descriptor.
     let avail_idx = unsafe {
@@ -892,7 +988,6 @@ pub fn driver_rx_recycle(desc_idx: u32) -> i32 {
         return -1;
     }
 
-    let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
     let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
     // SAFETY: addr_of_mut! over indexed static doesn't deref, but
     // Rust's E0133 still flags the index expression. Single-thread
@@ -901,18 +996,11 @@ pub fn driver_rx_recycle(desc_idx: u32) -> i32 {
     let buf_off = rx_buf0_off + desc_idx * (ETH_FRAME_MAX as u32);
 
     // Rewrite the descriptor (idempotent): the kernel re-validates
-    // and rewrites the address (INV-25), we rewrite length + flags.
+    // the span and rewrites the whole descriptor (INV-25).
     // SAFETY: extern host-fn — kernel cap-checks Net + WRITE.
     if unsafe { wari_nic_dma_set_buf(RING_RX, desc_idx, buf_off, ETH_FRAME_MAX as u32) } != 0 {
         return -1;
     }
-    write_desc_meta(
-        rx_desc_off,
-        desc_idx as u16,
-        ETH_FRAME_MAX as u32,
-        VIRTQ_DESC_F_WRITE,
-        0,
-    );
 
     // Append to avail ring.
     let avail_idx = unsafe {
@@ -1498,15 +1586,16 @@ pub mod phy {
 #[cfg(feature = "vf2")]
 pub mod vf2_phy {
     use super::{
-        vf2_state, wari_net_mmio_read32, wari_net_mmio_write32, ETH_FRAME_MAX, VF2_RX_BUFS,
-        VF2_RX_RING, VF2_TX_BUFS, VF2_TX_RING, VF2_TX_SCRATCH,
+        vf2_desc_status, vf2_state, wari_net_mmio_read32, wari_net_mmio_write32,
+        wari_nic_dma_set_buf, wari_nic_ring_kick, wari_nic_ring_rewind, ETH_FRAME_MAX, RING_RX,
+        RING_TX, VF2_RBSZ, VF2_RING_LEN, VF2_RX_BUFS, VF2_TX_BUFS, VF2_TX_SCRATCH,
     };
     use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
     use smoltcp::time::Instant;
 
     /// Zero-sized Device handle. All state lives in module-level
-    /// statics (`VF2_*_RING`, `VF2_*_BUFS`, `vf2_state::*`); the
-    /// struct is just the type smoltcp can name.
+    /// statics (`VF2_*_BUFS`, `vf2_state::*`) and in the kernel's
+    /// descriptor rings; the struct is just the type smoltcp can name.
     pub struct NicDevice;
 
     impl NicDevice {
@@ -1532,7 +1621,6 @@ pub mod vf2_phy {
     const GMAC_BASE: u32 = 0x1603_0000;
     #[cfg(feature = "gmac1")]
     const GMAC_BASE: u32 = 0x1604_0000;
-    const DMA_CH0_TX_TAIL: u32 = 0x1120;
 
     /// DWMAC4 RDES3 status bits.
     const RDES3_OWN: u32 = 0x8000_0000;
@@ -1541,17 +1629,15 @@ pub mod vf2_phy {
     /// receive-descriptor writeback format.
     ///
     /// CAREFUL: RX and TX swap the FD/LD bit positions. TX is FD=28,
-    /// LD=29 (see `TDES3_FD`/`TDES3_LD` below); RX is LD=28, FD=29.
-    /// Copying the TX constants over to RX yields a mask that looks
-    /// plausible and tests the wrong bit.
+    /// LD=29 (the kernel's `wari_validate::dma::dwmac_tx_desc`); RX is
+    /// LD=28, FD=29. Copying the TX constants over to RX yields a mask
+    /// that looks plausible and tests the wrong bit.
     const RDES3_LD: u32 = 0x1000_0000;
     const RDES3_CTXT: u32 = 0x4000_0000;
     const RDES3_ES: u32 = 0x0000_8000;
 
-    /// DWMAC4 TDES3 — OWN | LD | FD set with packet length in low 15.
+    /// DWMAC4 TDES3 OWN: the engine has not finished with the slot.
     const TDES3_OWN: u32 = 0x8000_0000;
-    const TDES3_LD: u32 = 0x2000_0000;
-    const TDES3_FD: u32 = 0x1000_0000;
 
     impl Device for NicDevice {
         type RxToken<'a> = Vf2NicRxToken;
@@ -1616,7 +1702,7 @@ pub mod vf2_phy {
                 let start = vf2_state::RX_NEXT;
                 for n in 0..16usize {
                     let i = (start + n) % 16;
-                    let rdes3 = super::desc_rd(core::ptr::addr_of!(VF2_RX_RING), i, 3);
+                    let rdes3 = vf2_desc_status(RING_RX, i);
                     if rdes3 & RDES3_OWN == 0 {
                         // Frame received in slot i. Length is in
                         // RDES3 bits 14:0.
@@ -1740,8 +1826,7 @@ pub mod vf2_phy {
                         let _ = super::wari_drv_log_u32(0x4443_7572, cur);
                         let _ = super::wari_drv_log_u32(0x4453_7473, st);
                         // What WE see in the descriptor we are parked on.
-                        let own =
-                            super::desc_rd(core::ptr::addr_of!(VF2_RX_RING), vf2_state::RX_NEXT, 3);
+                        let own = vf2_desc_status(RING_RX, vf2_state::RX_NEXT);
                         let _ = super::wari_drv_log_u32(0x524F_776E, own); // 'ROwn'
 
                         // ── Wedge detect + recovery (rx-stall-investigation
@@ -1847,10 +1932,7 @@ pub mod vf2_phy {
                             GMAC_BASE + DMA_CH0_STATUS,
                             DMA_STATUS_RBU,
                         );
-                        let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
-                        let rx_tail_pa: u32 =
-                            (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
-                        let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
+                        let _ = wari_nic_ring_kick(RING_RX, VF2_RING_LEN as u32);
                         vf2_state::C_RX_KICKS = vf2_state::C_RX_KICKS.wrapping_add(1);
                         // tag = 'rXKk' — watchdog resumed a suspended channel.
                         let _ = super::wari_drv_log_u32(0x7258_4B6B, vf2_state::C_RX_KICKS);
@@ -1864,7 +1946,7 @@ pub mod vf2_phy {
             // SAFETY: same as above.
             unsafe {
                 let i = vf2_state::TX_NEXT;
-                let tdes3 = super::desc_rd(core::ptr::addr_of!(VF2_TX_RING), i, 3);
+                let tdes3 = vf2_desc_status(RING_TX, i);
                 if tdes3 & TDES3_OWN != 0 {
                     // DMA hasn't released this slot yet; back-pressure.
                     return None;
@@ -1880,12 +1962,12 @@ pub mod vf2_phy {
     }
 
     /// Re-arm a single RX descriptor so DMA can write the next frame
-    /// into its buffer. Idempotent — safe to call from both
-    /// `consume` (the smoltcp-processed path) and `Drop` (the
-    /// dropped-without-consume path). The `fence ow,ow` after the
-    /// store ensures the U74 store buffer has flushed before the
-    /// next poll re-reads RDES3 — JH7110 GMAC is IO-coherent for
-    /// DDR, but a CPU-local store buffer can hide the update.
+    /// into its buffer. Called from `consume` (the smoltcp-processed
+    /// path) and `Drop` (the dropped-without-consume path), each at
+    /// most once per token. The kernel writes the descriptor and
+    /// refuses one the engine still owns, so a second re-arm of the
+    /// same slot is a refused no-op rather than the build-152 bug
+    /// (overwriting a freshly delivered frame with OWN=1).
     /// Also traces `rXCn`+idx (debug-kernel builds) so traces can
     /// distinguish the consumed-vs-leaked descriptor cases.
     fn vf2_rx_rearm(idx: usize) {
@@ -1900,27 +1982,11 @@ pub mod vf2_phy {
             // operators can see EACH rearm in the trace if they
             // need to.
             vf2_state::C_REARM_CALLS = vf2_state::C_REARM_CALLS.wrapping_add(1);
-            let bp: u64 =
-                vf2_state::LIN_BASE + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
-            let r = core::ptr::addr_of_mut!(VF2_RX_RING);
-            super::desc_wr(r, idx, 0, bp as u32);
-            super::desc_wr(r, idx, 1, (bp >> 32) as u32);
-            super::desc_wr(r, idx, 2, 0);
-            super::desc_wr(r, idx, 3, 0xC100_0000); // OWN | IOC | BUF1V
-                                // Re-kick the RX_TAIL doorbell so DWMAC4 walks the
-                                // descriptor we just rearmed.
-                                //
-                                // ORDERING (unresolved, see INV-25): there is NO
-                                // hardware fence between the descriptor stores above
-                                // and this MMIO write. A WASM driver cannot emit one,
-                                // and the kernel's MMIO host fn does not either — a
-                                // function call is not a memory barrier. Earlier
-                                // comments here claimed the wasm→native boundary
-                                // serializes; that is an assumption, not an
-                                // architectural guarantee. Correct today only if the
-                                // JH7110 interconnect is IO-coherent and the store
-                                // buffer drains first. Must be resolved in the kernel
-                                // host fn before a second SoC.
+            let buf_off = core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32;
+            let rc = wari_nic_dma_set_buf(RING_RX, idx as u32, buf_off, VF2_RBSZ);
+            // Then re-ring the RX tail so DWMAC4 walks the descriptor
+            // just re-armed. `nic_ring_kick` orders the kernel's
+            // descriptor stores before the tail write (`fence w,o`).
             // Clear RBU before the doorbell. When the engine walks a
             // descriptor it still owns it raises RBU (DMA_CH0_STATUS
             // bit 7) and SUSPENDS the RX channel; the bit is sticky
@@ -1934,12 +2000,13 @@ pub mod vf2_phy {
             const DMA_STATUS_RBU: u32 = 1 << 7;
             let _ = wari_net_mmio_write32(GMAC_BASE + DMA_CH0_STATUS, DMA_STATUS_RBU);
 
-            let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
-            let rx_tail_pa: u32 = (vf2_state::LIN_BASE + rx_ring_off as u64 + 16 * 16) as u32;
-            let _ = wari_net_mmio_write32(GMAC_BASE + 0x1128, rx_tail_pa);
-            // tag = 'rXTl' — RX tail doorbell write.
+            let _ = wari_nic_ring_kick(RING_RX, VF2_RING_LEN as u32);
+            // tag = 'rXTl' — RX re-arm + tail doorbell; val = the
+            // kernel's answer to the re-arm (0, or refused).
             #[cfg(feature = "net-diag")]
-            let _ = super::wari_drv_trace_u32(0x7258_546C, rx_tail_pa);
+            let _ = super::wari_drv_trace_u32(0x7258_546C, rc as u32);
+            #[cfg(not(feature = "net-diag"))]
+            let _ = rc;
             // tag = 'rXCn' — descriptor re-armed. val = slot idx.
             #[cfg(feature = "net-diag")]
             let _ = super::wari_drv_trace_u32(0x7258_434E, idx as u32);
@@ -1947,8 +2014,8 @@ pub mod vf2_phy {
     }
 
     /// Full RX-channel recovery for a wedged engine the RBU kick cannot
-    /// reach (RBU clear while the MTL RX queue drops frames). Re-arms all
-    /// 16 descriptors exactly as [`vf2_rx_rearm`] does, resets the ring
+    /// reach (RBU clear while the MTL RX queue drops frames). Re-arms
+    /// every descriptor the engine has handed back, resets the ring
     /// cursor, and — the step the RBU kick omits — toggles Start-Receive
     /// (`DMA_CH0_RX_CONTROL.SR`) to restart a STOPPED DMA. It mirrors
     /// `driver_start`'s proven RX bring-up, so it issues only the register
@@ -1960,12 +2027,11 @@ pub mod vf2_phy {
     /// safe (INV-1 single-threaded; nothing is mid-consume).
     fn vf2_rx_channel_recover() {
         // SAFETY: INV-1 single-threaded driver; the RX ring is not being
-        // walked by software here. Every MMIO write goes through the
-        // fenced host fn (kernel host_fns.rs `fence w,o`), which orders the
-        // descriptor stores below ahead of the SR/tail device writes.
+        // walked by software here. Every MMIO write and ring operation
+        // is a fenced host fn (`fence w,o` before the device write), so
+        // the kernel's descriptor stores precede the SR/tail writes.
         unsafe {
             const RXCTRL: u32 = 0x1108;
-            const RXTAIL: u32 = 0x1128;
             const DMA_CH0_STATUS: u32 = 0x1160;
             const DMA_STATUS_RBU: u32 = 1 << 7;
             // RX_CONTROL word: RXPBL(bit16) | RBSZ(1536<<1) | SR(bit0),
@@ -1976,40 +2042,34 @@ pub mod vf2_phy {
             // 1. Stop the RX DMA.
             let _ = wari_net_mmio_write32(GMAC_BASE + RXCTRL, RXCTRL_STOP);
 
-            // 2. Re-arm every descriptor (same words as vf2_rx_rearm) and
-            //    reset the software cursor to the head of the ring.
-            let r = core::ptr::addr_of_mut!(VF2_RX_RING);
-            for idx in 0..16usize {
-                let bp: u64 = vf2_state::LIN_BASE
-                    + (core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32) as u64;
-                super::desc_wr(r, idx, 0, bp as u32);
-                super::desc_wr(r, idx, 1, (bp >> 32) as u32);
-                super::desc_wr(r, idx, 2, 0);
-                super::desc_wr(r, idx, 3, 0xC100_0000); // OWN | IOC | BUF1V
+            // 2. Re-arm every descriptor the engine has handed back and
+            //    reset the software cursor to the head of the ring. A
+            //    descriptor still owned by the engine is already armed
+            //    with its own buffer (slot i always holds buffer i), and
+            //    the kernel would refuse to rewrite it anyway.
+            for idx in 0..VF2_RING_LEN {
+                if vf2_desc_status(RING_RX, idx) & RDES3_OWN == 0 {
+                    let buf_off = core::ptr::addr_of!(VF2_RX_BUFS.bufs[idx]) as u32;
+                    let _ = wari_nic_dma_set_buf(RING_RX, idx as u32, buf_off, VF2_RBSZ);
+                }
             }
             vf2_state::RX_NEXT = 0;
 
-            // 3. Reset the DMA descriptor pointer to the ring head
-            //    (RXDESC_LIST_ADDRESS) so on restart the engine resumes at
-            //    slot 0, matching RX_NEXT=0. WITHOUT this the DMA resumes at
-            //    wherever CUR_RXDESC stopped and desyncs from software — the
-            //    next frame lands in a slot the poll loop isn't watching, so
-            //    RX still looks stalled. Hi-then-lo per the databook latch
-            //    order; ring length N-1=15. Safe: SR is clear here (step 1).
-            //    Mirrors driver_start (0x1118/0x111C/0x1130).
-            let rx_ring_off = core::ptr::addr_of!(VF2_RX_RING.descs) as u32;
-            let rx_pa: u64 = vf2_state::LIN_BASE + rx_ring_off as u64;
-            let _ = wari_net_mmio_write32(GMAC_BASE + 0x1118, (rx_pa >> 32) as u32);
-            let _ = wari_net_mmio_write32(GMAC_BASE + 0x111C, rx_pa as u32);
-            let _ = wari_net_mmio_write32(GMAC_BASE + 0x1130, 15);
+            // 3. Re-point the engine at the ring head so on restart it
+            //    resumes at slot 0, matching RX_NEXT=0. WITHOUT this the
+            //    DMA resumes at wherever CUR_RXDESC stopped and desyncs
+            //    from software — the next frame lands in a slot the poll
+            //    loop isn't watching, so RX still looks stalled. The
+            //    kernel rewrites the list address and ring length; it
+            //    refuses while SR is set, and SR is clear here (step 1).
+            let _ = wari_nic_ring_rewind(RING_RX);
 
             // 4. Clear any sticky RBU, then restart the RX DMA (SR=1).
             let _ = wari_net_mmio_write32(GMAC_BASE + DMA_CH0_STATUS, DMA_STATUS_RBU);
             let _ = wari_net_mmio_write32(GMAC_BASE + RXCTRL, RXCTRL_RUN);
 
             // 5. Re-ring the tail so the engine walks all 16 armed descs.
-            let rx_tail_pa: u32 = (rx_pa + 16 * 16) as u32;
-            let _ = wari_net_mmio_write32(GMAC_BASE + RXTAIL, rx_tail_pa);
+            let _ = wari_nic_ring_kick(RING_RX, VF2_RING_LEN as u32);
         }
     }
 
@@ -2087,7 +2147,7 @@ pub mod vf2_phy {
                 let start = vf2_state::TX_NEXT;
                 (0..16usize)
                     .map(|n| (start + n) % 16)
-                    .find(|&c| super::desc_rd(core::ptr::addr_of!(VF2_TX_RING), c, 3) & TDES3_OWN == 0)
+                    .find(|&c| vf2_desc_status(RING_TX, c) & TDES3_OWN == 0)
             };
 
             let i = match free {
@@ -2123,34 +2183,27 @@ pub mod vf2_phy {
                 let _ = super::wari_drv_trace_u32(0x7458_5472, val);
             }
 
-            // Publish: descriptor + bump tail.
-            // SAFETY: same scoping invariants.
+            // Publish: the kernel writes the descriptor (OWN | FD | LD |
+            // length) and hands it to the engine, then the tail moves.
+            // SAFETY: extern host fns; same scoping invariants.
             unsafe {
-                let bp: u64 =
-                    vf2_state::LIN_BASE + (core::ptr::addr_of!(VF2_TX_BUFS.bufs[i]) as u32) as u64;
-                let t = core::ptr::addr_of_mut!(VF2_TX_RING);
-                super::desc_wr(t, i, 0, bp as u32);
-                super::desc_wr(t, i, 1, (bp >> 32) as u32);
-                super::desc_wr(t, i, 2, len as u32); // TDES2 buffer-1 length
-                super::desc_wr(
-                    t,
-                    i,
-                    3,
-                    TDES3_OWN | TDES3_LD | TDES3_FD | (len as u32 & 0x7FFF),
-                );
+                let buf_off = core::ptr::addr_of!(VF2_TX_BUFS.bufs[i]) as u32;
+                if wari_nic_dma_set_buf(RING_TX, i as u32, buf_off, len as u32) != 0 {
+                    // Refused (the slot was re-taken, or a length the
+                    // descriptor cannot carry): the frame is dropped,
+                    // as on a full ring.
+                    vf2_state::C_TX_DROPPED = vf2_state::C_TX_DROPPED.wrapping_add(1);
+                    return result;
+                }
 
                 // Round-robin advance.
-                let next = (i + 1) % 16;
+                let next = (i + 1) % VF2_RING_LEN;
                 vf2_state::TX_NEXT = next;
 
-                // Tail = address of next descriptor (DWMAC processes
-                // descriptors while CURR < TAIL). Store fence first
-                // so DMA sees our descriptor write before the kick.
-                core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-                let tail_pa: u32 = (vf2_state::LIN_BASE
-                    + (core::ptr::addr_of!(VF2_TX_RING.descs[next]) as u32) as u64)
-                    as u32;
-                let _ = wari_net_mmio_write32(GMAC_BASE + DMA_CH0_TX_TAIL, tail_pa);
+                // Tail = next descriptor (DWMAC processes descriptors
+                // while CURR != TAIL). The kernel orders its descriptor
+                // stores before the tail write.
+                let _ = wari_nic_ring_kick(RING_TX, next as u32);
             }
             result
         }
@@ -2272,34 +2325,66 @@ fn init_virtio() -> Result<[u8; 6], ()> {
     // we only convert to u32 (lin-mem offset) and pass to the
     // kernel, never dereference here. The kernel accesses the
     // memory via the wasmi Memory abstraction (bounds-checked).
-    let rx_desc_off = core::ptr::addr_of_mut!(RX_DESC) as u32;
     let rx_avail_off = core::ptr::addr_of_mut!(RX_AVAIL) as u32;
     let rx_used_off = core::ptr::addr_of_mut!(RX_USED) as u32;
-    let tx_desc_off = core::ptr::addr_of_mut!(TX_DESC) as u32;
     let tx_avail_off = core::ptr::addr_of_mut!(TX_AVAIL) as u32;
     let tx_used_off = core::ptr::addr_of_mut!(TX_USED) as u32;
 
     // VirtIO-net §5.1.6.1: queue 0 is receiveq[0], queue 1 is
     // transmitq[0]. Phase-1b uses one rx + one tx queue, no
     // controlq (didn't negotiate VIRTIO_NET_F_CTRL_VQ).
-    attach_queue(0, rx_desc_off, rx_avail_off, rx_used_off)?;
-    attach_queue(1, tx_desc_off, tx_avail_off, tx_used_off)?;
+    attach_queue(0, rx_avail_off, rx_used_off)?;
+    attach_queue(1, tx_avail_off, tx_used_off)?;
 
     // INV-25 self-check (ADR-002 step 1). The kernel must refuse to
-    // aim the DMA engine outside our linear memory. Two calls that
-    // have to fail — a span that wraps past the end of memory, and a
-    // descriptor index past the ring — logged as DMAo / DMAi with the
-    // kernel's return code. If either is accepted the containment is
-    // gone, and this driver refuses to bring the device up rather
-    // than run on a kernel that no longer checks. The adversarial
-    // test `tests/security/tests/dma_escape.rs` asserts both tags.
+    // let us aim the DMA engine outside our linear memory. Five
+    // attempts that have to fail, logged with the kernel's return
+    // code:
+    //   DMAo  a span that starts past the end of memory
+    //   DMAi  a descriptor index past the ring
+    //   DMAl  a span that starts inside memory and runs off the end
+    //   DMAq  raising the queue size, so the device would read kernel
+    //         memory beyond the descriptor table as descriptors
+    //   DMAf  accepting EVENT_IDX, which makes the device write past
+    //         the used ring the kernel validated
+    //   DMAg  attaching a GMAC ring on a board whose NIC is not a
+    //         GMAC (the DWMAC4 operations exist on every board), and
+    //   DMAh / DMAj / DMAu  the other three: kick, rewind, status
+    // If any is accepted the containment is gone, and this driver
+    // refuses to bring the device up rather than run on a kernel that
+    // no longer checks. The adversarial test
+    // `tests/security/tests/dma_escape.rs` asserts all nine tags.
     // SAFETY: extern host-fns; on a rejected call nothing is written.
     let rc_oob = unsafe { wari_nic_dma_set_buf(RING_RX, 0, u32::MAX - 64, ETH_FRAME_MAX as u32) };
     let _ = unsafe { wari_drv_log_u32(TAG_DMA_OOB, rc_oob as u32) };
     let rc_idx =
-        unsafe { wari_nic_dma_set_buf(RING_RX, QUEUE_SIZE, rx_desc_off, ETH_FRAME_MAX as u32) };
+        unsafe { wari_nic_dma_set_buf(RING_RX, QUEUE_SIZE, rx_avail_off, ETH_FRAME_MAX as u32) };
     let _ = unsafe { wari_drv_log_u32(TAG_DMA_IDX, rc_idx as u32) };
-    if rc_oob != HOST_E_INVAL || rc_idx != HOST_E_INVAL {
+    let rc_len = unsafe { wari_nic_dma_set_buf(RING_RX, 0, rx_avail_off, u32::MAX / 2) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_LEN, rc_len as u32) };
+    let rc_qnum = unsafe { wari_net_mmio_write32(plat::NIC_BASE + VIRTIO_MMIO_QUEUE_NUM, 1024) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_QNUM, rc_qnum as u32) };
+    let rc_feat = unsafe {
+        wari_net_mmio_write32(
+            plat::NIC_BASE + VIRTIO_MMIO_DRIVER_FEATURES,
+            1 << VIRTIO_RING_F_EVENT_IDX,
+        )
+    };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_FEAT, rc_feat as u32) };
+    let rc_gmac = unsafe { wari_nic_attach_ring(RING_RX) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_GMAC, rc_gmac as u32) };
+    let rc_gkick = unsafe { wari_nic_ring_kick(RING_RX, 1) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_GKICK, rc_gkick as u32) };
+    let rc_grewind = unsafe { wari_nic_ring_rewind(RING_RX) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_GREWIND, rc_grewind as u32) };
+    let rc_gstatus = unsafe { wari_nic_dma_status(RING_RX, 0, rx_avail_off) };
+    let _ = unsafe { wari_drv_log_u32(TAG_DMA_GSTATUS, rc_gstatus as u32) };
+    if [
+        rc_oob, rc_idx, rc_len, rc_qnum, rc_feat, rc_gmac, rc_gkick, rc_grewind, rc_gstatus,
+    ]
+    .iter()
+    .any(|&rc| rc != HOST_E_INVAL)
+    {
         return Err(());
     }
 
@@ -3199,59 +3284,40 @@ pub fn driver_start() {
             let _ = unsafe { wari_drv_log_u32(tag, v) };
         }
 
-        // PR Phase-1c-6e — program TX/RX descriptor ring base
-        // addresses + ring lengths. DMA is alive; write the
-        // pointers and verify-read.
+        // ADR-002 step 1 — the kernel attaches both rings: it claims
+        // two 16-descriptor tables in its own memory and programs the
+        // list addresses, ring lengths, descriptor format and receive
+        // buffer size itself. Before this the engine may not be
+        // started (the kernel refuses ST/SR); after it, the DMA reset
+        // and the clock/reset windows are frozen. 'RgAt' logs the two
+        // answers (TX in the high half, RX in the low half); either
+        // refusal aborts bring-up, which the kernel reports as an
+        // uninitialized interface.
         //
-        // Ring sizing: 16 descriptors × 16 bytes = 256 B per ring.
-        // VF2_DMA_RINGS holds both rings + 16 RX buffers (1536 B
-        // each = 24 KiB). Total static = ~24.5 KiB in driver
-        // linmem.
-        //
-        // Physical address = lin_mem_base() + linmem-offset of
-        // the ring static. The kernel side translates via
-        // page-table mappings — wasm32 pointers ARE the linmem
-        // offset (driver is wasm32, 32-bit ptrs).
-        let lin_base = unsafe { wari_lin_mem_base() };
-        // The host fn returns 0 on any capability failure. The other
-        // three call sites check this; the one that programs the DMA
-        // engine did not. Unchecked, every PA below collapses to a raw
-        // wasm offset (~0x11000) and gets written into the descriptor
-        // list-address registers — pointing the GMAC at a physical
-        // address that is not DRAM on this SoC, with hardware writes
-        // landing entirely outside the sandbox. Abort bring-up instead:
-        // the kernel reports the interface as uninitialized, which is a
-        // diagnosable failure rather than silent memory corruption.
-        if lin_base == 0 {
-            // tag = 'LBa0' — lin_mem_base returned 0.
-            let _ = unsafe { wari_drv_log_u32(0x4C42_6130, 0) };
+        // First, 'DMAe': starting the RX engine before the rings are
+        // attached must be refused (it would walk the reset list
+        // address, 0). Part of the INV-25 self-check below; if it is
+        // accepted, bring-up stops here.
+        let rc_early = unsafe {
+            wari_net_mmio_write32(plat::NIC_BASE + 0x1108, 0x0001_0000 | (VF2_RBSZ << 1) | 1)
+        };
+        let _ = unsafe { wari_drv_log_u32(0x444D_4165, rc_early as u32) }; // 'DMAe'
+        if rc_early != HOST_E_INVAL {
+            return;
+        }
+        let rc_attach_tx = unsafe { wari_nic_attach_ring(RING_TX) };
+        let rc_attach_rx = unsafe { wari_nic_attach_ring(RING_RX) };
+        let _ = unsafe {
+            wari_drv_log_u32(
+                0x5267_4174,
+                ((rc_attach_tx as u32) << 16) | (rc_attach_rx as u32 & 0xFFFF),
+            )
+        };
+        if rc_attach_tx != 0 || rc_attach_rx != 0 {
             return;
         }
 
-        let tx_ring_off = unsafe { core::ptr::addr_of!(VF2_TX_RING.descs) as u32 };
-        let rx_ring_off = unsafe { core::ptr::addr_of!(VF2_RX_RING.descs) as u32 };
-        let tx_pa: u64 = lin_base + tx_ring_off as u64;
-        let rx_pa: u64 = lin_base + rx_ring_off as u64;
-
-        // Tags: 'TXp' / 'RXp' carry the ring physical address
-        // for visibility before we hand them to the DMA engine.
-        let _ = unsafe { wari_drv_log_u32(0x5458_7048, (tx_pa >> 32) as u32) }; // TXpH
-        let _ = unsafe { wari_drv_log_u32(0x5458_704C, tx_pa as u32) }; // TXpL
-        let _ = unsafe { wari_drv_log_u32(0x5258_7048, (rx_pa >> 32) as u32) }; // RXpH
-        let _ = unsafe { wari_drv_log_u32(0x5258_704C, rx_pa as u32) }; // RXpL
-
-        // Write TX ring base (high then low; per DWMAC databook
-        // the engine latches LOW writes once HIGH is set).
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1110, (tx_pa >> 32) as u32) };
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1114, tx_pa as u32) };
-        // Write RX ring base.
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1118, (rx_pa >> 32) as u32) };
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x111C, rx_pa as u32) };
-        // Ring lengths — 16 entries each (DMA expects N-1).
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x112C, 15) };
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1130, 15) };
-
-        // Verify-read all 6 slots.
+        // Verify-read all 6 slots (what the kernel programmed).
         for (off, tag_low) in [
             (0x1110u32, 0xA0u32), // TX_BASE_HI
             (0x1114, 0xA4),       // TX_BASE_LO
@@ -3279,30 +3345,12 @@ pub fn driver_start() {
         //          bit  29    = LD (last descriptor)
         //          bit  31    = OWN (1 = DMA owns; 0 = SW)
         //
-        // Pkt PA = lin_mem_base + linmem-offset of VF2_FIRST_PKT.
+        // The kernel writes that descriptor from the buffer's
+        // linear-memory offset; 'PKTo' logs its answer.
         fill_first_pkt();
         let pkt_off = core::ptr::addr_of!(VF2_FIRST_PKT) as u32;
-        let pkt_pa: u64 = lin_base + pkt_off as u64;
-        let _ = unsafe { wari_drv_log_u32(0x504B_5448, (pkt_pa >> 32) as u32) }; // 'PKTH'
-        let _ = unsafe { wari_drv_log_u32(0x504B_544C, pkt_pa as u32) }; // 'PKTL'
-
-        // SAFETY: VF2_TX_RING is module-static; this is the only
-        // writer and runs once at boot before DMA reads it.
-        unsafe {
-            let t = core::ptr::addr_of_mut!(VF2_TX_RING);
-            desc_wr(t, 0, 0, pkt_pa as u32); // TDES0 PA low
-            desc_wr(t, 0, 1, (pkt_pa >> 32) as u32); // TDES1 PA high
-            desc_wr(t, 0, 2, 64); // TDES2 buf len = 64
-            desc_wr(
-                t,
-                0,
-                3,
-                0x8000_0000            // OWN
-                    | 0x2000_0000      // LD
-                    | 0x1000_0000      // FD
-                    | 64, // total length 64
-            );
-        }
+        let rc_pkt = unsafe { wari_nic_dma_set_buf(RING_TX, 0, pkt_off, 64) };
+        let _ = unsafe { wari_drv_log_u32(0x504B_546F, rc_pkt as u32) }; // 'PKTo'
 
         // Build 134 — MAC_RXQ_CTRL0 (0x00A0) bits[1:0] = RXQ0EN.
         // Linux dwmac4_rx_queue_enable() writes 0b10 (DCB mode = 2)
@@ -3329,15 +3377,16 @@ pub fn driver_start() {
         // Default TXPBL = 1 (lower bits 21:16). Use 0x0010_0001
         // (TXPBL=1, ST=1).
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1104, 0x0010_0001) };
-        // DMA_CH0_RX_CONTROL: set SR (bit 0). RXPBL=1, RBSZ field
-        // bits 14:1 left at 0 for now (Phase-1c-6g sets 1536).
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1108, 0x0010_0001) };
+        // DMA_CH0_RX_CONTROL is started further down, once the RX
+        // descriptors are armed. (Up to build 184 SR was set here,
+        // over an empty ring, and the engine sat in RBU until the
+        // ring was filled; starting it after arming is the order the
+        // databook and Linux stmmac use, and it lets the INV-25
+        // self-check below test the OWN refusal on a stopped engine.)
 
-        // Tail pointer: write address of descriptor[1] (one past
-        // the last ready descriptor). DWMAC starts processing
-        // when current head < tail.
-        let tx_tail_pa: u32 = (lin_base + tx_ring_off as u64 + 16) as u32;
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1120, tx_tail_pa) };
+        // Tail pointer: descriptor[1] (one past the last ready
+        // descriptor). DWMAC starts processing when current != tail.
+        let _ = unsafe { wari_nic_ring_kick(RING_TX, 1) };
 
         // Verify-read post-write state.
         for (off, tag_low) in [
@@ -3352,10 +3401,9 @@ pub fn driver_start() {
             let _ = unsafe { wari_drv_log_u32(tag, v) };
         }
 
-        // Read TDES3 of descriptor[0] back from linmem to see if
-        // DMA cleared the OWN bit (= packet sent).
-        // SAFETY: same — module static, single accessor.
-        let tdes3 = unsafe { desc_rd(core::ptr::addr_of!(VF2_TX_RING), 0, 3) };
+        // Read TDES3 of descriptor[0] back to see if DMA cleared the
+        // OWN bit (= packet sent).
+        let tdes3 = vf2_desc_status(RING_TX, 0);
         let _ = unsafe { wari_drv_log_u32(0x5444_4533, tdes3) }; // 'TDE3'
 
         // PR Phase-1c-6g — populate RX ring + set RBSZ.
@@ -3372,44 +3420,35 @@ pub fn driver_start() {
         //           bit 30 = IOC (interrupt on completion)
         //           bit 31 = OWN (1 = DMA owns)
         //
-        // Then DMA_CH0_RX_CONTROL.RBSZ_x_0 (bits 14:1) carries
-        // the buffer size. For 1536 we write (1536 << 1) = 0xC00
-        // into bits 14:1 alongside SR + RXPBL.
-        // SAFETY: addr-of read on a module-static; no deref here.
-        let bufs_off = unsafe { core::ptr::addr_of!(VF2_RX_BUFS.bufs) as u32 };
-        let bufs_pa: u64 = lin_base + bufs_off as u64;
-        let _ = unsafe { wari_drv_log_u32(0x5258_4248, (bufs_pa >> 32) as u32) }; // 'RXBH'
-        let _ = unsafe { wari_drv_log_u32(0x5258_424C, bufs_pa as u32) }; // 'RXBL'
-
-        // Fill all 16 RX descriptors. Each buffer is 1536 B
-        // apart. SAFETY: module static, single writer at boot.
-        unsafe {
-            for i in 0..16 {
-                let bp: u64 = bufs_pa + (i as u64) * 1536;
-                let r = core::ptr::addr_of_mut!(VF2_RX_RING);
-                desc_wr(r, i, 0, bp as u32); // RDES0 PA low
-                desc_wr(r, i, 1, (bp >> 32) as u32); // RDES1 PA high
-                desc_wr(r, i, 2, 0); // RDES2 unused
-                desc_wr(
-                    r,
-                    i,
-                    3,
-                    0x8000_0000        // OWN
-                        | 0x4000_0000  // IOC
-                        | 0x0100_0000, // BUF1V
-                );
-            }
+        // The kernel writes those words; DMA_CH0_RX_CONTROL.RBSZ
+        // (bits 14:1) already holds 1536, set at attach, and the
+        // kernel refuses any RX_CONTROL write that changes it.
+        // 'RXar' logs how many of the 16 the kernel accepted.
+        //
+        // Descriptor 0 first, alone, so the INV-25 self-check can
+        // test the kernel's OWN refusal on it while the engine is
+        // stopped (nothing can hand it back in between), and test the
+        // span checks on descriptor 1, which is still free.
+        let arm = |i: usize| -> bool {
+            // SAFETY: addr-of on a module static; extern host fn.
+            let buf_off = unsafe { core::ptr::addr_of!(VF2_RX_BUFS.bufs[i]) as u32 };
+            unsafe { wari_nic_dma_set_buf(RING_RX, i as u32, buf_off, VF2_RBSZ) == 0 }
+        };
+        let mut armed = arm(0) as u32;
+        if vf2_inv25_self_check().is_err() {
+            return;
         }
+        for i in 1..VF2_RING_LEN {
+            armed += arm(i) as u32;
+        }
+        let _ = unsafe { wari_drv_log_u32(0x5258_6172, armed) }; // 'RXar'
 
-        // Re-write DMA_CH0_RX_CONTROL with the buffer size.
-        // (1 << 0)=SR | (1536 << 1)=RBSZ | (1 << 16)=RXPBL
-        let rx_ctrl = 0x0001_0000u32 | (1536u32 << 1) | 0x1;
+        // Start RX: (1 << 0)=SR | (1536 << 1)=RBSZ | (1 << 16)=RXPBL
+        let rx_ctrl = 0x0001_0000u32 | (VF2_RBSZ << 1) | 0x1;
         let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1108, rx_ctrl) };
 
-        // RX tail pointer = ring base + 16 descriptors × 16 B
-        // = "all 16 descs are armed".
-        let rx_tail_pa: u32 = (lin_base + rx_ring_off as u64 + 16 * 16) as u32;
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1128, rx_tail_pa) };
+        // RX tail = end of the ring = "all 16 descs are armed".
+        let _ = unsafe { wari_nic_ring_kick(RING_RX, VF2_RING_LEN as u32) };
 
         // Verify reads.
         let rx_ctrl_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1108) };
@@ -3424,7 +3463,7 @@ pub fn driver_start() {
 
         // Read RDES3 of descriptor[0] — OWN bit should still be
         // set (no frame received yet, DMA owns the buffer).
-        let rdes3_0 = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), 0, 3) };
+        let rdes3_0 = vf2_desc_status(RING_RX, 0);
         let _ = unsafe { wari_drv_log_u32(0x5244_4533, rdes3_0) }; // 'RDE3'
 
         // PR Phase-1c-6h — clear sticky DMA_CH0_STATUS bits and
@@ -3455,7 +3494,7 @@ pub fn driver_start() {
         let post_rx_curr = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x114C) };
         let _ = unsafe { wari_drv_log_u32(0x506F_5302, post_rx_curr) }; // PoS\2 (current RX descriptor pointer)
 
-        let post_rdes3_0 = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), 0, 3) };
+        let post_rdes3_0 = vf2_desc_status(RING_RX, 0);
         let _ = unsafe { wari_drv_log_u32(0x506F_5303, post_rdes3_0) }; // PoS\3
 
         // If a frame arrived, the buffer's first 4 bytes are the
@@ -3550,7 +3589,7 @@ pub fn driver_start() {
 
         // Walk the first 4 RX descriptors looking for OWN cleared.
         for i in 0..4u32 {
-            let r = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), i as usize, 3) };
+            let r = vf2_desc_status(RING_RX, i as usize);
             let tag = 0x5774_3300 | i;
             let _ = unsafe { wari_drv_log_u32(tag, r) };
         }
@@ -3609,7 +3648,7 @@ pub fn driver_start() {
 
         // Walk all 16 RX descs looking for OWN cleared.
         for i in 0..16u32 {
-            let r = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), i as usize, 3) };
+            let r = vf2_desc_status(RING_RX, i as usize);
             // Only log if changed (not still 0xC1000000).
             if r != 0xC100_0000 {
                 let tag = 0x5230_0000 | (i & 0xFF);
@@ -3647,17 +3686,9 @@ pub fn driver_start() {
         // Re-fire a TX broadcast ARP so any switch/AP/router on
         // the LAN responds and we get RX traffic in our wait
         // window. Reuse VF2_FIRST_PKT — descriptor 1.
-        let pkt_pa_2: u64 = lin_base + (core::ptr::addr_of!(VF2_FIRST_PKT) as u32) as u64;
-        unsafe {
-            let t = core::ptr::addr_of_mut!(VF2_TX_RING);
-            desc_wr(t, 1, 0, pkt_pa_2 as u32);
-            desc_wr(t, 1, 1, (pkt_pa_2 >> 32) as u32);
-            desc_wr(t, 1, 2, 64);
-            desc_wr(t, 1, 3, 0xB000_0040); // OWN | LD | FD | length 64
-        }
+        let _ = unsafe { wari_nic_dma_set_buf(RING_TX, 1, pkt_off, 64) };
         // Update TX tail pointer to descriptor[2].
-        let new_tx_tail: u32 = (lin_base + tx_ring_off as u64 + 32) as u32;
-        let _ = unsafe { wari_net_mmio_write32(plat::NIC_BASE + 0x1120, new_tx_tail) };
+        let _ = unsafe { wari_nic_ring_kick(RING_TX, 2) };
 
         // Verify-reads.
         let ie_rb = unsafe { wari_net_mmio_read32(plat::NIC_BASE + 0x1134) };
@@ -3676,7 +3707,7 @@ pub fn driver_start() {
         let _ = unsafe { wari_drv_log_u32(0x5374_3401, st4) }; // 'St4\1'
 
         for i in 0..16u32 {
-            let r = unsafe { desc_rd(core::ptr::addr_of!(VF2_RX_RING), i as usize, 3) };
+            let r = vf2_desc_status(RING_RX, i as usize);
             if r != 0xC100_0000 {
                 let tag = 0x5234_0000 | (i & 0xFF);
                 let _ = unsafe { wari_drv_log_u32(tag, r) };
@@ -3688,7 +3719,8 @@ pub fn driver_start() {
         // PR Phase-1c-7 — wire smoltcp on top of the GMAC bring-up.
         //
         // Steps:
-        //   1. stash lin_base for the smoltcp Device impl
+        //   1. (gone: no physical base to stash — the kernel holds the
+        //      rings and the driver names buffers by offset)
         //   2. derive MAC from MAC_ADDR0 readback (which we already
         //      programmed in 1c-6i to 6c:cf:39:00:40:84)
         //   3. nic_iface::init(mac) — builds smoltcp Interface +
@@ -3698,10 +3730,6 @@ pub fn driver_start() {
         //      tier2_net::install, after which the kernel idle
         //      loop calls driver_poll(tick) every iteration =
         //      continuous RX drain.
-
-        unsafe {
-            vf2_state::LIN_BASE = lin_base;
-        }
 
         // MAC bytes from EEPROM, mirroring the MAC_ADDR0 write
         // at lines 2849-2851. eth0 = :84 (GMAC0), eth1 = :85
@@ -3768,15 +3796,9 @@ mod vf2_keep_imports {
     #[used]
     static C: unsafe extern "C" fn(u32, u32) -> i32 = wari_nic_set_mac;
     #[used]
-    static D: unsafe extern "C" fn(u32, u32, u32, u32, u32) -> i32 = wari_nic_attach_queue;
+    static D: unsafe extern "C" fn(u32, u32, u32, u32) -> i32 = wari_nic_attach_queue;
     #[used]
     static E: unsafe extern "C" fn(u32) -> i32 = wari_nic_queue_notify;
-    #[used]
-    static F: unsafe extern "C" fn() -> u64 = wari_lin_mem_base;
-    // `nic_dma_set_buf`: the VirtIO path calls it; the GMAC path
-    // migrates to it in the VF2 follow-up of ADR-002 step 1.
-    #[used]
-    static H: unsafe extern "C" fn(u32, u32, u32, u32) -> i32 = wari_nic_dma_set_buf;
     // `drv_trace_u32`: the per-frame trace call sites are now gated behind
     // `net-diag` (a release console stays quiet), so a release vf2 build
     // has no live call site to retain the import. Pin it here — same
@@ -3795,11 +3817,8 @@ mod vf2_keep_imports {
 #[cfg(feature = "qemu")]
 mod qemu_keep_imports {
     use super::*;
-    // `lin_mem_base`: only the GMAC path still calls it (ADR-002
-    // step 1 moved the VirtIO path to `nic_dma_set_buf`). Pinned
-    // until the VF2 follow-up drops the import on both platforms.
-    #[used]
-    static F: unsafe extern "C" fn() -> u64 = wari_lin_mem_base;
+    // (The DWMAC4 ring operations need no pin here: the INV-25
+    // self-check in `init_virtio` calls all four, expecting refusals.)
     #[used]
     static G: unsafe extern "C" fn(u32, u32) -> i32 = wari_drv_trace_u32;
 }

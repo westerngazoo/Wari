@@ -476,7 +476,7 @@ const VIRTIO_MMIO_QUEUE_DEVICE_HIGH: u32 = 0x0a4;
 #[cfg(feature = "qemu")]
 const NIC_BASE_FOR_QUEUE_ATTACH: u32 = 0x1000_8000;
 
-/// `wari::nic_attach_queue(queue_idx, desc_off, avail_off, used_off,
+/// `wari::nic_attach_queue(queue_idx, avail_off, used_off,
 ///                         queue_size) -> i32`.
 ///
 /// PR Net-4c — the Tier-2 net driver calls this once per virtqueue
@@ -485,12 +485,18 @@ const NIC_BASE_FOR_QUEUE_ATTACH: u32 = 0x1000_8000;
 ///
 /// 1. Cap-checks `Net + WRITE` at slot 0 (the driver's root cap).
 /// 2. Resolves the calling instance's WASM linear memory.
-/// 3. Translates the three lin-mem offsets to physical addresses
-///    (Phase-1b's bump-allocator arena is identity-mapped, so
-///    kernel-virtual = physical for everything wasmi allocates).
-/// 4. Bounds-checks every offset against the lin-mem size and the
-///    queue-size requirements (descriptor 16-byte aligned, ring
-///    2-byte aligned).
+/// 3. Bounds-checks the two ring offsets against the lin-mem size
+///    and their alignment, and translates them to physical addresses
+///    (the bump-allocator arena is identity-mapped, so kernel-virtual
+///    = physical for everything wasmi allocates). The available ring
+///    holds descriptor *indexes* and the used ring is written by the
+///    device inside the span checked here; neither carries an
+///    address, so both may stay in the driver's memory.
+/// 4. Refuses a queue that is still ready, then claims a
+///    kernel-owned descriptor table for it (`mmio::dma_mem`,
+///    INV-25). The driver supplies none: the table holds the
+///    addresses and lengths the device acts on, so it must not be
+///    storable from the sandbox.
 /// 5. Writes the VirtIO MMIO queue-config registers per VirtIO 1.2
 ///    §4.2.2.2: `QueueSel`, `QueueNum`, `QueueDescLow/High`,
 ///    `QueueDriverLow/High`, `QueueDeviceLow/High`, `QueueReady`.
@@ -509,7 +515,6 @@ pub fn nic_attach_queue_impl<T>(
     caller: &mut wasmi::Caller<'_, T>,
     proc_id: u8,
     queue_idx: u32,
-    desc_off: u32,
     avail_off: u32,
     used_off: u32,
     queue_size: u32,
@@ -528,19 +533,19 @@ pub fn nic_attach_queue_impl<T>(
 
     // Argument validation.
     // - queue_idx: 0 = rx, 1 = tx for VirtIO-net
-    // - queue_size: power of 2, ≤ 256 (VirtIO 1.2 §2.6 caps at 32768
-    //   but Phase 1b uses much smaller; we cap conservatively)
-    if queue_idx > 1 {
+    // - queue_size: a power of 2 (VirtIO 1.2 §2.7) no larger than the
+    //   descriptor table the kernel reserves per ring.
+    if queue_idx as usize >= crate::mmio::dma_mem::RINGS {
         return E_INVAL;
     }
-    if queue_size == 0 || queue_size > 256 || !queue_size.is_power_of_two() {
+    if !queue_size.is_power_of_two()
+        || queue_size > wari_validate::dma::KERNEL_RING_ENTRIES
+    {
         return E_INVAL;
     }
-    // VirtIO 1.2 §2.6 alignment: descriptor table 16-byte, available
-    // ring 2-byte, used ring 4-byte. Reject misaligned offsets.
-    if desc_off & 0xF != 0 {
-        return E_INVAL;
-    }
+    // VirtIO 1.2 §2.7 alignment: available ring 2-byte, used ring
+    // 4-byte. Reject misaligned offsets. (The descriptor table is the
+    // kernel's and is aligned by construction.)
     if avail_off & 0x1 != 0 {
         return E_INVAL;
     }
@@ -558,16 +563,14 @@ pub fn nic_attach_queue_impl<T>(
     let mem_len = mem_data.len();
 
     // Bounds check: every offset + the ring size it implies must fit
-    // entirely within lin-mem.
-    let desc_size = 16usize * queue_size as usize;
-    let avail_size = 4usize + 2 * queue_size as usize;
-    let used_size = 4usize + 8 * queue_size as usize;
-    if (desc_off as usize)
-        .checked_add(desc_size)
-        .map_or(true, |end| end > mem_len)
-    {
-        return E_INVAL;
-    }
+    // entirely within lin-mem. Sizes include the trailing event field
+    // (`used_event` after the available ring, `avail_event` after the
+    // used ring; VirtIO 1.2 §2.7.6, §2.7.8). The driver cannot
+    // negotiate the feature that makes the device use them
+    // (`BoardDescriptor::write_masks`), but the span the device could
+    // ever touch is what gets validated.
+    let avail_size = 6usize + 2 * queue_size as usize;
+    let used_size = 6usize + 8 * queue_size as usize;
     if (avail_off as usize)
         .checked_add(avail_size)
         .map_or(true, |end| end > mem_len)
@@ -581,16 +584,6 @@ pub fn nic_attach_queue_impl<T>(
         return E_INVAL;
     }
 
-    // ADR-002 step 1: from here on the kernel, not the driver, points
-    // this ring's descriptors at buffers (`nic_dma_set_buf`), so it
-    // has to remember where the table is. `ring_fits` re-checks the
-    // same alignment and span as above; a mismatch here is a kernel
-    // bug, reported as E_INVAL rather than trusted.
-    if !super::dma::record_ring(proc_id, queue_idx, desc_off, queue_size, mem_len) {
-        return E_INVAL;
-    }
-
-    let desc_pa = mem_base + desc_off as usize;
     let avail_pa = mem_base + avail_off as usize;
     let used_pa = mem_base + used_off as usize;
 
@@ -612,13 +605,35 @@ pub fn nic_attach_queue_impl<T>(
         // Step 1 — select the queue we're configuring (§4.2.2.2).
         write32(base + VIRTIO_MMIO_QUEUE_SEL, queue_idx);
 
+        // A queue the device is using is not reconfigured (§4.2.2.2:
+        // queue registers change only while QueueReady is 0). Changing
+        // its size before its ring addresses would, for a moment,
+        // leave the device sizing the old rings with the new count,
+        // and claiming would clear a table it is reading. The driver
+        // resets the device (Status = 0) first, which drops readiness.
+        if read32(base + VIRTIO_MMIO_QUEUE_READY) != 0 {
+            return E_INVAL;
+        }
+
         // Step 2 — verify QueueNumMax ≥ our queue_size.
         let qmax = read32(base + VIRTIO_MMIO_QUEUE_NUM_MAX);
         if qmax < queue_size {
             return E_INVAL;
         }
 
-        // Step 3 — set queue size.
+        // INV-25: the descriptor table is kernel memory. Claiming it
+        // zeroes it and binds the ring to this driver; from here on
+        // only `nic_dma_set_buf` stores to it, after validating the
+        // span. Done after every check that can refuse, so a refused
+        // attach leaves no ring claimed.
+        let Some(desc_pa) = crate::mmio::dma_mem::claim(queue_idx as usize, proc_id, queue_size)
+        else {
+            return E_INVAL;
+        };
+
+        // Step 3 — set queue size. The driver cannot change it
+        // afterwards: the queue registers are refused to it
+        // (`BoardDescriptor::dma_addr_regs`).
         write32(base + VIRTIO_MMIO_QUEUE_NUM, queue_size);
 
         // Step 4 — write the three ring physical addresses.
@@ -644,14 +659,14 @@ pub fn nic_attach_queue_impl<T>(
         // not VirtIO virtqueues). Phase 1c will introduce the GMAC
         // equivalent host fn. Until then, the vf2 driver doesn't
         // call this and we hard-reject any caller that does.
-        let _ = (queue_idx, desc_pa, avail_pa, used_pa, queue_size);
+        let _ = (queue_idx, avail_pa, used_pa, queue_size);
         E_INVAL
     }
     #[cfg(feature = "r2s")]
     {
         // R2S first-light is net-less — no Tier-2 net driver calls this;
         // reject any caller until the Ky X1 NIC host-fn path exists.
-        let _ = (queue_idx, desc_pa, avail_pa, used_pa, queue_size);
+        let _ = (queue_idx, avail_pa, used_pa, queue_size);
         E_INVAL
     }
 }
@@ -709,6 +724,9 @@ pub fn nic_queue_notify_impl(proc_id: u8, queue_idx: u32) -> i32 {
     }
     #[cfg(feature = "qemu")]
     {
+        // The descriptors this doorbell announces were stored to
+        // memory by earlier host calls; order them first (R6).
+        crate::mmio::barrier_before_device_write();
         write32(
             NIC_BASE_FOR_QUEUE_ATTACH + VIRTIO_MMIO_QUEUE_NOTIFY,
             queue_idx,

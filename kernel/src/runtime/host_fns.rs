@@ -287,6 +287,18 @@ fn host_net_mmio_write32(_caller: Caller<'_, Tier2HostState>, addr: u32, val: u3
     if validate::is_dma_addr_register(addr as usize, 4) {
         return E_INVAL;
     }
+    // Some registers the driver does own carry bits that change the
+    // shape of the DMA rings the kernel validated (VirtIO feature
+    // negotiation). Those accept only the values the board allows.
+    if !validate::is_net_mmio_value_allowed(addr as usize, val) {
+        return E_INVAL;
+    }
+    // And some only in order: the engine may not be started before
+    // the kernel has pointed it at its rings, nor reset afterwards
+    // (a reset clears the ring registers the kernel programmed).
+    if !validate::is_net_mmio_write_in_order(addr as usize, crate::mmio::dma_mem::all_claimed()) {
+        return E_INVAL;
+    }
     // Order every prior memory write ahead of this device write.
     //
     // This is the barrier INV-25 records as missing, and it has to
@@ -405,7 +417,8 @@ pub fn register_net_host_fns(
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl, cap_register_impl,
         cap_revoke_impl, cap_unregister_impl, lin_mem_base_impl, nic_attach_queue_impl,
-        nic_dma_set_buf_impl, nic_queue_notify_impl, nic_set_mac_impl, notification_ack_impl,
+        nic_attach_ring_impl, nic_dma_set_buf_impl, nic_dma_status_impl, nic_queue_notify_impl,
+        nic_ring_kick_impl, nic_ring_rewind_impl, nic_set_mac_impl, notification_ack_impl,
         notification_wait_impl, ring_setup_impl, ring_submit_impl,
     };
     linker
@@ -519,29 +532,21 @@ pub fn register_net_host_fns(
         )
         .map_err(|_| KernelError::BadWasm)?;
 
-    // PR Net-4c — virtqueue attach. Driver passes lin-mem offsets;
-    // kernel translates to PAs and writes the VirtIO MMIO queue
-    // config registers.
+    // PR Net-4c — virtqueue attach. Driver passes lin-mem offsets of
+    // its available and used rings; the kernel supplies the descriptor
+    // table from its own memory (INV-25), translates the offsets to
+    // PAs and writes the VirtIO MMIO queue config registers.
     linker
         .func_wrap(
             "wari",
             "nic_attach_queue",
             move |mut caller: Caller<'_, Tier2HostState>,
                   queue_idx: u32,
-                  desc_off: u32,
                   avail_off: u32,
                   used_off: u32,
                   queue_size: u32|
                   -> i32 {
-                nic_attach_queue_impl(
-                    &mut caller,
-                    pid,
-                    queue_idx,
-                    desc_off,
-                    avail_off,
-                    used_off,
-                    queue_size,
-                )
+                nic_attach_queue_impl(&mut caller, pid, queue_idx, avail_off, used_off, queue_size)
             },
         )
         .map_err(|_| KernelError::BadWasm)?;
@@ -576,10 +581,52 @@ pub fn register_net_host_fns(
         )
         .map_err(|_| KernelError::BadWasm)?;
 
-    // PR Net-4d — return the driver's lin-mem PA. The VirtIO path no
-    // longer needs it (`nic_dma_set_buf` above); the GMAC path still
-    // computes its ring and buffer addresses from it until the VF2
-    // follow-up of ADR-002 step 1, which removes this host fn.
+    // ADR-002 step 1, DWMAC4 — the descriptor status word, and the
+    // ring lifecycle the kernel programs on the GMAC driver's behalf.
+    // See `cap::dma` and `cap::dwmac`.
+    linker
+        .func_wrap(
+            "wari",
+            "nic_dma_status",
+            move |mut caller: Caller<'_, Tier2HostState>,
+                  ring: u32,
+                  idx: u32,
+                  out_off: u32|
+                  -> i32 { nic_dma_status_impl(&mut caller, pid, ring, idx, out_off) },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "nic_attach_ring",
+            move |_: Caller<'_, Tier2HostState>, ring: u32| -> i32 {
+                nic_attach_ring_impl(pid, ring)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "nic_ring_kick",
+            move |_: Caller<'_, Tier2HostState>, ring: u32, idx: u32| -> i32 {
+                nic_ring_kick_impl(pid, ring, idx)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+    linker
+        .func_wrap(
+            "wari",
+            "nic_ring_rewind",
+            move |_: Caller<'_, Tier2HostState>, ring: u32| -> i32 {
+                nic_ring_rewind_impl(pid, ring)
+            },
+        )
+        .map_err(|_| KernelError::BadWasm)?;
+
+    // PR Net-4d — return the driver's lin-mem PA. No signed driver
+    // imports it any more (both NIC paths use the kernel-owned ring
+    // operations above), so no driver can call it; the host fn itself
+    // goes with the ADR-002 step 1 close-out.
     // Cap-gated by Net + READ; returns 0 on cap denial.
     linker
         .func_wrap(
