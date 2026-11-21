@@ -64,6 +64,22 @@ pub const fn is_net_mmio_value_allowed(addr: usize, val: u32) -> bool {
     wari_validate::write_value_allowed(addr, val, crate::board::BOARD.write_masks)
 }
 
+/// May the driver write the NIC register at `addr` in the current
+/// attach state? `attached` is "the kernel has attached the NIC's DMA
+/// rings" (`mmio::dma_mem::all_claimed`). Before that, the registers
+/// that start the engine are refused; after it, those that reset it.
+/// See `BoardDescriptor::needs_attach` / `frozen_after_attach`.
+#[inline]
+pub const fn is_net_mmio_write_in_order(addr: usize, attached: bool) -> bool {
+    wari_validate::attach_state_allows(
+        addr,
+        4,
+        attached,
+        crate::board::BOARD.needs_attach,
+        crate::board::BOARD.frozen_after_attach,
+    )
+}
+
 /// Does a `width`-byte access at `addr` touch a register that takes
 /// a DMA address?
 ///

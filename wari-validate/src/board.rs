@@ -31,6 +31,22 @@
 
 use crate::MmioWindow;
 
+/// The DMA engine behind a board's NIC, as far as the kernel's
+/// ring operations need to know (ADR-002 step 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmaEngine {
+    /// No NIC the kernel drives yet.
+    None,
+    /// VirtIO split virtqueues over the MMIO transport (QEMU).
+    VirtioSplit,
+    /// Synopsys DWMAC4 (Ethernet QoS) channel 0, register block at
+    /// `base`.
+    Dwmac4 {
+        /// Base of the GMAC register block.
+        base: usize,
+    },
+}
+
 /// Everything about a board that differs from another board.
 ///
 /// One `const` instance per supported platform ([`QEMU`], [`VF2`]);
@@ -85,6 +101,14 @@ pub struct BoardDescriptor {
     /// value, because some of their bits change the ring layout the
     /// kernel validated (INV-25). `net_mmio_write32` checks the value.
     pub write_masks: &'static [crate::WriteMask],
+    /// NIC registers refused until the kernel has attached the DMA
+    /// rings. See [`crate::attach_state_allows`].
+    pub needs_attach: &'static [MmioWindow],
+    /// Registers refused once the kernel has attached the DMA rings.
+    /// See [`crate::attach_state_allows`].
+    pub frozen_after_attach: &'static [MmioWindow],
+    /// Which DMA engine the kernel's ring operations program.
+    pub dma_engine: DmaEngine,
     /// Is the NIC's DMA master cache-coherent with the CPU on this SoC?
     /// `true` on JH7110 (proven) and QEMU; a third board decides this
     /// by experiment. When `false`, the net driver's (future) CMO hooks
@@ -107,6 +131,9 @@ pub const QEMU: BoardDescriptor = BoardDescriptor {
     mmio_regions: crate::windows::qemu::MMIO_REGIONS,
     dma_addr_regs: crate::windows::qemu::DMA_ADDR_REGS,
     write_masks: crate::windows::qemu::WRITE_MASKS,
+    needs_attach: crate::windows::qemu::NEEDS_ATTACH,
+    frozen_after_attach: crate::windows::qemu::FROZEN_AFTER_ATTACH,
+    dma_engine: DmaEngine::VirtioSplit,
     dma_coherent: true,
 };
 
@@ -125,6 +152,11 @@ pub const VF2: BoardDescriptor = BoardDescriptor {
     mmio_regions: crate::windows::vf2::MMIO_REGIONS,
     dma_addr_regs: crate::windows::vf2::DMA_ADDR_REGS,
     write_masks: crate::windows::vf2::WRITE_MASKS,
+    needs_attach: crate::windows::vf2::NEEDS_ATTACH,
+    frozen_after_attach: crate::windows::vf2::FROZEN_AFTER_ATTACH,
+    dma_engine: DmaEngine::Dwmac4 {
+        base: crate::windows::vf2::GMAC_BASE,
+    },
     dma_coherent: true,
 };
 
@@ -163,6 +195,9 @@ pub const R2S: BoardDescriptor = BoardDescriptor {
     mmio_regions: crate::windows::r2s::MMIO_REGIONS, // empty: UART+PLIC map from scalars
     dma_addr_regs: crate::windows::r2s::DMA_ADDR_REGS, // empty until DT names the MAC
     write_masks: crate::windows::r2s::WRITE_MASKS,     // empty until DT names the MAC
+    needs_attach: crate::windows::r2s::NEEDS_ATTACH,
+    frozen_after_attach: crate::windows::r2s::FROZEN_AFTER_ATTACH,
+    dma_engine: DmaEngine::None,
     dma_coherent: false,      // UNKNOWN — conservative default; set by bring-up experiment
 };
 
@@ -277,9 +312,124 @@ mod tests {
                 "{kept:#x} must stay writable by the driver"
             );
         }
-        // VF2 is filled by the GMAC PR; until then the driver programs
-        // the DWMAC list/tail registers itself (see windows::vf2).
-        assert!(VF2.dma_addr_regs.is_empty());
+        // VF2: the channel-0 list, tail and length registers, the
+        // descriptor-skip register, the other channels, and GMAC0's
+        // whole DMA block.
+        let regs = VF2.dma_addr_regs;
+        for reg in [
+            0x1604_1100,
+            0x1604_1110,
+            0x1604_1114,
+            0x1604_1118,
+            0x1604_111C,
+        ] {
+            assert!(crate::access_in_windows(reg, 4, regs), "{reg:#x}");
+        }
+        for reg in [0x1604_1120, 0x1604_1128, 0x1604_112C, 0x1604_1130] {
+            assert!(crate::access_in_windows(reg, 4, regs), "{reg:#x}");
+        }
+        assert!(crate::access_in_windows(0x1604_1190, 4, regs)); // ch1 list
+        assert!(crate::access_in_windows(0x1604_14FC, 4, regs)); // last ch7 reg
+        assert!(crate::access_in_windows(0x1603_1114, 4, regs)); // GMAC0 list
+        assert!(crate::access_in_windows(0x1603_1104, 4, regs)); // GMAC0 start
+
+        // What the driver keeps on GMAC1: control (value-checked),
+        // interrupt enable, status, current-descriptor reads, MAC/MTL.
+        for kept in [
+            0x1604_1104,
+            0x1604_1108,
+            0x1604_1134,
+            0x1604_1160,
+            0x1604_114C,
+            0x1604_0000,
+            0x1604_0D00,
+        ] {
+            assert!(
+                !crate::access_in_windows(kept, 4, regs),
+                "{kept:#x} must stay writable by the driver"
+            );
+        }
+    }
+
+    #[test]
+    fn vf2_control_registers_keep_the_descriptor_format_and_buffer_size() {
+        const TX: usize = 0x1604_1104;
+        const RX: usize = 0x1604_1108;
+        let m = VF2.write_masks;
+        const RBSZ: u32 = crate::dma::DWMAC_RBSZ << 1;
+        // What the driver writes today.
+        assert!(crate::write_value_allowed(TX, 0x0010_0001, m));
+        assert!(crate::write_value_allowed(RX, 0x0001_0000 | RBSZ | 1, m)); // run
+        assert!(crate::write_value_allowed(RX, 0x0001_0000 | RBSZ, m)); // stop
+        assert!(crate::write_value_allowed(RX, 0x8001_0000 | RBSZ | 1, m)); // + RPF
+
+        // TX: TSO (bit 12) and enhanced descriptors (bit 28) change
+        // what the engine reads as a descriptor.
+        assert!(!crate::write_value_allowed(TX, 0x0010_1001, m));
+        assert!(!crate::write_value_allowed(TX, 0x1010_0001, m));
+        // RX: any other buffer size, including none, is refused.
+        assert!(!crate::write_value_allowed(
+            RX,
+            0x0001_0000 | (2048 << 1) | 1,
+            m
+        ));
+        assert!(!crate::write_value_allowed(RX, 0x0001_0001, m));
+        assert!(!crate::write_value_allowed(RX, u32::MAX, m));
+    }
+
+    #[test]
+    fn vf2_engine_start_waits_for_attach_and_resets_stop_after_it() {
+        let (start, frozen) = (VF2.needs_attach, VF2.frozen_after_attach);
+        // Before attach: bring-up may reset and clock the MAC, may
+        // not start the engine.
+        for reg in [
+            0x1604_1000,
+            0x1604_1004,
+            0x1023_0000,
+            0x1302_0190,
+            0x1303_0090,
+            0x1701_000C,
+        ] {
+            assert!(
+                crate::attach_state_allows(reg, 4, false, start, frozen),
+                "{reg:#x}"
+            );
+            assert!(
+                !crate::attach_state_allows(reg, 4, true, start, frozen),
+                "{reg:#x}"
+            );
+        }
+        for reg in [0x1604_1104, 0x1604_1108] {
+            assert!(
+                !crate::attach_state_allows(reg, 4, false, start, frozen),
+                "{reg:#x}"
+            );
+            assert!(
+                crate::attach_state_allows(reg, 4, true, start, frozen),
+                "{reg:#x}"
+            );
+        }
+        // Status, interrupt enable, MAC: always.
+        for reg in [0x1604_1160, 0x1604_1134, 0x1604_0000] {
+            assert!(crate::attach_state_allows(reg, 4, false, start, frozen));
+            assert!(crate::attach_state_allows(reg, 4, true, start, frozen));
+        }
+        // Every attach-ordered register is one the driver can reach.
+        for w in start.iter().chain(frozen.iter()) {
+            assert!(crate::access_in_windows(w.base, 4, VF2.net_windows));
+            assert!(crate::access_in_windows(
+                w.base + w.len - 4,
+                4,
+                VF2.net_windows
+            ));
+        }
+        // QEMU and R2S have none.
+        for b in [QEMU, R2S] {
+            assert!(b.needs_attach.is_empty() && b.frozen_after_attach.is_empty());
+        }
+        assert_eq!(VF2.dma_engine, DmaEngine::Dwmac4 { base: 0x1604_0000 });
+        assert_eq!(QEMU.dma_engine, DmaEngine::VirtioSplit);
+        assert_eq!(R2S.dma_engine, DmaEngine::None);
     }
 
     #[test]
@@ -303,8 +453,7 @@ mod tests {
         assert!(!crate::write_value_allowed(0x1000_8024, 2, m));
         // Status is not value-guarded.
         assert!(crate::write_value_allowed(0x1000_8070, u32::MAX, m));
-        // No guards on the other boards yet.
-        assert!(VF2.write_masks.is_empty());
+        // No guards on R2S yet (VF2: see the control-register test).
         assert!(R2S.write_masks.is_empty());
     }
 

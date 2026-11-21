@@ -415,7 +415,7 @@ them**, so they are not R1 violations — but they should take real
 numbers when the registered-fastpath work lands rather than staying
 Greek.
 
-### INV-25 · DMA Descriptor Ownership *(Phase 1c)* — **partially unenforced, see Status**
+### INV-25 · DMA Descriptor Ownership *(Phase 1c)* — **enforced on both NICs (GMAC: silicon run pending), see Status**
 
 > Once software sets the OWN bit on a descriptor, it does not read or
 > write that descriptor or its buffer until the engine clears OWN.
@@ -463,11 +463,11 @@ the peripheral's IO-coherence, which is a per-SoC, per-peripheral
 property.
 
 *Address containment* — "every physical address handed to a DMA
-engine lies inside the driver's own linear memory" — **is not
-enforced by anything.** The driver computes physical addresses itself
-(`lin_mem_base()` + offset) and writes them into descriptors and DMA
-list-address registers; `net_mmio_write32` checks the register, not
-the value. The GMAC has no IOMMU. A driver that violates this half of
+engine lies inside the driver's own linear memory" — **was enforced
+by nothing** until ADR-002 step 1 (status below). The driver computed
+physical addresses itself (`lin_mem_base()` + offset) and wrote them
+into descriptors and DMA list-address registers; `net_mmio_write32`
+checked the register, not the value. The GMAC has no IOMMU. A driver that violates this half of
 the invariant can make the device read or write any physical address,
 kernel memory included. See `security-model.md` §"DMA" for the threat
 and the required fix (kernel-owned DMA addressing), decided in
@@ -493,16 +493,21 @@ address with the new length, or the reverse, would leave the driver's
 memory (`reaim_keeps_mixtures_inside`) — a device need not read a
 descriptor in one step. The doorbell is ordered after the descriptor
 stores (`fence w,o`). The driver's self-check at
-init makes five attempts that must be refused and will not bring the
-device up if any is accepted (`tests/security/tests/dma_escape.rs`);
+init makes six attempts that must be refused (the sixth: a GMAC ring
+operation on this VirtIO board) and will not bring the device up if
+any is accepted (`tests/security/tests/dma_escape.rs`);
 `dma_kernel_rings.rs` proves the device really uses the kernel's
 tables by passing a frame through each DMA direction.
 
-Not covered: a ring is never released (the net driver is a boot
-singleton, INV-14); and physical addresses are formed from the linear
-memory's base at call time, which is only sound while that memory
-does not move — the driver modules contain no `memory.grow`, and
-nothing yet forbids one that did.
+Not covered (both NICs): a ring is never released (the net driver is
+a boot singleton, INV-14); physical addresses are formed from the
+linear memory's base at call time, which is only sound while that
+memory does not move — the driver modules contain no `memory.grow`,
+and nothing yet forbids one that did; and the driver can still *read*
+the ring registers (and on the GMAC the current-buffer registers), so
+it can learn physical addresses. Containment does not rest on their
+secrecy: knowing an address gives the driver no way to aim the engine
+at it.
 
 An earlier version of this fix wrote the validated address into a
 descriptor that stayed in the driver's linear memory. That was not
@@ -510,11 +515,39 @@ containment: the driver could overwrite the address or the length
 afterwards with an ordinary store, and read the address to learn its
 physical base. It is why the tables moved.
 
-**GMAC (VF2): not yet.** The driver still forms ring and buffer
-addresses from `lin_mem_base` and keeps its descriptor rings in its
-own memory; the VF2 follow-up moves them into the kernel, with the
-ring-length, buffer-size and descriptor-skip registers that also
-decide what the engine touches, and fills `dma_addr_regs`.
+**GMAC (VF2): enforced in code; the silicon run is pending.** Same
+mechanism, DWMAC4 descriptors. The two rings live in `mmio::dma_mem`;
+`nic_attach_ring` (`cap::dwmac`) claims one and programs, through
+`mmio::dwmac`, the list address, the ring length, `DMA_CH0_CONTROL`
+(zero: no descriptor skip, no split header) and the receive buffer
+size `RBSZ`. `nic_dma_set_buf` writes `RDES`/`TDES` words from an
+offset: a receive buffer must be exactly `RBSZ` long (the engine fills
+that much whatever the descriptor says), a transmit length must fit
+`TDES2`, a receive buffer must start on a 16-byte boundary, and a
+descriptor the engine still owns (OWN set) is refused. The engine
+also reads descriptors it does not own (it fetches the one at its
+position and suspends on OWN=0), so a rewrite is safe only because
+of a **per-SoC assumption**, recorded here beside `dma_coherent`: the
+engine fetches a 16-byte descriptor in one coherent read of its
+64-byte-aligned cache line, and cannot pair the new OWN bit with the
+old address words. A third SoC re-decides it. `nic_ring_kick` moves the tail pointer after a
+`fence w,o`; `nic_ring_rewind` re-points a stopped channel for the
+receive-wedge recovery; `nic_dma_status` returns only the status word
+(words 0-1 of an unwritten-back descriptor are the physical address).
+`net_mmio_write32` refuses the list, tail, length and control-0
+registers, the other channels and GMAC0's whole DMA block
+(`dma_addr_regs`); accepts the channel control registers only without
+TSO/enhanced descriptors and with `RBSZ` unchanged (`write_masks`,
+which gained a required-value field); refuses those control registers
+until both rings are attached, and the DMA reset plus the clock/reset
+windows after (`needs_attach`, `frozen_after_attach`): a start before
+attach would walk the reset list address 0, and a reset after it
+clears the kernel's registers. No signed driver imports `lin_mem_base`
+any more. The driver's self-check makes fourteen attempts that must be
+refused on silicon (`vf2_inv25_self_check`: `DMAo`, `DMAl`, `DMAb`,
+`DMAx`, `DMAn`, `DMAw`, `DMAz`, `DMAs`, `DMAt`, `DMAr`, `DMAc`,
+`DMAk`, `DMAa`), plus `DMAe` before attach (starting the engine). QEMU cannot run this
+path; the pure decisions are host-tested in `wari_validate`.
 
 ### INV-26 · A Driver Socket Lives Exactly As Long As a Cap Names It *(Phase 2)*
 
@@ -662,6 +695,8 @@ contract: caller must guarantee one-time invocation pre-runtime use.
 | `kernel/src/runtime/sign.rs` (`verify`) | ed25519 verify of envelope vs. `ACCEPTED_PUBKEY`                   | INV-13       | First gate before any Tier-2 wasmi parse |
 | `kernel/src/mmio/dma_mem.rs` (`claim`, `write_desc`, `read_desc`) | `static mut STATE` read/write (ring owner, entry count) | INV-1 | Single-hart host-fn context; raw pointers only, no reference to the static |
 | `kernel/src/mmio/dma_mem.rs` (`store`, `read_desc`, `claim`) | Volatile 64-bit access to `static mut MEM` (kernel-owned DMA descriptor tables) | INV-1, INV-25 | Bounds and alignment by construction; volatile because the device reads this memory |
+| `kernel/src/mmio/dma_mem.rs` (`is_claimed`, `owned`) | `static mut STATE` read; address-of `MEM` | INV-1 | Single-hart host-fn context; Copy read, no reference to the static |
+| `kernel/src/mmio/dwmac.rs` (`reg`) | `VolatilePtr::new` on a DWMAC4 register (`GMAC base + dwmac_reg` offset) | INV-3, INV-20, INV-25 | Base from the board descriptor, offsets fixed and inside the identity-mapped GMAC window; 4-byte aligned |
 | `kernel/src/mmio/mod.rs` (`barrier_before_device_write`) | `asm!("fence w,o")` | INV-7, INV-25 | Unprivileged barrier ordering descriptor stores before the doorbell |
 | `kernel/src/runtime/host_fns.rs` (`host_mmio_write8`) | `core::ptr::write_volatile` byte write to MMIO       | INV-3        | Validator-narrowed: only `is_uart_mmio_addr` addresses reach the volatile write; capability gate (`mmio_uart`) precedes |
 | `kernel/src/cap/static_caps.rs`         | `Caps` construction + `caps_for` lookup                            | INV-1        | Plain-value caps; immutable post-load on a single-hart kernel |

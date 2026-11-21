@@ -51,6 +51,7 @@ pub mod static_caps;
 pub mod boot;
 pub mod cspace;
 pub mod dma;
+pub mod dwmac;
 pub mod grants;
 pub mod objects;
 pub mod pool;
@@ -78,7 +79,8 @@ pub use boot::{
     PROC_ID_TIER1_SOCKLEAK_B, PROC_ID_TIER2_NET, PROC_ID_TIER2_UART,
 };
 pub use cspace::{CSpace, CSPACE_SLOTS, MAX_PROCS};
-pub use dma::nic_dma_set_buf_impl;
+pub use dma::{nic_dma_set_buf_impl, nic_dma_status_impl};
+pub use dwmac::{nic_attach_ring_impl, nic_ring_kick_impl, nic_ring_rewind_impl};
 pub use objects::{
     Endpoint, Frame, Net, Notification, ObjectPools, Socket, TcbRef, Untyped,
     ENDPOINT_POOL_CAPACITY, FRAME_POOL_CAPACITY, NET_POOL_CAPACITY, NOTIFICATION_POOL_CAPACITY,
