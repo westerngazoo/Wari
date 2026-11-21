@@ -172,8 +172,8 @@ pub enum FuncSig {
     /// `u64 -> i32` — net `poll`.
     U64I32 = 5,
 
-    /// `() -> u64` — `rx_pop` (packed `(buf_off, len)`),
-    /// `lin_mem_base`.
+    /// `() -> u64` — `rx_pop` (packed `(buf_off, len)`). (Also the
+    /// shape of the retired `lin_mem_base`.)
     UnitU64 = 6,
 
     /// `(u32, u32, u32, u32, u32) -> i32`. No current user:

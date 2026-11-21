@@ -416,10 +416,10 @@ pub fn register_net_host_fns(
     // driver's proc_id baked into each closure.
     use crate::cap::{
         cap_copy_impl, cap_delete_impl, cap_lookup_impl, cap_mint_impl, cap_register_impl,
-        cap_revoke_impl, cap_unregister_impl, lin_mem_base_impl, nic_attach_queue_impl,
-        nic_attach_ring_impl, nic_dma_set_buf_impl, nic_dma_status_impl, nic_queue_notify_impl,
-        nic_ring_kick_impl, nic_ring_rewind_impl, nic_set_mac_impl, notification_ack_impl,
-        notification_wait_impl, ring_setup_impl, ring_submit_impl,
+        cap_revoke_impl, cap_unregister_impl, nic_attach_queue_impl, nic_attach_ring_impl,
+        nic_dma_set_buf_impl, nic_dma_status_impl, nic_queue_notify_impl, nic_ring_kick_impl,
+        nic_ring_rewind_impl, nic_set_mac_impl, notification_ack_impl, notification_wait_impl,
+        ring_setup_impl, ring_submit_impl,
     };
     linker
         .func_wrap(
@@ -623,20 +623,9 @@ pub fn register_net_host_fns(
         )
         .map_err(|_| KernelError::BadWasm)?;
 
-    // PR Net-4d — return the driver's lin-mem PA. No signed driver
-    // imports it any more (both NIC paths use the kernel-owned ring
-    // operations above), so no driver can call it; the host fn itself
-    // goes with the ADR-002 step 1 close-out.
-    // Cap-gated by Net + READ; returns 0 on cap denial.
-    linker
-        .func_wrap(
-            "wari",
-            "lin_mem_base",
-            move |mut caller: Caller<'_, Tier2HostState>| -> u64 {
-                lin_mem_base_impl(&mut caller, pid)
-            },
-        )
-        .map_err(|_| KernelError::BadWasm)?;
+    // There is deliberately no `lin_mem_base`: no Tier-2 module may
+    // learn its physical base (ADR-002 step 1, INV-25). A driver that
+    // imports it fails to instantiate.
 
     Ok(())
 }

@@ -26,8 +26,8 @@
 //! calls go through the same imports, cap check and linear memory the
 //! positive path uses one line later.
 //!
-//! Not covered here (VF2 follow-up): the GMAC path still computes its
-//! ring and buffer addresses from `lin_mem_base`.
+//! The GMAC path is not covered here: QEMU has no GMAC. Its own
+//! self-check runs on the VF2 (`vf2_inv25_self_check`).
 
 use wari_security_tests::{boot_kernel_capture_with_net, markers, DEFAULT_WALLCLOCK};
 
