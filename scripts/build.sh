@@ -99,10 +99,10 @@ while [ $# -gt 0 ]; do
 done
 
 case "$PROFILE" in
-    release) DRV_FEATURES="vf2 gmac1";          KRN_FEATURES="vf2";              PLATFORM="vf2"  ;;
+    release) DRV_FEATURES="vf2 gmac1";          KRN_FEATURES="vf2,umode";        PLATFORM="vf2"  ;;
     debug)   DRV_FEATURES="vf2 gmac1";          KRN_FEATURES="vf2,debug-kernel"; PLATFORM="vf2"  ;;
     trace)   DRV_FEATURES="vf2 gmac1 net-diag"; KRN_FEATURES="vf2";              PLATFORM="vf2"  ;;
-    qemu)    DRV_FEATURES="qemu";               KRN_FEATURES="qemu";             PLATFORM="qemu" ;;
+    qemu)    DRV_FEATURES="qemu";               KRN_FEATURES="qemu,umode";       PLATFORM="qemu" ;;
     *) echo "usage: scripts/build.sh <release|debug|trace|qemu> [--programs a,b] [--no-bump] [--publish] [--dev-keys]"; exit 2 ;;
 esac
 

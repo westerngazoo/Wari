@@ -69,6 +69,10 @@ trace-kernel = ["debug-kernel"]
 # in-tree dev key, whose secret half is public, and says so at boot.
 # For QEMU, tests and contributor boards; never for a deployed image.
 dev-keys = []
+# ADR-004 step 1: the boot-time U-mode self-test (`kernel/src/umode.rs`).
+# On in the `qemu` and `release` build profiles; the U-mode trap path
+# in `trap.S` is always compiled and stays dormant without it.
+umode = []
 
 [profile.release]
 panic = "abort"

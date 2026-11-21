@@ -5,10 +5,13 @@
 //! 69d9908b6956315684c567fb95cec542062a61a5 under the "only copy what
 //! makes sense" discipline.
 //!
-//! Phase 0 scope: no userspace, no syscall surface (Q1=A: ecall is not
-//! a normal control path), no scheduler, no IPC. The trap vector exists
-//! to (a) catch kernel exceptions and dump diagnostics, and (b) ack
-//! timer interrupts cleanly if any fire. Anything else halts the hart.
+//! Two entry points, one per trapping mode (`trap.S` tells them apart
+//! by `sscratch`, INV-2):
+//!   - [`handle_trap`]: a trap from S-mode. Interrupts are serviced; an
+//!     exception is a kernel bug, so it is printed and the hart halts.
+//!   - [`handle_user_trap`]: a trap from U-mode (ADR-004 step 1). The
+//!     decision is pure (`wari_sched::utrap`); an exception ends only
+//!     the process, never the kernel.
 //!
 //! Differences from goose-os:
 //!   - No `handle_syscall`, no IPC dispatch, no scheduler hooks
@@ -21,6 +24,7 @@
 use core::arch::{asm, global_asm};
 
 use crate::kprintln;
+use wari_sched::utrap::{cause_name, decide, UserExit, UserTrap, ECALL_LEN};
 
 // Pull in the assembly trap entry. `_trap_entry` is the symbol `stvec`
 // will point at.
@@ -90,11 +94,13 @@ pub fn install() {
     // First cast to a pointer, then to usize — direct fn-to-int casts
     // are denied by clippy's `function_casts_as_integer` lint.
     let entry = _trap_entry as *const () as usize;
-    // SAFETY: INV-7. `csrw stvec` is an S-mode privileged CSR write;
-    // we are in S-mode. `entry` is the address of an `extern "C"` symbol
-    // exported by `trap.S`, naturally aligned to 4 bytes.
+    // SAFETY: INV-7, INV-2. `csrw sscratch` / `csrw stvec` are S-mode
+    // privileged CSR writes; we are in S-mode. sscratch = 0 marks "the
+    // kernel is running" for `_trap_entry` (INV-2) and must hold before
+    // the first trap can arrive. `entry` is the address of an
+    // `extern "C"` symbol exported by `trap.S`, naturally aligned to 4.
     unsafe {
-        asm!("csrw stvec, {0}", in(reg) entry);
+        asm!("csrw sscratch, zero", "csrw stvec, {0}", in(reg) entry);
     }
 }
 
@@ -126,29 +132,10 @@ pub extern "C" fn handle_trap(frame: &mut TrapFrame) {
     let code = scause & !SCAUSE_INTERRUPT_BIT;
 
     if is_interrupt {
-        match code {
-            SCAUSE_S_TIMER => {
-                // Phase 0 has no scheduler — just clear the pending bit
-                // so the timer doesn't re-fire immediately, then return.
-                ack_timer();
-            }
-            SCAUSE_S_EXT => {
-                // PLIC-routed external interrupt (Phase 1b PR Net-1).
-                // Claim → signal-bound-notification → complete.
-                crate::mmio::plic::dispatch();
-            }
-            _ => {
-                kprintln!(
-                    "[trap] unhandled interrupt code={} sepc={:#x}",
-                    code,
-                    frame.sepc,
-                );
-                halt();
-            }
-        }
+        dispatch_interrupt(code, frame.sepc);
     } else {
-        // Exception. With no userspace in Phase 0 every exception is a
-        // kernel bug; print and halt.
+        // Exception from S-mode: always a kernel bug (U-mode faults take
+        // `handle_user_trap`); print and halt.
         kprintln!(
             "[trap] exception code={} sepc={:#x} stval={:#x}",
             code,
@@ -156,6 +143,59 @@ pub extern "C" fn handle_trap(frame: &mut TrapFrame) {
             frame.stval,
         );
         halt();
+    }
+}
+
+/// Service an interrupt, whichever mode it arrived in.
+///
+/// Timer: the kernel arms none yet, so a stray one is acknowledged.
+/// External: PLIC claim → signal-bound-notification → complete (Phase
+/// 1b PR Net-1). Anything else halts: no other source is enabled.
+fn dispatch_interrupt(code: usize, sepc: usize) {
+    match code {
+        SCAUSE_S_TIMER => ack_timer(),
+        SCAUSE_S_EXT => crate::mmio::plic::dispatch(),
+        _ => {
+            kprintln!("[trap] unhandled interrupt code={} sepc={:#x}", code, sepc);
+            halt();
+        }
+    }
+}
+
+/// Rust-side handler for a trap taken from U-mode, called from
+/// `_trap_entry`'s U-mode path with `a0 = &mut TrapFrame` on the
+/// kernel stack.
+///
+/// Returns 0 to resume the process (the frame, possibly updated, is
+/// restored and `sret` goes back to U-mode), or a non-zero
+/// [`UserExit`] word to end it: the assembly then returns that word
+/// from `__umode_enter`. Never halts the kernel on the process's
+/// behalf — a U-mode fault ends only the process (ADR-004 step 1).
+#[no_mangle]
+pub extern "C" fn handle_user_trap(frame: &mut TrapFrame) -> u64 {
+    // INV-2: the frame was saved by `_trap_entry` on the
+    // kernel stack sscratch named; interrupts are masked while we run,
+    // so nothing else touches it until sret or the leave path.
+    match decide(frame.scause as u64, frame.a7 as u64, frame.a0 as u64) {
+        UserTrap::Interrupt { code } => {
+            dispatch_interrupt(code as usize, frame.sepc);
+            0
+        }
+        UserTrap::Return { a0 } => {
+            frame.a0 = a0 as usize;
+            frame.sepc += ECALL_LEN;
+            0
+        }
+        UserTrap::Exit { code } => UserExit::Exited(code).encode(),
+        UserTrap::Kill { cause } => {
+            kprintln!(
+                "[umode] process killed: {} sepc={:#x} stval={:#x}",
+                cause_name(cause),
+                frame.sepc,
+                frame.stval,
+            );
+            UserExit::Killed(cause).encode()
+        }
     }
 }
 
