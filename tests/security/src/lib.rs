@@ -244,7 +244,17 @@ pub mod markers {
     /// address faulted in U-mode and only the stub was ended.
     pub const UMODE_HOSTILE_KILLED: &str = "[umode] hostile stub killed: load page fault";
 
-    /// `kernel/src/umode.rs`: printed after both stubs, from S-mode.
+    /// `kernel/src/umode.rs`: process A's read of a VA that holds
+    /// process B's page faulted (B itself read it fine), and B's page
+    /// kept its contents (ADR-004 step 2, INV-28).
+    pub const UMODE_CROSS_SPACE_KILLED: &str = "[umode] cross-space read killed: load page fault";
+
+    /// `kernel/src/umode.rs`: after destroying every test address
+    /// space the page allocator has exactly as many free pages as
+    /// before the self-test.
+    pub const UMODE_SPACES_FREED: &str = "[umode] address spaces destroyed, every page returned";
+
+    /// `kernel/src/umode.rs`: printed after every stub, from S-mode.
     pub const UMODE_KERNEL_CONTINUES: &str = "[umode] kernel continues";
 
     /// Any self-test outcome other than the expected one.

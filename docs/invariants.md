@@ -602,6 +602,48 @@ socket may stay allocated; the kernel object is freed regardless. The
 boot self-test's own driver socket (`runtime::run_tier2_net`) has no
 `Socket` object and is outside this invariant.
 
+### INV-28 · One Address Space per Process *(Phase 2, ADR-004 step 2)*
+
+> Every U=1 page is mapped in exactly one address space, at one VA,
+> and is owned by that space: it was allocated for it by
+> `AddressSpace::map_zeroed` and returns to the allocator only when
+> the space is destroyed. Every space maps the kernel exactly as the
+> kernel root does, U=0. (Shared memory granted by an explicit `Frame`
+> capability will be the one exception; it does not exist yet.)
+
+**Why it is an invariant and not a convention.** The MMU is the second
+of Wari's isolation layers (the WASM validator is the first). If a
+page could be U=1 in two spaces, a bug in one process's runtime — the
+case ADR-004 exists for — would reach the other process's memory. If a
+space's kernel half differed from the kernel root, a trap taken in
+that space could fault in the kernel.
+
+**Enforcement.** `kernel/src/mem/uspace.rs` is the only code that
+creates U=1 leaves. `map_zeroed` allocates a fresh page for every
+mapping and refuses to remap a VA (`InvalidArgument`); the pure check
+`wari_mem::uspace::check_user_page` refuses VAs outside the user
+window (root slot 128, `0x20_0000_0000`, 1 GiB) and non-user or
+GLOBAL flags. `create` copies every kernel root entry except the
+window and refuses to build a space if the kernel root uses the
+window. The kernel root is frozen after `kvm::init` — nothing adds a
+root-level entry later — so the copies never go stale (seL4 relies on
+the same property for its kernel window). The kernel writes a
+process's pages only through their identity-mapped PA, which is U=0;
+`sstatus.SUM` stays 0.
+
+**Tests.** Host: `wari-mem` `uspace` tests (window bounds, refusals,
+which slots are the kernel's). QEMU and silicon: the boot self-test
+in `kernel/src/umode.rs`, read by
+`tests/security/tests/umode_cross_space.rs` — process B reads its own
+page (control), process A reads the same VA and is killed by a load
+page fault, B's page is unchanged, and destroying both spaces returns
+every page.
+
+**Not covered.** All spaces share ASID 0 and every switch flushes the
+whole TLB; correctness does not depend on ASIDs, but performance will
+(measured in step 2's second PR). Only the boot self-test creates
+spaces until step 3.
+
 ### INV-24 · Wire-Format Literals Are Derived, Never Transcribed *(Phase 1c)*
 
 > Any byte sequence a driver places on a physical medium is
@@ -706,9 +748,9 @@ contract: caller must guarantee one-time invocation pre-runtime use.
 | `kernel/src/trap.S` (`_trap_entry` U-mode path, `__umode_enter`) | `sscratch` swap, `sret` to U-mode, leave path restoring the kernel context | INV-2, INV-7 | U→S entry on the kernel stack; GPRs zeroed before entering U-mode (ADR-004 step 1) |
 | `kernel/src/trap.rs` (`install`)        | `csrw sscratch, zero`                                              | INV-2, INV-7 | Marks "kernel running" before the first trap |
 | `kernel/src/trap.rs` (`handle_user_trap`) | `&mut TrapFrame` parameter                                       | INV-2        | Trap-frame exclusivity during U-mode trap service |
-| `kernel/src/mem/kvm.rs` (`map_user_stub`) | `copy_nonoverlapping` into a fresh page; `fence.i` + `sfence.vma` | INV-5, INV-7 | Stub code copied while the page is still U=0; fetch and TLB ordered after the remap (R6). Feature `umode` |
-| `kernel/src/mem/kvm.rs` (`unmap_user_stub`, `free_page`) | `sfence.vma`; `page_alloc::get`                     | INV-1, INV-7, INV-8 | No stale U=1 entry once the pages return to the allocator. Feature `umode` |
-| `kernel/src/umode.rs` (`self_test`, `run_stub`) | linker-symbol reads; `__umode_enter` call                  | INV-2, INV-4, INV-7 | Boot self-test; the only U=1 pages in the table exist while it runs. Feature `umode` |
+| `kernel/src/mem/uspace.rs` (`switch_to`, `current_root`) | `csrw satp` + `sfence.vma zero, zero`; `csrr satp`        | INV-7, INV-28 | Every root switched to maps the kernel as the kernel root does; full flush because all spaces share ASID 0 (R6). Feature `umode` |
+| `kernel/src/mem/kvm.rs` (`free_page`, `alloc_zeroed_page`, called by `uspace`) | `page_alloc::get`                 | INV-1, INV-8 | Allocator installed by `init` before any address space exists. Feature `umode` |
+| `kernel/src/umode.rs` (`self_test`, `new_process`, `cross_space_verdict`, `run`) | linker-symbol reads; copy and volatile read/write of fresh pages through their identity alias; `fence.i`; `__umode_enter` | INV-2, INV-4, INV-5, INV-7, INV-28 | Boot self-test; each stub runs in its own address space, destroyed afterwards. Feature `umode` |
 | `kernel/src/mem/kvm.rs` (`init`, runtime-heap symbols) | `sym_addr(&_runtime_heap_start/_end)`             | INV-4        | Linker-symbol addresses for the bump arena |
 | `kernel/src/mem/kvm.rs` (`init`, end)   | `runtime::heap::init(runtime_heap_start, runtime_heap_end)`        | INV-1, INV-12 | One-time boot install of the bump arena |
 | `kernel/src/runtime/heap.rs` (`init`)   | `static mut HEAP_CURSOR/HEAP_END` write                            | INV-1, INV-12 | Single-hart boot-only init of the arena |
