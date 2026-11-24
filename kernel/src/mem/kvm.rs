@@ -6,15 +6,17 @@
 //! 69d9908b6956315684c567fb95cec542062a61a5 under the "only copy what
 //! makes sense" discipline.
 //!
-//! This is the ONLY module that writes to page table memory or the
-//! `satp` CSR. Everything above it uses typed helpers; everything below
-//! it is pure data.
+//! This module and `uspace` are the only ones that write page-table
+//! memory or the `satp` CSR. Everything above them uses typed helpers;
+//! everything below them is pure data.
 //!
-//! Phase 0 scope:
-//!   - One identity-mapped kernel address space, built once at boot
-//!   - No process / per-process page tables (those land in Phase 1)
-//!   - No PLIC / VirtIO mappings (no IRQs in Phase 0)
-//!   - No user-buffer copy helpers (no userspace in Phase 0)
+//! Scope:
+//!   - One identity-mapped kernel address space, built once at boot.
+//!     Its root is frozen afterwards: per-process spaces (`uspace`,
+//!     ADR-004 step 2) copy its root entries and rely on none being
+//!     added later.
+//!   - No user-buffer copy helpers: the kernel reaches a process's
+//!     pages through their identity-mapped PA (`sstatus.SUM` stays 0).
 
 use crate::error::KernelError;
 use crate::kprintln;

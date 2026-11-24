@@ -21,11 +21,14 @@ use wari_mem::page_alloc::PAGE_SIZE;
 use wari_mem::page_table::{make_satp, va_parts, Pte, PteFlags, PT_ENTRIES};
 use wari_mem::uspace::{check_user_page, is_kernel_slot, USER_WINDOW_SLOT};
 
+/// Mask of the PPN field of an Sv39 `satp` (bits 0..44).
+const SATP_PPN_MASK: usize = (1 << 44) - 1;
+
 /// One process's address space. Owns its root table, the user-window
-/// tables below it and every page mapped there; [`destroy`] gives all
-/// of them back. Not `Clone`: two owners would free twice.
-///
-/// [`destroy`]: AddressSpace::destroy
+/// tables below it and every page mapped there; dropping it gives all
+/// of them back (RAII, like a `Box`), so no error path can leak one.
+/// Not `Clone`: two owners would free twice.
+#[must_use]
 pub struct AddressSpace {
     root: usize,
 }
@@ -45,11 +48,10 @@ impl AddressSpace {
             return Err(KernelError::InvalidArgument);
         }
         let root = kvm::alloc_zeroed_page()?;
+        // `root` is zeroed, so copying the kernel's empty entries too is
+        // harmless and keeps this a plain copy.
         for index in (0..PT_ENTRIES).filter(|&i| is_kernel_slot(i)) {
-            let pte = kvm::read_pte(kernel_root, index);
-            if pte.is_valid() {
-                kvm::write_pte(root, index, pte);
-            }
+            kvm::write_pte(root, index, kvm::read_pte(kernel_root, index));
         }
         Ok(Self { root })
     }
@@ -61,8 +63,8 @@ impl AddressSpace {
     /// `wari_mem::uspace::check_user_page` or `va` is already mapped
     /// (no remapping: a page is owned by one mapping, INV-28);
     /// `OutOfPages` if the allocator is empty. Intermediate tables
-    /// allocated before a failure stay in the space and go with
-    /// [`destroy`](Self::destroy).
+    /// allocated before a failure stay in the space and go when it is
+    /// dropped.
     pub fn map_zeroed(&mut self, va: usize, flags: PteFlags) -> Result<usize, KernelError> {
         check_user_page(va, flags).map_err(|_| KernelError::InvalidArgument)?;
         let (vpn2, vpn1, vpn0, _) = va_parts(va);
@@ -83,15 +85,24 @@ impl AddressSpace {
     pub fn activate(&self) {
         switch_to(self.root);
     }
+}
 
+impl Drop for AddressSpace {
     /// Free every page and table below the user window, then the root.
     /// If this space is active, the hart is moved to the kernel root
     /// first.
     ///
-    /// Postcondition: no translation into this space survives in the
-    /// TLB and the allocator has every page back. A page the allocator
-    /// refuses is logged by `kvm::free_page` (R5: no panic).
-    pub fn destroy(self) {
+    /// Postcondition: the allocator has every page back. A page the
+    /// allocator refuses is logged by `kvm::free_page` (R5: no panic).
+    ///
+    /// TLB: no translation into this space survives, but only because
+    /// every space shares ASID 0 and every `switch_to` flushes the
+    /// whole TLB — leaving the space (now or earlier) already dropped
+    /// its entries, and the walker cannot reach a root not in `satp`.
+    /// Once spaces get their own ASIDs (step 2's second PR) a switch
+    /// no longer flushes everything, and this must issue
+    /// `sfence.vma zero, <asid>` before freeing any page.
+    fn drop(&mut self) {
         if current_root() == self.root {
             activate_kernel();
         }
@@ -131,8 +142,7 @@ fn current_root() -> usize {
     let satp: usize;
     // SAFETY: INV-7. `csrr satp` is a side-effect-free S-mode CSR read.
     unsafe { core::arch::asm!("csrr {0}, satp", out(reg) satp) };
-    // Sv39 satp: PPN in bits 0..44.
-    (satp & ((1 << 44) - 1)) * PAGE_SIZE
+    (satp & SATP_PPN_MASK) * PAGE_SIZE
 }
 
 fn switch_to(root: usize) {
@@ -146,7 +156,10 @@ fn switch_to(root: usize) {
     // flushes every translation of every ASID, so nothing translated
     // through the previous root (all spaces share ASID 0) is used
     // after the switch, and orders the PTE stores made before the call
-    // ahead of the first walk through the new root.
+    // ahead of the first walk through the new root. No fence is needed
+    // before the write: the only access between the two instructions
+    // is the fetch of the `sfence` itself, in kernel text, which is
+    // GLOBAL and identical in every root — nothing in the user window.
     unsafe {
         core::arch::asm!(
             "csrw satp, {0}",

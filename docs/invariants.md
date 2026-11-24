@@ -623,7 +623,8 @@ creates U=1 leaves. `map_zeroed` allocates a fresh page for every
 mapping and refuses to remap a VA (`InvalidArgument`); the pure check
 `wari_mem::uspace::check_user_page` refuses VAs outside the user
 window (root slot 128, `0x20_0000_0000`, 1 GiB) and non-user or
-GLOBAL flags. `create` copies every kernel root entry except the
+GLOBAL flags. `check_user_page` also refuses W without R (reserved) and W+X (a
+process cannot write code it then runs). `create` copies every kernel root entry except the
 window and refuses to build a space if the kernel root uses the
 window. The kernel root is frozen after `kvm::init` — nothing adds a
 root-level entry later — so the copies never go stale (seL4 relies on
@@ -637,12 +638,13 @@ in `kernel/src/umode.rs`, read by
 `tests/security/tests/umode_cross_space.rs` — process B reads its own
 page (control), process A reads the same VA and is killed by a load
 page fault, B's page is unchanged, and destroying both spaces returns
-every page.
+every page; a remap, an out-of-window VA and kernel flags are refused.
 
 **Not covered.** All spaces share ASID 0 and every switch flushes the
-whole TLB; correctness does not depend on ASIDs, but performance will
-(measured in step 2's second PR). Only the boot self-test creates
-spaces until step 3.
+whole TLB, which is also what makes dropping an inactive space safe:
+none of its translations can still be cached. When spaces get their
+own ASIDs (step 2's second PR) the drop must flush that ASID before
+freeing pages. Only the boot self-test creates spaces until step 3.
 
 ### INV-24 · Wire-Format Literals Are Derived, Never Transcribed *(Phase 1c)*
 
@@ -749,8 +751,8 @@ contract: caller must guarantee one-time invocation pre-runtime use.
 | `kernel/src/trap.rs` (`install`)        | `csrw sscratch, zero`                                              | INV-2, INV-7 | Marks "kernel running" before the first trap |
 | `kernel/src/trap.rs` (`handle_user_trap`) | `&mut TrapFrame` parameter                                       | INV-2        | Trap-frame exclusivity during U-mode trap service |
 | `kernel/src/mem/uspace.rs` (`switch_to`, `current_root`) | `csrw satp` + `sfence.vma zero, zero`; `csrr satp`        | INV-7, INV-28 | Every root switched to maps the kernel as the kernel root does; full flush because all spaces share ASID 0 (R6). Feature `umode` |
-| `kernel/src/mem/kvm.rs` (`free_page`, `alloc_zeroed_page`, called by `uspace`) | `page_alloc::get`                 | INV-1, INV-8 | Allocator installed by `init` before any address space exists. Feature `umode` |
-| `kernel/src/umode.rs` (`self_test`, `new_process`, `cross_space_verdict`, `run`) | linker-symbol reads; copy and volatile read/write of fresh pages through their identity alias; `fence.i`; `__umode_enter` | INV-2, INV-4, INV-5, INV-7, INV-28 | Boot self-test; each stub runs in its own address space, destroyed afterwards. Feature `umode` |
+| `kernel/src/mem/kvm.rs` (`free_page`, called by `uspace`) | `page_alloc::get`                                | INV-1, INV-8 | Allocator installed by `init` before any address space exists. Feature `umode` |
+| `kernel/src/umode.rs` (`self_test`, `new_process`, `cross_space_read`, `run`) | linker-symbol reads; copy and volatile read/write of fresh pages through their identity alias; `fence.i`; `__umode_enter` | INV-2, INV-4, INV-5, INV-7, INV-28 | Boot self-test; each stub runs in its own address space, destroyed afterwards. Feature `umode` |
 | `kernel/src/mem/kvm.rs` (`init`, runtime-heap symbols) | `sym_addr(&_runtime_heap_start/_end)`             | INV-4        | Linker-symbol addresses for the bump arena |
 | `kernel/src/mem/kvm.rs` (`init`, end)   | `runtime::heap::init(runtime_heap_start, runtime_heap_end)`        | INV-1, INV-12 | One-time boot install of the bump arena |
 | `kernel/src/runtime/heap.rs` (`init`)   | `static mut HEAP_CURSOR/HEAP_END` write                            | INV-1, INV-12 | Single-hart boot-only init of the arena |

@@ -53,8 +53,10 @@ pub enum UspaceError {
     /// The VA is outside the user window.
     OutsideWindow,
     /// The flags are not a valid user leaf: VALID, USER and at least
-    /// one of R/X, and never GLOBAL (a global leaf would survive an
-    /// ASID switch into another process).
+    /// one of R/W/X; never GLOBAL (a global leaf would survive an ASID
+    /// switch into another process); never W without R (reserved in
+    /// Sv39); never W together with X (W^X: a process cannot write code
+    /// it then runs, stricter than Linux, which allows RWX mappings).
     BadFlags,
 }
 
@@ -62,7 +64,7 @@ pub enum UspaceError {
 ///
 /// Postcondition on `Ok`: `va` is page aligned, inside
 /// `[USER_WINDOW_BASE, USER_WINDOW_END)`, and `flags` describe a
-/// non-global user leaf.
+/// non-global, non-W+X user leaf.
 ///
 /// ```
 /// use wari_mem::uspace::{check_user_page, UspaceError, USER_WINDOW_BASE};
@@ -77,10 +79,15 @@ pub fn check_user_page(va: usize, flags: PteFlags) -> Result<(), UspaceError> {
     if !(USER_WINDOW_BASE..USER_WINDOW_END).contains(&va) {
         return Err(UspaceError::OutsideWindow);
     }
-    let leaf = flags.contains(PteFlags::VALID)
+    let user_leaf = flags.contains(PteFlags::VALID)
         && flags.contains(PteFlags::USER)
         && flags.is_leaf()
         && !flags.contains(PteFlags::GLOBAL);
+    // A writable page must be readable (W without R is reserved) and
+    // must not be executable (W^X).
+    let write_ok = !flags.contains(PteFlags::WRITE)
+        || (flags.contains(PteFlags::READ) && !flags.contains(PteFlags::EXECUTE));
+    let leaf = user_leaf && write_ok;
     if !leaf {
         return Err(UspaceError::BadFlags);
     }
@@ -95,8 +102,7 @@ pub fn is_kernel_slot(index: usize) -> bool {
     index < PT_ENTRIES && index != USER_WINDOW_SLOT
 }
 
-/// The root slot `va` falls in, as `va_parts` computes it. Exposed so
-/// the kernel glue and the tests agree on one definition.
+/// The root slot `va` falls in, as `va_parts` computes it.
 pub fn root_slot(va: usize) -> usize {
     va_parts(va).0
 }
@@ -165,6 +171,21 @@ mod tests {
         let branch = PteFlags::VALID.union(PteFlags::USER);
         assert_eq!(
             check_user_page(USER_WINDOW_BASE, branch),
+            Err(UspaceError::BadFlags)
+        );
+    }
+
+    #[test]
+    fn write_without_read_and_write_plus_execute_are_refused() {
+        let user = PteFlags::VALID.union(PteFlags::USER);
+        let write_only = user.union(PteFlags::WRITE);
+        assert_eq!(
+            check_user_page(USER_WINDOW_BASE, write_only),
+            Err(UspaceError::BadFlags)
+        );
+        let rwx = USER_RW.union(PteFlags::EXECUTE);
+        assert_eq!(
+            check_user_page(USER_WINDOW_BASE, rwx),
             Err(UspaceError::BadFlags)
         );
     }

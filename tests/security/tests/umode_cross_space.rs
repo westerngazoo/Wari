@@ -6,7 +6,9 @@
 //! known value there. As a control, B's stub reads that VA and exits
 //! normally; then A's stub reads the same VA, which A does not map,
 //! and must die of a load page fault while B's page keeps its value.
-//! Destroying both spaces must return every page to the allocator.
+//! Mappings INV-28 forbids (a remap, a VA outside the user window,
+//! kernel flags) must be refused, and destroying every space must
+//! return every page to the allocator.
 //!
 //! This file asserts those outcomes from the console of a normal QEMU
 //! boot, and that the boot carried on to the end.
@@ -18,10 +20,19 @@ const BOOT_FINISHED: &str = "[sched] all tenants exited";
 
 #[test]
 fn process_reading_another_spaces_page_is_killed() {
+    // One boot serves every assertion: the self-test runs once per boot.
     let text = boot_kernel_capture(DEFAULT_WALLCLOCK);
     assert!(
         text.contains(markers::UMODE_CROSS_SPACE_KILLED),
         "cross-space read was not stopped by a load page fault:\n{text}"
+    );
+    assert!(
+        text.contains(markers::UMODE_SPACE_REFUSALS),
+        "a forbidden mapping was accepted:\n{text}"
+    );
+    assert!(
+        text.contains(markers::UMODE_SPACES_FREED),
+        "address-space teardown leaked pages:\n{text}"
     );
     assert!(
         !text.contains(markers::UMODE_FAILED),
@@ -37,13 +48,4 @@ fn process_reading_another_spaces_page_is_killed() {
     for needle in ["panicked at", "[trap] exception"] {
         assert!(!text.contains(needle), "kernel failure `{needle}`:\n{text}");
     }
-}
-
-#[test]
-fn destroying_address_spaces_returns_every_page() {
-    let text = boot_kernel_capture(DEFAULT_WALLCLOCK);
-    assert!(
-        text.contains(markers::UMODE_SPACES_FREED),
-        "address-space teardown leaked pages:\n{text}"
-    );
 }

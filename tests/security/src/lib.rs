@@ -249,6 +249,11 @@ pub mod markers {
     /// kept its contents (ADR-004 step 2, INV-28).
     pub const UMODE_CROSS_SPACE_KILLED: &str = "[umode] cross-space read killed: load page fault";
 
+    /// `kernel/src/umode.rs`: `map_zeroed` refused a remap, a VA
+    /// outside the user window and kernel flags (INV-28).
+    pub const UMODE_SPACE_REFUSALS: &str =
+        "[umode] address-space refusals: remap, out-of-window and kernel-flag mappings rejected";
+
     /// `kernel/src/umode.rs`: after destroying every test address
     /// space the page allocator has exactly as many free pages as
     /// before the self-test.
