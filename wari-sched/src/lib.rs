@@ -17,6 +17,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod bench;
 pub mod fuel;
 pub mod net_wait;
 pub mod policy;
