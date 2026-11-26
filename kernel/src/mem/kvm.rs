@@ -6,15 +6,17 @@
 //! 69d9908b6956315684c567fb95cec542062a61a5 under the "only copy what
 //! makes sense" discipline.
 //!
-//! This is the ONLY module that writes to page table memory or the
-//! `satp` CSR. Everything above it uses typed helpers; everything below
-//! it is pure data.
+//! This module and `uspace` are the only ones that write page-table
+//! memory or the `satp` CSR. Everything above them uses typed helpers;
+//! everything below them is pure data.
 //!
-//! Phase 0 scope:
-//!   - One identity-mapped kernel address space, built once at boot
-//!   - No process / per-process page tables (those land in Phase 1)
-//!   - No PLIC / VirtIO mappings (no IRQs in Phase 0)
-//!   - No user-buffer copy helpers (no userspace in Phase 0)
+//! Scope:
+//!   - One identity-mapped kernel address space, built once at boot.
+//!     Its root is frozen afterwards: per-process spaces (`uspace`,
+//!     ADR-004 step 2) copy its root entries and rely on none being
+//!     added later.
+//!   - No user-buffer copy helpers: the kernel reaches a process's
+//!     pages through their identity-mapped PA (`sstatus.SUM` stays 0).
 
 use crate::error::KernelError;
 use crate::kprintln;
@@ -23,8 +25,6 @@ use wari_mem::page_alloc::{self, AllocError, BitmapAllocator, PAGE_SIZE};
 use wari_mem::page_table::{
     make_satp, va_parts, Pte, PteFlags, KERNEL_RO, KERNEL_RW, KERNEL_RX, PT_ENTRIES,
 };
-#[cfg(feature = "umode")]
-use wari_mem::page_table::{USER_RW, USER_RX};
 
 /// Physical address of the kernel root page table, published by
 /// [`init`] once the MMU is on. 0 before that.
@@ -228,109 +228,22 @@ pub fn init() -> Result<(), KernelError> {
     Ok(())
 }
 
-// ── U-mode stub pages (ADR-004 step 1, feature `umode`) ─────────
+// ── Helpers shared with `uspace` (ADR-004 step 2, feature `umode`) ──
 
-/// The two U=1 pages a U-mode stub runs in: code (RX) and stack (RW).
-/// Identity-mapped, so each address is both the VA and the PA.
+/// PA of the kernel root table, or `None` before [`init`].
 #[cfg(feature = "umode")]
-pub struct UserStubPages {
-    /// First byte of the copied code; the stub's entry point.
-    pub code: usize,
-    /// Lowest address of the stack page; the stack grows down from
-    /// `stack + PAGE_SIZE`.
-    pub stack: usize,
-}
-
-/// Copy `code` into a fresh page and map it, plus a fresh stack page,
-/// with U=1 in the kernel table.
-///
-/// Step 1 has no per-process address spaces yet (step 2): these are
-/// the only U=1 pages in the table, and they exist only while a stub
-/// runs. Everything else stays U=0, and `sstatus.SUM` stays 0, so the
-/// stub can reach nothing of the kernel and the kernel touches nothing
-/// of the stub's after the copy.
-///
-/// Preconditions: [`init`] has run; `code.len() <= PAGE_SIZE`.
-/// Errors: `InvalidArgument` if the code does not fit in one page or
-/// the MMU is not up; `OutOfPages` if the allocator is empty.
-/// Postconditions: on `Ok`, undo with [`unmap_user_stub`].
-#[cfg(feature = "umode")]
-pub fn map_user_stub(code: &[u8]) -> Result<UserStubPages, KernelError> {
-    let root = KERNEL_ROOT.load(Ordering::Relaxed);
-    if root == 0 || code.len() > PAGE_SIZE {
-        return Err(KernelError::InvalidArgument);
+pub(super) fn kernel_root() -> Option<usize> {
+    match KERNEL_ROOT.load(Ordering::Relaxed) {
+        0 => None,
+        root => Some(root),
     }
-    let code_page = alloc_zeroed_page()?;
-    let stack_page = match alloc_zeroed_page() {
-        Ok(p) => p,
-        Err(e) => {
-            free_page(code_page);
-            return Err(e);
-        }
-    };
-    // SAFETY: INV-5. `code_page` is a fresh allocator page in the
-    // identity-mapped, kernel-writable heap (still KERNEL_RW here, U=0);
-    // `code.len() <= PAGE_SIZE`, and a fresh page cannot overlap `code`.
-    unsafe {
-        core::ptr::copy_nonoverlapping(code.as_ptr(), code_page as *mut u8, code.len());
-    }
-    // The heap is already mapped at 4 KiB (see `init`), so these walks
-    // only rewrite leaves; should one fail anyway, give both pages back
-    // as ordinary kernel heap rather than leave a U=1 page behind.
-    if let Err(e) = map_page(root, code_page, code_page, USER_RX)
-        .and_then(|()| map_page(root, stack_page, stack_page, USER_RW))
-    {
-        let _ = unmap_user_stub(UserStubPages {
-            code: code_page,
-            stack: stack_page,
-        });
-        return Err(e);
-    }
-    // SAFETY: INV-7. `fence.i` and `sfence.vma` are permitted in S-mode.
-    // Memory ordering (R6): `fence.i` makes the instruction bytes just
-    // stored visible to this hart's instruction fetch; `sfence.vma`
-    // orders the PTE writes before any later translation, so the stub's
-    // first fetch sees U=1 and the kernel's next access sees U=1 too.
-    unsafe {
-        core::arch::asm!("fence.i", "sfence.vma zero, zero");
-    }
-    Ok(UserStubPages {
-        code: code_page,
-        stack: stack_page,
-    })
-}
-
-/// Give the stub pages back: remap them U=0 as ordinary heap, flush the
-/// TLB, and free them.
-///
-/// Preconditions: `pages` came from [`map_user_stub`] and no U-mode
-/// code is running (it ran on this hart and has ended).
-/// Errors: `InvalidArgument` if the MMU is not up or a table walk
-/// finds a malformed table.
-#[cfg(feature = "umode")]
-pub fn unmap_user_stub(pages: UserStubPages) -> Result<(), KernelError> {
-    let root = KERNEL_ROOT.load(Ordering::Relaxed);
-    if root == 0 {
-        return Err(KernelError::InvalidArgument);
-    }
-    map_page(root, pages.code, pages.code, KERNEL_RW)?;
-    map_page(root, pages.stack, pages.stack, KERNEL_RW)?;
-    // SAFETY: INV-7. Memory ordering (R6): the PTE writes above are
-    // ordered before every later translation, so no stale U=1 entry
-    // survives in the TLB once the pages return to the allocator.
-    unsafe {
-        core::arch::asm!("sfence.vma zero, zero");
-    }
-    free_page(pages.code);
-    free_page(pages.stack);
-    Ok(())
 }
 
 /// Return one page to the global allocator. A failure means the page
-/// was not allocated, which `map_user_stub`'s callers cannot cause; it
-/// is logged rather than escalated (R5).
+/// was not allocated, which `uspace`'s callers cannot cause; it is
+/// logged rather than escalated (R5).
 #[cfg(feature = "umode")]
-fn free_page(page: usize) {
+pub(super) fn free_page(page: usize) {
     // SAFETY: INV-1, INV-8. Single-hart; the allocator was installed by
     // `init()` before any caller reaches here.
     let alloc = unsafe { page_alloc::get() };
@@ -365,7 +278,7 @@ fn map_page(root: usize, va: usize, pa: usize, flags: PteFlags) -> Result<(), Ke
 
 /// Read PTE at `(table, index)`. If valid+branch, return its child PA.
 /// Otherwise allocate a new zeroed table and install a branch PTE.
-fn walk_or_create(table: usize, index: usize) -> Result<usize, KernelError> {
+pub(super) fn walk_or_create(table: usize, index: usize) -> Result<usize, KernelError> {
     let existing = read_pte(table, index);
     if existing.is_valid() {
         if !existing.is_branch() {
@@ -385,7 +298,7 @@ fn walk_or_create(table: usize, index: usize) -> Result<usize, KernelError> {
 /// Index is always in-range here (callers pass `va_parts` outputs which
 /// are masked to 9 bits = 0..512), so we treat an out-of-range value as
 /// an internal logic error.
-fn read_pte(table: usize, index: usize) -> Pte {
+pub(super) fn read_pte(table: usize, index: usize) -> Pte {
     debug_assert!(index < PT_ENTRIES);
     let addr = table + index * 8;
     // SAFETY: INV-5. `table` was returned by the allocator (or is the
@@ -396,7 +309,7 @@ fn read_pte(table: usize, index: usize) -> Pte {
 }
 
 /// Write a PTE into a page table page.
-fn write_pte(table: usize, index: usize, pte: Pte) {
+pub(super) fn write_pte(table: usize, index: usize, pte: Pte) {
     debug_assert!(index < PT_ENTRIES);
     let addr = table + index * 8;
     // SAFETY: INV-5. Same argument as `read_pte`: `addr` is inside an
@@ -407,7 +320,7 @@ fn write_pte(table: usize, index: usize, pte: Pte) {
 }
 
 /// Allocate one zeroed page from the global allocator.
-fn alloc_zeroed_page() -> Result<usize, KernelError> {
+pub(super) fn alloc_zeroed_page() -> Result<usize, KernelError> {
     // SAFETY: INV-1, INV-8. Single-hart, `init()` runs `page_alloc::install`
     // before any caller hits `alloc_zeroed_page`.
     let alloc = unsafe { page_alloc::get() };

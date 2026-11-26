@@ -24,3 +24,4 @@
 
 pub mod page_alloc;
 pub mod page_table;
+pub mod uspace;
