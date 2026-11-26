@@ -13,9 +13,11 @@
 //! `boot_kernel_capture` function keeps every per-test file under 80
 //! lines and focused on its assertion.
 
-use std::io::Read;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -71,7 +73,7 @@ fn default_kernel() -> PathBuf {
 /// QEMU device arguments that give the guest a VirtIO-net NIC on the
 /// same subnet `make run` uses (`Makefile` `QEMU_ARGS`), minus the
 /// host port forward so parallel test binaries never contend for a
-/// host port. Without a NIC the Tier-2 net driver's VirtIO init fails
+/// host port ([`boot_kernel_http_get`] adds one, on a free port). Without a NIC the Tier-2 net driver's VirtIO init fails
 /// at the magic-value read and nothing past it runs.
 const NET_DEVICE_ARGS: &[&str] = &[
     "-global",
@@ -191,6 +193,132 @@ pub fn pcap_frames(cap: &[u8]) -> Vec<&[u8]> {
     frames
 }
 
+/// Guest TCP port the Tier-1 HTTP demo listens on (`apps/hello`).
+const GUEST_HTTP_PORT: u16 = 7000;
+
+use markers::{ACCEPT_WINDOW_OPEN, HTTP_SERVED};
+
+/// Boot the kernel with a VirtIO-net NIC whose guest port 7000 is
+/// forwarded to a free host port, wait for the HTTP demo's accept
+/// window, send one `GET /` over real TCP, and return the UART text
+/// and whatever bytes the guest answered.
+///
+/// This is the only test path that drives a full TCP exchange through
+/// the VirtIO RX *and* TX queues: the three-way handshake, a request,
+/// a response and the close.
+///
+/// # Contract
+///
+/// - Precondition: as [`boot_kernel_capture`].
+/// - Returns `(uart, response)`. `response` is empty if the window
+///   never opened within `wallclock`, the connect failed, or the guest
+///   sent nothing; the caller asserts on it. After a reply the UART is
+///   captured until the tenant reports serving it (or `wallclock`).
+/// - The free port is taken by binding port 0 and releasing it just
+///   before QEMU binds it, so another process could in principle take
+///   it in between; a test that then fails to connect says so.
+/// - The QEMU child is always killed before returning.
+///
+/// # Panics
+///
+/// If the kernel ELF is missing or QEMU cannot be spawned.
+pub fn boot_kernel_http_get(wallclock: Duration) -> (String, String) {
+    let kernel = default_kernel();
+    assert!(
+        kernel.exists(),
+        "kernel ELF not found at {:?}. Run `make build` first.",
+        kernel,
+    );
+    let host_port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .and_then(|l| l.local_addr())
+        .expect("no free host port")
+        .port();
+    let netdev = format!(
+        "user,id=net0,net=192.168.50.0/24,host=192.168.50.2,\
+         hostfwd=tcp:127.0.0.1:{host_port}-192.168.50.10:{GUEST_HTTP_PORT}"
+    );
+
+    let mut child = Command::new("qemu-system-riscv64")
+        .args(["-machine", "virt", "-nographic", "-bios", "default"])
+        .args(["-global", "virtio-mmio.force-legacy=false"])
+        .args([
+            "-netdev",
+            &netdev,
+            "-device",
+            "virtio-net-device,netdev=net0",
+        ])
+        .arg("-kernel")
+        .arg(&kernel)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn qemu-system-riscv64 — is QEMU installed?");
+
+    let uart = Arc::new(Mutex::new(Vec::<u8>::with_capacity(8192)));
+    let mut stdout = child.stdout.take().expect("qemu stdout");
+    let sink = Arc::clone(&uart);
+    let reader = thread::spawn(move || {
+        let mut chunk = [0u8; 256];
+        while let Ok(n) = stdout.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            sink.lock()
+                .expect("uart lock")
+                .extend_from_slice(&chunk[..n]);
+        }
+    });
+
+    let start = Instant::now();
+    // Stops early if QEMU exits (e.g. another process took the port
+    // before QEMU bound the forward), so that failure is reported at
+    // once and with QEMU's own message rather than as a timeout.
+    let mut wait_for = |marker: &str| loop {
+        let text = String::from_utf8_lossy(&uart.lock().expect("uart lock")).into_owned();
+        if text.contains(marker) {
+            break true;
+        }
+        if start.elapsed() >= wallclock || matches!(child.try_wait(), Ok(Some(_))) {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let opened = wait_for(ACCEPT_WINDOW_OPEN);
+
+    let mut response = Vec::new();
+    if opened {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, host_port));
+        let remaining = wallclock
+            .saturating_sub(start.elapsed())
+            .max(Duration::from_secs(1));
+        if let Ok(mut s) = TcpStream::connect_timeout(&addr, remaining) {
+            let _ = s.set_read_timeout(Some(remaining));
+            let _ = s.write_all(b"GET / HTTP/1.0\r\nHost: wari\r\n\r\n");
+            let _ = s.read_to_end(&mut response);
+        }
+    }
+    if !response.is_empty() {
+        let _ = wait_for(HTTP_SERVED);
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = reader.join();
+    let mut text = String::from_utf8_lossy(&uart.lock().expect("uart lock")).into_owned();
+    if !opened {
+        if let Some(mut err) = child.stderr.take() {
+            let mut msg = String::new();
+            let _ = err.read_to_string(&mut msg);
+            if !msg.is_empty() {
+                text.push_str("\n[qemu stderr] ");
+                text.push_str(&msg);
+            }
+        }
+    }
+    (text, String::from_utf8_lossy(&response).into_owned())
+}
+
 fn boot_capture(kernel: &Path, wallclock: Duration, extra_args: &[&str]) -> String {
     assert!(
         kernel.exists(),
@@ -249,6 +377,14 @@ pub mod markers {
 
     /// Any self-test outcome other than the expected one.
     pub const UMODE_FAILED: &str = "FAILED, got";
+
+    /// Printed when the HTTP demo's first accept window opens: from
+    /// here a client connection reaches a listening socket.
+    pub const ACCEPT_WINDOW_OPEN: &str = "[accept] window open h=0";
+
+    /// Printed by the HTTP demo tenant after its reply went out. A
+    /// client can read the reply before the tenant gets to print it.
+    pub const HTTP_SERVED: &str = "http: served 200 OK";
 
     /// Printed by the kernel after `runtime::run_tier2_uart` succeeds.
     /// If absent, signature verification or driver instantiation
