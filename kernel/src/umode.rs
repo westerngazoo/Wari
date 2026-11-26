@@ -194,16 +194,34 @@ fn cross_space_read() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A fresh space holding a copy of the stub at `CODE_VA` and an empty
-/// stack page at `STACK_VA`.
+/// A fresh space running the self-test stub.
 fn new_process() -> Result<AddressSpace, KernelError> {
     // SAFETY: INV-4. Linker-visible symbols bounding the stub's bytes in
     // `.rodata`, which is mapped and immutable.
-    let code = unsafe {
-        let start = &umode_stub_start as *const u8;
-        let len = (&umode_stub_end as *const u8 as usize) - start as usize;
-        core::slice::from_raw_parts(start, len)
-    };
+    let code = unsafe { linker_bytes(&umode_stub_start, &umode_stub_end) };
+    load_process(code)
+}
+
+/// The bytes between two linker symbols, `start` first.
+///
+/// # Safety
+///
+/// INV-4: `start` and `end` must bound one mapped, immutable region
+/// with `start <= end` (a code stub in `.rodata`).
+pub(crate) unsafe fn linker_bytes(start: &'static u8, end: &'static u8) -> &'static [u8] {
+    let start = start as *const u8;
+    let len = (end as *const u8 as usize) - start as usize;
+    // SAFETY: the caller's contract (INV-4).
+    unsafe { core::slice::from_raw_parts(start, len) }
+}
+
+/// A fresh space holding a copy of `code` at `CODE_VA` and an empty
+/// stack page at `STACK_VA`. Shared with the step-2 measurement
+/// (`umode_bench`).
+///
+/// Errors: `InvalidArgument` if `code` does not fit in one page;
+/// whatever `AddressSpace::create`/`map_zeroed` return.
+pub(crate) fn load_process(code: &[u8]) -> Result<AddressSpace, KernelError> {
     if code.len() > PAGE_SIZE {
         return Err(KernelError::InvalidArgument);
     }
@@ -222,7 +240,7 @@ fn new_process() -> Result<AddressSpace, KernelError> {
 /// Enter the stub in `space` with `a0 = arg` and report how it ended.
 /// `None` means the exit word was malformed. The hart is back on the
 /// kernel root when this returns.
-fn run(space: &AddressSpace, arg: usize) -> Option<UserExit> {
+pub(crate) fn run(space: &AddressSpace, arg: usize) -> Option<UserExit> {
     let entry = UserEntry {
         pc: CODE_VA,
         sp: STACK_VA + PAGE_SIZE,

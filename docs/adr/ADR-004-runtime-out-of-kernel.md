@@ -161,6 +161,24 @@ Measured on the VF2, before any work on step 3:
 before wasmi is moved. Network throughput with the driver in U-mode
 is measured at step 6 against today's figures.
 
+**Result (VF2, build 193, `scripts/build.sh bench`, 4 MHz timebase):**
+
+| Measurement | VF2 | QEMU `virt` (reference only) |
+|-|-|-|
+| `ASIDLEN` | **0** (`satp.ASID` reads back 0) | 16 |
+| `ecall` round trip, full trap frame | 142 ns (10 000 iterations) | ~3 µs |
+| Tenant switch, `csrw satp` + `sfence.vma zero, zero` | 35 ns (20 000 switches) | ~5.9 µs |
+| Sstc | **absent** (OpenSBI: `Boot HART ISA Extensions : none`) | present |
+| SBI `set_timer` | 307 ns (1 000 calls) | ~4 µs |
+
+The gate passes: 35 ns against a 20 µs budget. The switch figure is a
+lower bound — the loop's working set is a few pages, so it does not
+include refilling the TLB for a real tenant; step 4 measures that
+under load. Consequences: every address space uses ASID 0 and every
+switch flushes the whole TLB, which is what step 2 already does, now
+as the permanent design on this silicon rather than an interim one;
+preemption (decision 6) goes through the SBI timer call.
+
 ### Invariants this introduces
 
 Drafts; each is added to `docs/invariants.md` by the step that makes
@@ -258,9 +276,9 @@ boot-only) is revisited once the kernel no longer instantiates wasmi.
 | Singularity (MSR) | Software-isolated processes in one address space, trusted compiler | The same dilemma; our Phase 4 is its "with proof" version and must remain optional |
 
 Hardware facts relied on, with their status: Sv39 U bit — available
-and already encoded in `wari-mem`; ASID on the JH7110 — reported as
-zero bits, to be confirmed on the board at the gate; Sstc — unknown,
-probed at the gate, SBI timer as fallback; IOMMU in front of the GMAC
+and already encoded in `wari-mem`; ASID on the JH7110 — zero bits,
+confirmed on the board at the gate; Sstc — absent, confirmed at the
+gate, SBI timer it is; IOMMU in front of the GMAC
 — none found, assumed absent; cache coherence between the CPU and the
 GMAC DMA master — coherent on the JH7110, to be checked separately
 for the Orange Pi R2S.

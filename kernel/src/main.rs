@@ -75,6 +75,8 @@ mod sched;
 mod trap;
 #[cfg(feature = "umode")]
 mod umode;
+#[cfg(feature = "umode-bench")]
+mod umode_bench;
 mod validate;
 
 /// Build identifier string — supplied by the Makefile via the
@@ -228,6 +230,9 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_addr: usize) -> ! {
     // interrupt source is enabled.
     #[cfg(feature = "umode")]
     umode::self_test();
+    // ADR-004 step-2 measurement gate (diagnostic builds only).
+    #[cfg(feature = "umode-bench")]
+    umode_bench::run();
     mmio::plic::init();
     kprintln!("mmu OK, traps installed, plic up");
 

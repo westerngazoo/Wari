@@ -31,6 +31,8 @@
 #   debug     release + kernel debug-kernel logging    (vf2 gmac1 | kernel +debug-kernel)
 #   trace     release + net-diag register snapshots    (vf2 gmac1 net-diag)
 #   qemu      QEMU virt, VirtIO-net                    (qemu)
+#   bench     release + ADR-004 step-2 measurement gate (vf2 gmac1 | kernel +umode-bench)
+#   qemu-bench qemu + the same measurement gate         (qemu | kernel +umode-bench)
 #
 # OPTIONS
 #   --programs LIST  comma-separated Tier-1 apps to build+stage from
@@ -103,7 +105,9 @@ case "$PROFILE" in
     debug)   DRV_FEATURES="vf2 gmac1";          KRN_FEATURES="vf2,debug-kernel"; PLATFORM="vf2"  ;;
     trace)   DRV_FEATURES="vf2 gmac1 net-diag"; KRN_FEATURES="vf2";              PLATFORM="vf2"  ;;
     qemu)    DRV_FEATURES="qemu";               KRN_FEATURES="qemu,umode";       PLATFORM="qemu" ;;
-    *) echo "usage: scripts/build.sh <release|debug|trace|qemu> [--programs a,b] [--no-bump] [--publish] [--dev-keys]"; exit 2 ;;
+    bench)      DRV_FEATURES="vf2 gmac1";       KRN_FEATURES="vf2,umode-bench";  PLATFORM="vf2"  ;;
+    qemu-bench) DRV_FEATURES="qemu";            KRN_FEATURES="qemu,umode-bench"; PLATFORM="qemu" ;;
+    *) echo "usage: scripts/build.sh <release|debug|trace|qemu|bench|qemu-bench> [--programs a,b] [--no-bump] [--publish] [--dev-keys]"; exit 2 ;;
 esac
 
 # ── signing key ─────────────────────────────────────────────────

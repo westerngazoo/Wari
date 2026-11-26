@@ -73,6 +73,10 @@ dev-keys = []
 # On in the `qemu` and `release` build profiles; the U-mode trap path
 # in `trap.S` is always compiled and stays dormant without it.
 umode = []
+# ADR-004 step-2 measurement gate: prints `[bench]` lines at boot
+# (ASIDLEN, ecall round trip, tenant switch, sbi_set_timer). Diagnostic
+# only — `scripts/build.sh bench` / `qemu-bench`, never production.
+umode-bench = ["umode"]
 
 [profile.release]
 panic = "abort"
