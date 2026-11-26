@@ -9,7 +9,7 @@
 #
 #   Usage:  bash scripts/wari-build.sh [branch] [profile]
 #           branch  default: main
-#           profile default: release (or debug / trace)
+#           profile default: release (or debug / trace / bench)
 #
 #   Then on the VF2 (its Debian console — the "pull side"):
 #       wari go --build <branch>.<N> -y

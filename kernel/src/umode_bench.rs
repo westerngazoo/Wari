@@ -5,7 +5,10 @@
 //!
 //! 1. ASIDLEN — write ones to `satp.ASID` and read it back.
 //! 2. `ecall` round trip from U-mode with a full trap frame.
-//! 3. Tenant switch — `csrw satp` plus `sfence.vma`.
+//! 3. Tenant switch — `csrw satp` plus `sfence.vma`. A lower bound:
+//!    the loop's working set is tiny, so it does not include refilling
+//!    the TLB for a real tenant (wasmi's working set), which step 4
+//!    measures under load.
 //! 4. Timer: Sstc is reported by OpenSBI's own M-mode probe in its boot
 //!    banner (`Boot HART ISA Extensions`), so the kernel does not probe
 //!    it; it measures the fallback, the SBI `set_timer` call.
@@ -95,7 +98,10 @@ pub fn run() {
         }
     };
 
-    print_avg("sbi_set_timer", set_timer_ticks(), hz, TIMER_ITERS);
+    match set_timer_ticks() {
+        Ok(ticks) => print_avg("sbi_set_timer", ticks, hz, TIMER_ITERS),
+        Err(error) => kprintln!("[bench] sbi_set_timer: FAILED, SBI error {}", error),
+    }
     kprintln!("[bench] sstc: see OpenSBI's `Boot HART ISA Extensions` line above");
 
     match switch_ns {
@@ -192,21 +198,36 @@ fn switch_ticks() -> Option<u64> {
 
 /// Ticks for `TIMER_ITERS` SBI `set_timer` calls, each arming the timer
 /// at `u64::MAX` (never fires; `sie.STIE` is off anyway).
-fn set_timer_ticks() -> u64 {
+///
+/// Errors: the SBI error code of the first call that does not return
+/// `SBI_SUCCESS` (0). A failing call returns early from M-mode, so its
+/// time would look like a fast, valid measurement.
+fn set_timer_ticks() -> Result<u64, i64> {
     let start = rdtime();
     for _ in 0..TIMER_ITERS {
-        // SAFETY: INV-7. An SBI call from S-mode; `set_timer(u64::MAX)`
-        // only programs the M-mode timer compare, which nothing in the
-        // kernel uses, and clears any pending supervisor timer interrupt.
-        unsafe {
-            core::arch::asm!(
-                "ecall",
-                inlateout("a0") u64::MAX => _,
-                lateout("a1") _,
-                in("a6") SBI_TIME_SET_TIMER,
-                in("a7") SBI_EXT_TIME,
-            );
+        let error = sbi_set_timer(u64::MAX);
+        if error != 0 {
+            return Err(error);
         }
     }
-    rdtime().wrapping_sub(start)
+    Ok(rdtime().wrapping_sub(start))
+}
+
+/// SBI `set_timer(stime)`; returns the SBI error code (0 = success).
+fn sbi_set_timer(stime: u64) -> i64 {
+    let error: i64;
+    // SAFETY: INV-7. An SBI call from S-mode; per the SBI spec it
+    // preserves every register but a0 and a1. `set_timer(u64::MAX)` only
+    // programs the timer compare, which nothing in the kernel uses, and
+    // clears any pending supervisor timer interrupt.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") stime => error,
+            lateout("a1") _,
+            in("a6") SBI_TIME_SET_TIMER,
+            in("a7") SBI_EXT_TIME,
+        );
+    }
+    error
 }
