@@ -3,14 +3,13 @@
 //! decision, with no CSR access (ADR-004 step 1).
 //!
 //! The kernel's assembly entry saves the U-mode registers and hands
-//! `scause`, `a7` and `a0` to [`decide`]; the impure glue in
+//! `scause`, `a7`, `a0` and `a1` to [`decide`]; the impure glue in
 //! `kernel/src/trap.rs` applies the verdict. A trap from U-mode never
 //! halts the kernel: it resumes the process, or ends it.
 //!
-//! The two syscall numbers here are **provisional** and exist only for
-//! the step-1 stub. Step 3 (`wari-rt`) defines the real `ecall` ABI in
-//! `abi-shared`, which stays the one source of truth for numbers a
-//! module can depend on.
+//! The syscall numbers and the IPC-buffer size come from `wari-abi`
+//! (ADR-004 step 3), the one source of truth for numbers a process can
+//! depend on.
 //!
 //! Prior art: the scause codes and the "ecall leaves `sepc` on the
 //! `ecall` itself" rule are from the RISC-V Privileged Spec §4.1.8–9;
@@ -32,14 +31,17 @@ pub const CAUSE_STORE_PAGE_FAULT: u64 = 15;
 /// Illegal instruction (e.g. a privileged CSR access from U-mode).
 pub const CAUSE_ILLEGAL_INSTRUCTION: u64 = 2;
 
-/// Provisional syscall 0: returns `a0 + 1` (wrapping). Proves the
-/// round trip U → S → U with an argument and a result.
-pub const SYS_ECHO: u64 = 0;
-/// Provisional syscall 1: ends the process with exit code `a0` (low
-/// 32 bits).
-pub const SYS_EXIT: u64 = 1;
-/// Value returned in `a0` for an unknown syscall number (-1).
-pub const ENOSYS_RET: u64 = u64::MAX;
+// `wari-abi` numbers are `usize`; `decide` takes the raw 64-bit
+// registers. Named `u64` copies so they can be match patterns.
+const SYS_ECHO: u64 = wari_abi::SYS_ECHO as u64;
+const SYS_EXIT: u64 = wari_abi::SYS_EXIT as u64;
+const SYS_WRITE: u64 = wari_abi::SYS_WRITE as u64;
+
+/// Value returned in `a0` for an unknown syscall number (-1, the
+/// `wari-abi` "generic error").
+pub const ENOSYS_RET: u64 = wari_abi::SyscallError::Generic.into_retval() as u64;
+/// Value returned in `a0` for a malformed argument.
+pub const EINVAL_RET: u64 = wari_abi::SyscallError::InvalidArgument.into_retval() as u64;
 
 /// Length of an `ecall` instruction. `sepc` points at the `ecall`
 /// itself, so a syscall that returns must advance it by this much.
@@ -59,6 +61,13 @@ pub enum UserTrap {
         /// The value the process sees in `a0`.
         a0: u64,
     },
+    /// `SYS_WRITE` with valid arguments: the kernel writes the first
+    /// `len` bytes of the caller's IPC buffer to the console, then
+    /// returns like [`UserTrap::Return`] with the count it wrote.
+    Write {
+        /// Bytes to write; `<= wari_abi::umode::IPC_BUFFER_LEN`.
+        len: usize,
+    },
     /// The process asked to end.
     Exit {
         /// Its exit code.
@@ -75,9 +84,12 @@ pub enum UserTrap {
 ///
 /// Preconditions: the trap came from U-mode (`sstatus.SPP == 0` at
 /// trap time) — the caller's assembly guarantees it.
-/// Postconditions: total; every `scause` maps to a verdict, and no
-/// verdict halts the kernel.
-pub fn decide(scause: u64, a7: u64, a0: u64) -> UserTrap {
+/// Postconditions: total; every `scause` and every argument value maps
+/// to a verdict, and no verdict halts the kernel. A malformed syscall
+/// is answered with an error value, never by killing the process.
+/// [`UserTrap::Write`] carries a length already checked against the
+/// IPC buffer.
+pub fn decide(scause: u64, a7: u64, a0: u64, a1: u64) -> UserTrap {
     if scause & SCAUSE_INTERRUPT_BIT != 0 {
         return UserTrap::Interrupt {
             code: scause & !SCAUSE_INTERRUPT_BIT,
@@ -92,7 +104,20 @@ pub fn decide(scause: u64, a7: u64, a0: u64) -> UserTrap {
         },
         // Truncation is the contract: the exit code is the low 32 bits.
         SYS_EXIT => UserTrap::Exit { code: a0 as u32 },
+        SYS_WRITE => decide_write(a0, a1),
         _ => UserTrap::Return { a0: ENOSYS_RET },
+    }
+}
+
+/// `SYS_WRITE(fd = a0, len = a1)`: only the console, and no more than
+/// one IPC buffer.
+fn decide_write(fd: u64, len: u64) -> UserTrap {
+    if fd != wari_abi::umode::FD_STDOUT as u64 {
+        return UserTrap::Return { a0: EINVAL_RET };
+    }
+    match usize::try_from(len) {
+        Ok(len) if len <= wari_abi::umode::IPC_BUFFER_LEN => UserTrap::Write { len },
+        _ => UserTrap::Return { a0: EINVAL_RET },
     }
 }
 
@@ -153,11 +178,11 @@ mod tests {
     #[test]
     fn echo_returns_argument_plus_one() {
         assert_eq!(
-            decide(CAUSE_ECALL_FROM_U, SYS_ECHO, 41),
+            decide(CAUSE_ECALL_FROM_U, SYS_ECHO, 41, 0),
             UserTrap::Return { a0: 42 }
         );
         assert_eq!(
-            decide(CAUSE_ECALL_FROM_U, SYS_ECHO, u64::MAX),
+            decide(CAUSE_ECALL_FROM_U, SYS_ECHO, u64::MAX, 0),
             UserTrap::Return { a0: 0 }
         );
     }
@@ -165,11 +190,11 @@ mod tests {
     #[test]
     fn exit_keeps_low_32_bits() {
         assert_eq!(
-            decide(CAUSE_ECALL_FROM_U, SYS_EXIT, 7),
+            decide(CAUSE_ECALL_FROM_U, SYS_EXIT, 7, 0),
             UserTrap::Exit { code: 7 }
         );
         assert_eq!(
-            decide(CAUSE_ECALL_FROM_U, SYS_EXIT, 0x1_0000_0003),
+            decide(CAUSE_ECALL_FROM_U, SYS_EXIT, 0x1_0000_0003, 0),
             UserTrap::Exit { code: 3 }
         );
     }
@@ -177,9 +202,47 @@ mod tests {
     #[test]
     fn unknown_syscall_returns_enosys_instead_of_killing() {
         assert_eq!(
-            decide(CAUSE_ECALL_FROM_U, 99, 0),
+            decide(CAUSE_ECALL_FROM_U, 99, 0, 0),
             UserTrap::Return { a0: ENOSYS_RET }
         );
+    }
+
+    #[test]
+    fn write_up_to_one_ipc_buffer_to_stdout_is_accepted() {
+        let stdout = wari_abi::umode::FD_STDOUT as u64;
+        let page = wari_abi::umode::IPC_BUFFER_LEN;
+        assert_eq!(
+            decide(CAUSE_ECALL_FROM_U, SYS_WRITE, stdout, 0),
+            UserTrap::Write { len: 0 }
+        );
+        assert_eq!(
+            decide(CAUSE_ECALL_FROM_U, SYS_WRITE, stdout, page as u64),
+            UserTrap::Write { len: page }
+        );
+    }
+
+    #[test]
+    fn write_beyond_the_ipc_buffer_or_to_another_fd_is_refused_not_fatal() {
+        let stdout = wari_abi::umode::FD_STDOUT as u64;
+        let page = wari_abi::umode::IPC_BUFFER_LEN as u64;
+        let refused = UserTrap::Return { a0: EINVAL_RET };
+        for (fd, len) in [
+            (stdout, page + 1),
+            (stdout, u64::MAX),
+            (0, 1),
+            (2, 1),
+            (u64::MAX, 1),
+        ] {
+            assert_eq!(decide(CAUSE_ECALL_FROM_U, SYS_WRITE, fd, len), refused);
+        }
+    }
+
+    #[test]
+    fn syscall_numbers_come_from_the_abi_crate() {
+        assert_eq!(SYS_ECHO, 26);
+        assert_eq!(SYS_EXIT, 1);
+        assert_eq!(SYS_WRITE, 27);
+        assert_ne!(EINVAL_RET, ENOSYS_RET);
     }
 
     #[test]
@@ -193,18 +256,18 @@ mod tests {
             0,
             63,
         ] {
-            assert_eq!(decide(cause, SYS_ECHO, 0), UserTrap::Kill { cause });
+            assert_eq!(decide(cause, SYS_ECHO, 0, 0), UserTrap::Kill { cause });
         }
     }
 
     #[test]
     fn interrupts_are_serviced_not_fatal() {
         assert_eq!(
-            decide(SCAUSE_INTERRUPT_BIT | 5, 0, 0),
+            decide(SCAUSE_INTERRUPT_BIT | 5, 0, 0, 0),
             UserTrap::Interrupt { code: 5 }
         );
         assert_eq!(
-            decide(SCAUSE_INTERRUPT_BIT | 9, SYS_EXIT, 0),
+            decide(SCAUSE_INTERRUPT_BIT | 9, SYS_EXIT, 0, 0),
             UserTrap::Interrupt { code: 9 }
         );
     }

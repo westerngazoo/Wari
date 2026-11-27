@@ -16,7 +16,10 @@ workspace = true
 # themselves pure no_std crates: `wari-cap` supplies the Tier /
 # ModuleId identity enums a Process carries, `wari-ipc` supplies
 # BlockReason (one source of truth with the rendezvous decision core).
+# `wari-abi` (no_std, no dependencies) supplies the U-mode syscall
+# numbers `utrap` decides on, so they have one source of truth.
 [dependencies]
+wari-abi = { path = "../abi-shared" }
 wari-cap = { path = "../wari-cap" }
 wari-ipc = { path = "../wari-ipc" }
 

@@ -39,8 +39,8 @@ const TIMER_ITERS: u64 = 1_000;
 const SBI_EXT_TIME: usize = 0x5449_4D45;
 const SBI_TIME_SET_TIMER: usize = 0;
 
-// The ecall loop: `a0` iterations of `ecall 0` (echo), then `ecall 1`
-// (exit 0). Position-independent and memory-free.
+// The ecall loop: `a0` iterations of SYS_ECHO, then SYS_EXIT 0.
+// Position-independent and memory-free.
 global_asm!(
     r#"
     .section .rodata.umode_bench_stub, "a"
@@ -49,16 +49,18 @@ global_asm!(
     .global umode_bench_stub_end
 umode_bench_stub_start:
     mv      s0, a0
-1:  li      a7, 0
+1:  li      a7, {echo}
     li      a0, 0
     ecall
     addi    s0, s0, -1
     bnez    s0, 1b
-    li      a7, 1
+    li      a7, {exit}
     li      a0, 0
     ecall
 umode_bench_stub_end:
-"#
+"#,
+    echo = const wari_abi::SYS_ECHO,
+    exit = const wari_abi::SYS_EXIT,
 );
 
 extern "C" {

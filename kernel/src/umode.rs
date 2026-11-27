@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Boot-time U-mode self-test (ADR-004 steps 1 and 2): run a
-//! ten-instruction stub in U-mode, each run in its own address space,
-//! and prove the kernel comes back from every one.
+//! Boot-time U-mode self-test (ADR-004 steps 1, 2 and 3a): run small
+//! stubs in U-mode, each in its own address space, and prove the kernel
+//! comes back from every one.
 //!
 //! There are no U-mode processes yet. This module exists so the U→S
 //! trap path, `sret` to U-mode, "a U-mode fault ends the process, not
 //! the kernel" and "a process cannot reach another's memory" are
 //! exercised on every boot, on QEMU and on the VF2, before step 3 puts
-//! wasmi in U-mode on top of them.
+//! wasmi in U-mode on top of them. Step 3a adds the IPC buffer: a
+//! stub writes to the console through it, and the kernel refuses a
+//! length beyond it, another descriptor and an unknown syscall.
 //!
 //! Prior art: the stub-then-return shape is xv6-riscv's first user
 //! process (`initcode.S`, entered by `usertrapret`), cut down to a
@@ -19,10 +21,12 @@ use core::arch::global_asm;
 use crate::error::KernelError;
 use crate::kprintln;
 use crate::mem::uspace::{self, AddressSpace};
+use wari_abi::umode::{FD_STDOUT, IPC_BUFFER_LEN, IPC_BUFFER_VA};
+use wari_abi::{SYS_ECHO, SYS_EXIT, SYS_MAX, SYS_WRITE};
 use wari_mem::page_alloc::{self, PAGE_SIZE};
 use wari_mem::page_table::{KERNEL_RW, USER_RW, USER_RX};
 use wari_mem::uspace::{USER_WINDOW_BASE, USER_WINDOW_END};
-use wari_sched::utrap::{cause_name, UserExit, CAUSE_LOAD_PAGE_FAULT};
+use wari_sched::utrap::{cause_name, UserExit, CAUSE_LOAD_PAGE_FAULT, EINVAL_RET, ENOSYS_RET};
 
 /// Where every test process has its code page.
 const CODE_VA: usize = USER_WINDOW_BASE;
@@ -38,7 +42,7 @@ const DATA_PATTERN: u64 = 0x5741_5249_5f42_0001; // "WARI_B" + 1
 // hostile load, so it can be copied to any page and run there.
 //
 //   a0 on entry: 0 = behave; otherwise an address to read.
-//   ecall 0 (echo) with 41 must return 42; then ecall 1 (exit) with 0.
+//   SYS_ECHO with 41 must return 42; then SYS_EXIT with 0.
 //   A wrong echo exits with 1. The hostile read faults before exit.
 global_asm!(
     r#"
@@ -48,26 +52,98 @@ global_asm!(
     .global umode_stub_end
 umode_stub_start:
     mv      s0, a0
-    li      a7, 0
+    li      a7, {echo}
     li      a0, 41
     ecall
     li      t0, 42
     bne     a0, t0, 1f
     beqz    s0, 2f
     ld      t1, 0(s0)
-2:  li      a7, 1
+2:  li      a7, {exit}
     li      a0, 0
     ecall
-1:  li      a7, 1
+1:  li      a7, {exit}
     li      a0, 1
     ecall
 umode_stub_end:
-"#
+"#,
+    echo = const SYS_ECHO,
+    exit = const SYS_EXIT,
+);
+
+// The IPC-buffer stub (step 3a). Copies its message into the IPC
+// buffer and writes it with SYS_WRITE, which must return its length;
+// then checks three refusals, each an error value and not a kill:
+//   SYS_WRITE longer than the buffer   -> EINVAL  (else exit 2)
+//   SYS_WRITE to a descriptor not 1    -> EINVAL  (else exit 3)
+//   an unknown syscall number          -> ENOSYS  (else exit 4)
+// A short write exits 1. All checks passed: exit 0.
+// Position-independent: the message is reached pc-relative.
+global_asm!(
+    r#"
+    .section .rodata.umode_write_stub, "a"
+    .balign 4
+    .global umode_write_stub_start
+    .global umode_write_stub_end
+umode_write_stub_start:
+    j       1f
+2:  .ascii  "[umode] hello from U-mode, through the IPC buffer\r\n"
+3:  .balign 4
+1:  lla     t0, 2b
+    li      t1, {ipc}
+    li      t2, 3b - 2b
+    li      t3, 0
+4:  add     t4, t0, t3
+    lbu     t5, 0(t4)
+    add     t4, t1, t3
+    sb      t5, 0(t4)
+    addi    t3, t3, 1
+    bltu    t3, t2, 4b
+    li      a7, {write}
+    li      a0, {stdout}
+    mv      a1, t2
+    ecall
+    li      s1, 1
+    bne     a0, t2, 9f
+    li      t6, {einval}
+    li      a7, {write}
+    li      a0, {stdout}
+    li      a1, {too_long}
+    ecall
+    li      s1, 2
+    bne     a0, t6, 9f
+    li      a7, {write}
+    li      a0, {stdout} + 1
+    li      a1, 1
+    ecall
+    li      s1, 3
+    bne     a0, t6, 9f
+    li      a7, {unknown}
+    ecall
+    li      t6, {enosys}
+    li      s1, 4
+    bne     a0, t6, 9f
+    li      s1, 0
+9:  li      a7, {exit}
+    mv      a0, s1
+    ecall
+umode_write_stub_end:
+"#,
+    ipc = const IPC_BUFFER_VA,
+    write = const SYS_WRITE,
+    stdout = const FD_STDOUT,
+    too_long = const IPC_BUFFER_LEN + 1,
+    einval = const EINVAL_RET as i64,
+    unknown = const SYS_MAX + 1,
+    enosys = const ENOSYS_RET as i64,
+    exit = const SYS_EXIT,
 );
 
 extern "C" {
     static umode_stub_start: u8;
     static umode_stub_end: u8;
+    static umode_write_stub_start: u8;
+    static umode_write_stub_end: u8;
     static _text_start: u8;
     fn __umode_enter(entry: *const UserEntry) -> u64;
 }
@@ -94,7 +170,7 @@ pub fn self_test() {
     let free_before = unsafe { page_alloc::get() }.free_count();
 
     match run_alone(0) {
-        Ok(Some(UserExit::Exited(0))) => kprintln!("[umode] stub: ecall 0 returned, exit 0"),
+        Ok(Some(UserExit::Exited(0))) => kprintln!("[umode] stub: echo ecall returned, exit 0"),
         other => kprintln!("[umode] stub: FAILED, got {:?}", other),
     }
 
@@ -117,6 +193,13 @@ pub fn self_test() {
             DATA_VA
         ),
         Err(why) => kprintln!("[umode] cross-space read: FAILED, got {}", why),
+    }
+
+    match ipc_buffer_write() {
+        Ok(Some(UserExit::Exited(0))) => kprintln!(
+            "[umode] ipc-buffer write: SYS_WRITE returned its length; oversize length, other descriptor and unknown syscall refused"
+        ),
+        other => kprintln!("[umode] ipc-buffer write: FAILED, got {:?}", other),
     }
 
     match refusals() {
@@ -146,6 +229,15 @@ pub fn self_test() {
 fn run_alone(arg: usize) -> Result<Option<UserExit>, KernelError> {
     let space = new_process()?;
     Ok(run(&space, arg))
+}
+
+/// Run the IPC-buffer stub in a fresh space; it prints its own line
+/// through `SYS_WRITE` and exits 0 only if every check held.
+fn ipc_buffer_write() -> Result<Option<UserExit>, KernelError> {
+    // SAFETY: INV-4. Linker symbols bounding the stub in `.rodata`.
+    let code = unsafe { linker_bytes(&umode_write_stub_start, &umode_write_stub_end) };
+    let space = load_process(code)?;
+    Ok(run(&space, 0))
 }
 
 /// The mappings INV-28 forbids are refused: a second mapping of a VA
@@ -215,9 +307,9 @@ pub(crate) unsafe fn linker_bytes(start: &'static u8, end: &'static u8) -> &'sta
     unsafe { core::slice::from_raw_parts(start, len) }
 }
 
-/// A fresh space holding a copy of `code` at `CODE_VA` and an empty
-/// stack page at `STACK_VA`. Shared with the step-2 measurement
-/// (`umode_bench`).
+/// A fresh space holding a copy of `code` at `CODE_VA`, an empty
+/// stack page at `STACK_VA` and an empty IPC buffer at
+/// `IPC_BUFFER_VA`. Shared with the step-2 measurement (`umode_bench`).
 ///
 /// Errors: `InvalidArgument` if `code` does not fit in one page;
 /// whatever `AddressSpace::create`/`map_zeroed` return.
@@ -234,6 +326,7 @@ pub(crate) fn load_process(code: &[u8]) -> Result<AddressSpace, KernelError> {
     // in `.rodata`.
     unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), code_pa as *mut u8, code.len()) };
     space.map_zeroed(STACK_VA, USER_RW)?;
+    space.map_zeroed(IPC_BUFFER_VA, USER_RW)?;
     Ok(space)
 }
 

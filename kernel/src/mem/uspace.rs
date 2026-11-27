@@ -14,12 +14,27 @@
 //! the JH7110's real ASID width; until then a full flush is the only
 //! choice that cannot leave one process's translation visible to
 //! another.
+//!
+//! The one place the kernel reads a process's memory is its IPC buffer
+//! (ADR-004 step 3, INV-31): a fixed page, found by walking the active
+//! root, read through its identity PA for at most one page.
 
 use super::kvm;
 use crate::error::KernelError;
+use wari_abi::umode::{IPC_BUFFER_LEN, IPC_BUFFER_VA};
 use wari_mem::page_alloc::PAGE_SIZE;
-use wari_mem::page_table::{make_satp, va_parts, Pte, PteFlags, PT_ENTRIES};
-use wari_mem::uspace::{check_user_page, is_kernel_slot, USER_WINDOW_SLOT};
+use wari_mem::page_table::{make_satp, va_parts, walk, Pte, PteFlags, PT_ENTRIES};
+use wari_mem::uspace::{
+    check_user_page, ipc_buffer_page, is_kernel_slot, USER_WINDOW_BASE, USER_WINDOW_END,
+    USER_WINDOW_SLOT,
+};
+
+// The ABI's IPC-buffer address is a page inside the user window: every
+// space can map it, and reading it never reaches a kernel slot.
+const _: () = assert!(IPC_BUFFER_LEN == PAGE_SIZE);
+const _: () = assert!(IPC_BUFFER_VA.is_multiple_of(PAGE_SIZE));
+const _: () = assert!(IPC_BUFFER_VA >= USER_WINDOW_BASE);
+const _: () = assert!(IPC_BUFFER_VA + IPC_BUFFER_LEN <= USER_WINDOW_END);
 
 /// Mask of the PPN field of an Sv39 `satp` (bits 0..44).
 const SATP_PPN_MASK: usize = (1 << 44) - 1;
@@ -135,6 +150,37 @@ pub fn activate_kernel() {
     if let Some(root) = kvm::kernel_root() {
         switch_to(root);
     }
+}
+
+/// Hand `f` the first `len` bytes of the IPC buffer of the space the
+/// hart translates through now, and return what `f` returns.
+///
+/// Precondition: called from the trap of the process whose space is
+/// active (its `satp` is still live while the kernel handles the trap);
+/// `len <= IPC_BUFFER_LEN`, as `wari_sched::utrap::decide` guarantees.
+/// Returns `None` if `len` is larger, or the active space has no IPC
+/// buffer at `IPC_BUFFER_VA` (`wari_mem::uspace::ipc_buffer_page`): the
+/// caller answers the syscall with an error.
+pub fn with_current_ipc_buffer<R>(len: usize, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+    if len > IPC_BUFFER_LEN {
+        return None;
+    }
+    let found = walk(current_root(), IPC_BUFFER_VA, |pte_pa| {
+        let table = pte_pa & !(PAGE_SIZE - 1);
+        kvm::read_pte(table, (pte_pa - table) / core::mem::size_of::<u64>()).bits()
+    });
+    let page = ipc_buffer_page(found)?;
+    // SAFETY: INV-5, INV-28, INV-31. `page` is the leaf the active
+    // space maps at `IPC_BUFFER_VA` as a user data page; every such page
+    // is a fresh allocator page in the identity-mapped heap, owned by
+    // that one space (`map_zeroed`), and read here through its U=0
+    // identity alias (`sstatus.SUM` stays 0). `len <= PAGE_SIZE`, so the
+    // slice stays in the page. The process is stopped in its trap
+    // (INV-2: single hart, interrupts masked), so nothing writes the
+    // page while `f` holds the slice, and the slice does not outlive
+    // this call.
+    let bytes = unsafe { core::slice::from_raw_parts(page as *const u8, len) };
+    Some(f(bytes))
 }
 
 /// PA of the root the hart currently translates through.

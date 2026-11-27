@@ -965,6 +965,7 @@ version = "0.0.1"
 name = "wari-sched"
 version = "0.0.1"
 dependencies = [
+ "wari-abi",
  "wari-cap",
  "wari-ipc",
 ]

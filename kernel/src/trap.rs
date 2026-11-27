@@ -176,13 +176,23 @@ pub extern "C" fn handle_user_trap(frame: &mut TrapFrame) -> u64 {
     // INV-2: the frame was saved by `_trap_entry` on the
     // kernel stack sscratch named; interrupts are masked while we run,
     // so nothing else touches it until sret or the leave path.
-    match decide(frame.scause as u64, frame.a7 as u64, frame.a0 as u64) {
+    match decide(
+        frame.scause as u64,
+        frame.a7 as u64,
+        frame.a0 as u64,
+        frame.a1 as u64,
+    ) {
         UserTrap::Interrupt { code } => {
             dispatch_interrupt(code as usize, frame.sepc);
             0
         }
         UserTrap::Return { a0 } => {
             frame.a0 = a0 as usize;
+            frame.sepc += ECALL_LEN;
+            0
+        }
+        UserTrap::Write { len } => {
+            frame.a0 = write_ipc_buffer(len) as usize;
             frame.sepc += ECALL_LEN;
             0
         }
@@ -198,6 +208,32 @@ pub extern "C" fn handle_user_trap(frame: &mut TrapFrame) -> u64 {
         }
     }
 }
+
+/// `SYS_WRITE`: put the first `len` bytes of the trapping process's IPC
+/// buffer on the console and return the count, or the `NotMapped` error
+/// value if the process has no IPC buffer.
+///
+/// The bytes go out as written, like WASI `fd_write`'s. The console
+/// capability gate arrives with the process record (step 3b); until
+/// then only the kernel's own self-test stubs run in U-mode.
+#[cfg(feature = "umode")]
+fn write_ipc_buffer(len: usize) -> u64 {
+    crate::mem::uspace::with_current_ipc_buffer(len, |bytes| {
+        bytes.iter().for_each(|&b| crate::kputc::kputc(b));
+        bytes.len() as u64
+    })
+    .unwrap_or(ENOTMAPPED_RET)
+}
+
+/// Without the `umode` feature nothing runs in U-mode, so there is no
+/// IPC buffer to write from.
+#[cfg(not(feature = "umode"))]
+fn write_ipc_buffer(_len: usize) -> u64 {
+    ENOTMAPPED_RET
+}
+
+/// `a0` for a syscall that needs the IPC buffer when there is none.
+const ENOTMAPPED_RET: u64 = wari_abi::SyscallError::NotMapped.into_retval() as u64;
 
 /// Clear `sip.STIP` so the timer interrupt does not immediately re-fire.
 ///

@@ -366,7 +366,7 @@ fn boot_capture(kernel: &Path, wallclock: Duration, extra_args: &[&str]) -> Stri
 pub mod markers {
     /// `kernel/src/umode.rs`: the well-behaved U-mode stub made its
     /// `ecall`, got the right answer back and exited 0 (ADR-004 step 1).
-    pub const UMODE_STUB_OK: &str = "[umode] stub: ecall 0 returned, exit 0";
+    pub const UMODE_STUB_OK: &str = "[umode] stub: echo ecall returned, exit 0";
 
     /// `kernel/src/umode.rs`: the hostile stub's read of a kernel
     /// address faulted in U-mode and only the stub was ended.
@@ -376,6 +376,16 @@ pub mod markers {
     /// process B's page faulted (B itself read it fine), and B's page
     /// kept its contents (ADR-004 step 2, INV-28).
     pub const UMODE_CROSS_SPACE_KILLED: &str = "[umode] cross-space read killed: load page fault";
+
+    /// `kernel/src/umode.rs`: the IPC-buffer stub's own line, written
+    /// from U-mode through `SYS_WRITE` (ADR-004 step 3a, INV-31).
+    pub const UMODE_IPC_WRITE_OUTPUT: &str = "[umode] hello from U-mode, through the IPC buffer";
+
+    /// `kernel/src/umode.rs`: `SYS_WRITE` returned the length written,
+    /// and a length beyond the IPC buffer, a descriptor other than
+    /// stdout and an unknown syscall number were answered with an
+    /// error, not obeyed and not a kill.
+    pub const UMODE_IPC_WRITE_REFUSALS: &str = "[umode] ipc-buffer write: SYS_WRITE returned its length; oversize length, other descriptor and unknown syscall refused";
 
     /// `kernel/src/umode.rs`: `map_zeroed` refused a remap, a VA
     /// outside the user window and kernel flags (INV-28).
