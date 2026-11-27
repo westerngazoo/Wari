@@ -21,7 +21,7 @@
 //! Pure: no `unsafe`, no MMIO, host-testable.
 
 use crate::page_alloc::PAGE_SIZE;
-use crate::page_table::{va_parts, PteFlags, PT_ENTRIES};
+use crate::page_table::{va_parts, PteFlags, WalkResult, PT_ENTRIES};
 
 /// Root-table index (VPN[2]) of the user window.
 ///
@@ -107,10 +107,66 @@ pub fn root_slot(va: usize) -> usize {
     va_parts(va).0
 }
 
+/// The page the kernel may read a process's IPC buffer through, given
+/// the walk of that process's root at the IPC-buffer VA (ADR-004
+/// step 3, D1).
+///
+/// Returns the physical address of the page if the walk found a
+/// 4 KiB user leaf that is readable and writable and not executable —
+/// what the kernel maps there for every process. Anything else (not
+/// mapped, a kernel page, code) is `None`: the kernel then refuses the
+/// syscall instead of reading memory the process did not put there.
+///
+/// Precondition: the walked VA is page aligned (the IPC-buffer VA is),
+/// so `walk.phys` is the page itself.
+///
+/// ```
+/// use wari_mem::uspace::ipc_buffer_page;
+/// use wari_mem::page_table::{WalkResult, USER_RW, USER_RX};
+/// let page = 0x8020_0000;
+/// assert_eq!(ipc_buffer_page(Some(WalkResult { phys: page, flags: USER_RW })), Some(page));
+/// assert_eq!(ipc_buffer_page(Some(WalkResult { phys: page, flags: USER_RX })), None);
+/// assert_eq!(ipc_buffer_page(None), None);
+/// ```
+pub fn ipc_buffer_page(walk: Option<WalkResult>) -> Option<usize> {
+    let WalkResult { phys, flags } = walk?;
+    let data_page = flags.contains(PteFlags::VALID)
+        && flags.contains(PteFlags::USER)
+        && flags.contains(PteFlags::READ)
+        && flags.contains(PteFlags::WRITE)
+        && !flags.contains(PteFlags::EXECUTE);
+    (data_page && phys.is_multiple_of(PAGE_SIZE)).then_some(phys)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::page_table::{KERNEL_RW, USER_RW, USER_RX};
+
+    #[test]
+    fn ipc_buffer_page_accepts_only_a_user_data_page() {
+        let page = 0x8020_0000;
+        let at = |flags| Some(WalkResult { phys: page, flags });
+        assert_eq!(ipc_buffer_page(at(USER_RW)), Some(page));
+        // Code, kernel pages and a read-only page are not an IPC buffer.
+        assert_eq!(ipc_buffer_page(at(USER_RX)), None);
+        assert_eq!(ipc_buffer_page(at(KERNEL_RW)), None);
+        assert_eq!(
+            ipc_buffer_page(at(PteFlags::VALID
+                .union(PteFlags::USER)
+                .union(PteFlags::READ))),
+            None
+        );
+        // An offset into a page is not a page.
+        assert_eq!(
+            ipc_buffer_page(Some(WalkResult {
+                phys: page + 8,
+                flags: USER_RW
+            })),
+            None
+        );
+        assert_eq!(ipc_buffer_page(None), None);
+    }
 
     #[test]
     fn window_is_exactly_one_root_slot() {
