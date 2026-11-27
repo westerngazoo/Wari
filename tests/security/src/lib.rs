@@ -387,6 +387,11 @@ pub mod markers {
     /// error, not obeyed and not a kill.
     pub const UMODE_IPC_WRITE_REFUSALS: &str = "[umode] ipc-buffer write: SYS_WRITE returned its length; oversize length, other descriptor and unknown syscall refused";
 
+    /// `kernel/src/umode.rs`: a process with no IPC buffer, and one
+    /// with code at the IPC-buffer VA, got `NotMapped` from `SYS_WRITE`
+    /// and were not killed (INV-31).
+    pub const UMODE_IPC_MISSING_REFUSED: &str = "[umode] ipc-buffer missing: SYS_WRITE with no IPC buffer, or code at its address, returned NotMapped";
+
     /// `kernel/src/umode.rs`: `map_zeroed` refused a remap, a VA
     /// outside the user window and kernel flags (INV-28).
     pub const UMODE_SPACE_REFUSALS: &str =

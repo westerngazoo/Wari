@@ -24,7 +24,7 @@
 use core::arch::{asm, global_asm};
 
 use crate::kprintln;
-use wari_sched::utrap::{cause_name, decide, UserExit, UserTrap, ECALL_LEN};
+use wari_sched::utrap::{cause_name, decide, UserExit, UserTrap, ECALL_LEN, ENOTMAPPED_RET};
 
 // Pull in the assembly trap entry. `_trap_entry` is the symbol `stvec`
 // will point at.
@@ -231,9 +231,6 @@ fn write_ipc_buffer(len: usize) -> u64 {
 fn write_ipc_buffer(_len: usize) -> u64 {
     ENOTMAPPED_RET
 }
-
-/// `a0` for a syscall that needs the IPC buffer when there is none.
-const ENOTMAPPED_RET: u64 = wari_abi::SyscallError::NotMapped.into_retval() as u64;
 
 /// Clear `sip.STIP` so the timer interrupt does not immediately re-fire.
 ///

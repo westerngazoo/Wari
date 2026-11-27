@@ -42,6 +42,9 @@ const SYS_WRITE: u64 = wari_abi::SYS_WRITE as u64;
 pub const ENOSYS_RET: u64 = wari_abi::SyscallError::Generic.into_retval() as u64;
 /// Value returned in `a0` for a malformed argument.
 pub const EINVAL_RET: u64 = wari_abi::SyscallError::InvalidArgument.into_retval() as u64;
+/// Value returned in `a0` for a syscall that needs the caller's IPC
+/// buffer when the caller has none.
+pub const ENOTMAPPED_RET: u64 = wari_abi::SyscallError::NotMapped.into_retval() as u64;
 
 /// Length of an `ecall` instruction. `sepc` points at the `ecall`
 /// itself, so a syscall that returns must advance it by this much.
@@ -243,6 +246,8 @@ mod tests {
         assert_eq!(SYS_EXIT, 1);
         assert_eq!(SYS_WRITE, 27);
         assert_ne!(EINVAL_RET, ENOSYS_RET);
+        assert_ne!(ENOTMAPPED_RET, EINVAL_RET);
+        assert_ne!(ENOTMAPPED_RET, ENOSYS_RET);
     }
 
     #[test]

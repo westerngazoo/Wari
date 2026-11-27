@@ -26,7 +26,9 @@ use wari_abi::{SYS_ECHO, SYS_EXIT, SYS_MAX, SYS_WRITE};
 use wari_mem::page_alloc::{self, PAGE_SIZE};
 use wari_mem::page_table::{KERNEL_RW, USER_RW, USER_RX};
 use wari_mem::uspace::{USER_WINDOW_BASE, USER_WINDOW_END};
-use wari_sched::utrap::{cause_name, UserExit, CAUSE_LOAD_PAGE_FAULT, EINVAL_RET, ENOSYS_RET};
+use wari_sched::utrap::{
+    cause_name, UserExit, CAUSE_LOAD_PAGE_FAULT, EINVAL_RET, ENOSYS_RET, ENOTMAPPED_RET,
+};
 
 /// Where every test process has its code page.
 const CODE_VA: usize = USER_WINDOW_BASE;
@@ -78,10 +80,14 @@ umode_stub_end:
 //   SYS_WRITE to a descriptor not 1    -> EINVAL  (else exit 3)
 //   an unknown syscall number          -> ENOSYS  (else exit 4)
 // A short write exits 1. All checks passed: exit 0.
-// Position-independent: the message is reached pc-relative.
+// Position-independent: the message is reached pc-relative, and
+// `norelax` keeps the linker from turning that `lla` into a
+// gp-relative access, which would break once the bytes are copied.
 global_asm!(
     r#"
     .section .rodata.umode_write_stub, "a"
+    .option push
+    .option norelax
     .balign 4
     .global umode_write_stub_start
     .global umode_write_stub_end
@@ -128,6 +134,7 @@ umode_write_stub_start:
     mv      a0, s1
     ecall
 umode_write_stub_end:
+    .option pop
 "#,
     ipc = const IPC_BUFFER_VA,
     write = const SYS_WRITE,
@@ -139,11 +146,42 @@ umode_write_stub_end:
     exit = const SYS_EXIT,
 );
 
+// The no-IPC-buffer stub: SYS_WRITE of one byte must come back as
+// NotMapped (exit 0); anything else exits 1. It touches no memory, so
+// it runs in a space without an IPC buffer.
+global_asm!(
+    r#"
+    .section .rodata.umode_nomap_stub, "a"
+    .balign 4
+    .global umode_nomap_stub_start
+    .global umode_nomap_stub_end
+umode_nomap_stub_start:
+    li      a7, {write}
+    li      a0, {stdout}
+    li      a1, 1
+    ecall
+    li      t6, {notmapped}
+    li      s1, 0
+    beq     a0, t6, 1f
+    li      s1, 1
+1:  li      a7, {exit}
+    mv      a0, s1
+    ecall
+umode_nomap_stub_end:
+"#,
+    write = const SYS_WRITE,
+    stdout = const FD_STDOUT,
+    notmapped = const ENOTMAPPED_RET as i64,
+    exit = const SYS_EXIT,
+);
+
 extern "C" {
     static umode_stub_start: u8;
     static umode_stub_end: u8;
     static umode_write_stub_start: u8;
     static umode_write_stub_end: u8;
+    static umode_nomap_stub_start: u8;
+    static umode_nomap_stub_end: u8;
     static _text_start: u8;
     fn __umode_enter(entry: *const UserEntry) -> u64;
 }
@@ -202,6 +240,13 @@ pub fn self_test() {
         other => kprintln!("[umode] ipc-buffer write: FAILED, got {:?}", other),
     }
 
+    match ipc_buffer_missing() {
+        Ok(()) => kprintln!(
+            "[umode] ipc-buffer missing: SYS_WRITE with no IPC buffer, or code at its address, returned NotMapped"
+        ),
+        Err(why) => kprintln!("[umode] ipc-buffer missing: FAILED, got {}", why),
+    }
+
     match refusals() {
         Ok(()) => kprintln!(
             "[umode] address-space refusals: remap, out-of-window and kernel-flag mappings rejected"
@@ -238,6 +283,26 @@ fn ipc_buffer_write() -> Result<Option<UserExit>, KernelError> {
     let code = unsafe { linker_bytes(&umode_write_stub_start, &umode_write_stub_end) };
     let space = load_process(code)?;
     Ok(run(&space, 0))
+}
+
+/// INV-31's other half: a process whose IPC-buffer VA is not mapped,
+/// or holds code instead of a data page, gets `NotMapped` from
+/// `SYS_WRITE` — the kernel reads nothing — and is not killed.
+fn ipc_buffer_missing() -> Result<(), &'static str> {
+    // SAFETY: INV-4. Linker symbols bounding the stub in `.rodata`.
+    let code = unsafe { linker_bytes(&umode_nomap_stub_start, &umode_nomap_stub_end) };
+    let none = load_code(code).map_err(|_| "space without IPC buffer not created")?;
+    if run(&none, 0) != Some(UserExit::Exited(0)) {
+        return Err("no IPC buffer: SYS_WRITE did not return NotMapped");
+    }
+    let mut code_there = load_code(code).map_err(|_| "second space not created")?;
+    code_there
+        .map_zeroed(IPC_BUFFER_VA, USER_RX)
+        .map_err(|_| "code page at the IPC-buffer VA not mapped")?;
+    if run(&code_there, 0) != Some(UserExit::Exited(0)) {
+        return Err("code at the IPC-buffer VA: SYS_WRITE did not return NotMapped");
+    }
+    Ok(())
 }
 
 /// The mappings INV-28 forbids are refused: a second mapping of a VA
@@ -314,6 +379,14 @@ pub(crate) unsafe fn linker_bytes(start: &'static u8, end: &'static u8) -> &'sta
 /// Errors: `InvalidArgument` if `code` does not fit in one page;
 /// whatever `AddressSpace::create`/`map_zeroed` return.
 pub(crate) fn load_process(code: &[u8]) -> Result<AddressSpace, KernelError> {
+    let mut space = load_code(code)?;
+    space.map_zeroed(IPC_BUFFER_VA, USER_RW)?;
+    Ok(space)
+}
+
+/// `load_process` without the IPC buffer: code at `CODE_VA` and a stack
+/// page, nothing else. Errors as `load_process`.
+fn load_code(code: &[u8]) -> Result<AddressSpace, KernelError> {
     if code.len() > PAGE_SIZE {
         return Err(KernelError::InvalidArgument);
     }
@@ -326,7 +399,6 @@ pub(crate) fn load_process(code: &[u8]) -> Result<AddressSpace, KernelError> {
     // in `.rodata`.
     unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), code_pa as *mut u8, code.len()) };
     space.map_zeroed(STACK_VA, USER_RW)?;
-    space.map_zeroed(IPC_BUFFER_VA, USER_RW)?;
     Ok(space)
 }
 

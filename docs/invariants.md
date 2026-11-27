@@ -683,13 +683,20 @@ boot self-test's IPC-buffer stub, read by
 `tests/security/tests/umode_ipc_write.rs` — its message reaches the
 console through `SYS_WRITE`, which returns the length, and a length
 one byte past the buffer, another descriptor and an unknown syscall
-number all come back as errors.
+number all come back as errors; a process with no IPC buffer, and one
+whose IPC-buffer VA holds code, get `NotMapped` from `SYS_WRITE`.
 
 **Not covered.** `SYS_WRITE` has no capability gate yet: only the
 kernel's own self-test stubs run in U-mode until the process record
 lands (step 3b), which brings the same console-capability check WASI
 `fd_write` makes. The bytes reach the console unfiltered, as WASI
-`fd_write`'s do.
+`fd_write`'s do. The write busy-waits on the UART with interrupts
+masked — up to ~0.36 s for a full page at 115200 baud on the VF2 — so
+a process looping on full-page writes would hold the hart; harmless
+while only the self-test's 51-byte write exists, and to be closed in
+step 3b before any untrusted process runs (a per-call byte cap with a
+short count, as the return value already allows, or the Tier-2 UART
+queue WASI `fd_write` uses).
 
 ### INV-24 · Wire-Format Literals Are Derived, Never Transcribed *(Phase 1c)*
 
@@ -796,9 +803,9 @@ contract: caller must guarantee one-time invocation pre-runtime use.
 | `kernel/src/trap.rs` (`install`)        | `csrw sscratch, zero`                                              | INV-2, INV-7 | Marks "kernel running" before the first trap |
 | `kernel/src/trap.rs` (`handle_user_trap`) | `&mut TrapFrame` parameter                                       | INV-2        | Trap-frame exclusivity during U-mode trap service |
 | `kernel/src/mem/uspace.rs` (`switch_to`, `current_root`) | `csrw satp` + `sfence.vma zero, zero`; `csrr satp`        | INV-7, INV-28 | Every root switched to maps the kernel as the kernel root does; full flush because all spaces share ASID 0 (R6). Feature `umode` |
-| `kernel/src/mem/uspace.rs` (`with_current_ipc_buffer`) | slice over the active space's IPC-buffer page through its identity alias | INV-2, INV-5, INV-28, INV-31 | At most one page, only a user data page the active space maps at `IPC_BUFFER_VA`; the process is stopped in its trap. Feature `umode` |
+| `kernel/src/mem/uspace.rs` (`with_current_ipc_buffer`) | slice over the active space's IPC-buffer page through its identity alias | INV-2, INV-5, INV-6, INV-28, INV-31 | At most one page, only a user data page the active space maps at `IPC_BUFFER_VA`; the process is stopped in its trap. Feature `umode` |
 | `kernel/src/mem/kvm.rs` (`free_page`, called by `uspace`) | `page_alloc::get`                                | INV-1, INV-8 | Allocator installed by `init` before any address space exists. Feature `umode` |
-| `kernel/src/umode.rs` (`self_test`, `new_process`, `ipc_buffer_write`, `cross_space_read`, `run`) | linker-symbol reads; copy and volatile read/write of fresh pages through their identity alias; `fence.i`; `__umode_enter` | INV-2, INV-4, INV-5, INV-7, INV-28 | Boot self-test; each stub runs in its own address space, destroyed afterwards. Feature `umode` |
+| `kernel/src/umode.rs` (`self_test`, `new_process`, `ipc_buffer_write`, `ipc_buffer_missing`, `cross_space_read`, `run`) | linker-symbol reads; copy and volatile read/write of fresh pages through their identity alias; `fence.i`; `__umode_enter` | INV-2, INV-4, INV-5, INV-7, INV-28 | Boot self-test; each stub runs in its own address space, destroyed afterwards. Feature `umode` |
 | `kernel/src/umode.rs` (`linker_bytes`)  | slice from two linker symbols                                      | INV-4        | Both symbols bound one stub in `.rodata`, mapped and immutable. Feature `umode` |
 | `kernel/src/umode_bench.rs` (`rdtime`, `probe_asid`, `sbi_set_timer`, `ecall_ticks`) | `rdtime`; `csrr`/`csrw satp` + `sfence.vma`; SBI `ecall`; `linker_bytes` | INV-4, INV-7 | ASID probe keeps root and mode, kernel PTEs are GLOBAL, TLB flushed after restoring `satp` (R6); `set_timer(u64::MAX)` never fires. Diagnostic feature `umode-bench` only |
 | `kernel/src/mem/kvm.rs` (`init`, runtime-heap symbols) | `sym_addr(&_runtime_heap_start/_end)`             | INV-4        | Linker-symbol addresses for the bump arena |

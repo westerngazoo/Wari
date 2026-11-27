@@ -118,7 +118,9 @@ pub fn root_slot(va: usize) -> usize {
 /// syscall instead of reading memory the process did not put there.
 ///
 /// Precondition: the walked VA is page aligned (the IPC-buffer VA is),
-/// so `walk.phys` is the page itself.
+/// so `walk.phys` is the page itself. The "4 KiB" part relies on
+/// `page_table::walk`, which returns `None` for superpage leaves; this
+/// check does not repeat it.
 ///
 /// ```
 /// use wari_mem::uspace::ipc_buffer_page;

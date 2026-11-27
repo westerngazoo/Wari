@@ -8,7 +8,9 @@
 //! byte beyond the buffer, a descriptor other than stdout and an
 //! unknown syscall number: each must come back as an error value — the
 //! kernel neither obeys nor kills — or the stub exits non-zero and the
-//! self-test prints `FAILED`.
+//! self-test prints `FAILED`. A second stub runs in a space with no
+//! IPC buffer, then in one with code at the IPC-buffer address: its
+//! `SYS_WRITE` must come back as `NotMapped`, with nothing read.
 //!
 //! This file asserts those outcomes from the console of a normal QEMU
 //! boot, and that the boot carried on to the end.
@@ -28,6 +30,10 @@ fn ipc_buffer_write_is_bounded_and_malformed_calls_are_refused() {
     assert!(
         text.contains(markers::UMODE_IPC_WRITE_REFUSALS),
         "SYS_WRITE returned the wrong count or a malformed call was not refused:\n{text}"
+    );
+    assert!(
+        text.contains(markers::UMODE_IPC_MISSING_REFUSED),
+        "SYS_WRITE without a valid IPC buffer was not answered with NotMapped:\n{text}"
     );
     assert!(
         !text.contains(markers::UMODE_FAILED),

@@ -170,8 +170,9 @@ pub fn with_current_ipc_buffer<R>(len: usize, f: impl FnOnce(&[u8]) -> R) -> Opt
         kvm::read_pte(table, (pte_pa - table) / core::mem::size_of::<u64>()).bits()
     });
     let page = ipc_buffer_page(found)?;
-    // SAFETY: INV-5, INV-28, INV-31. `page` is the leaf the active
-    // space maps at `IPC_BUFFER_VA` as a user data page; every such page
+    // SAFETY: INV-5, INV-6, INV-28, INV-31. `page` is the leaf PA the
+    // walker read from the active space's installed tables (INV-6) at
+    // `IPC_BUFFER_VA`, a user data page; every such page
     // is a fresh allocator page in the identity-mapped heap, owned by
     // that one space (`map_zeroed`), and read here through its U=0
     // identity alias (`sstatus.SUM` stays 0). `len <= PAGE_SIZE`, so the
