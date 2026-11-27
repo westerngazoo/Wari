@@ -198,6 +198,10 @@ number has since been taken by the socket-lifetime invariant.)
 - **INV-30 · Every physical address a DMA engine sees was written by
   the kernel.** Absorbs the unenforced half of INV-25. *(step 6)*
 
+- **INV-31 · The kernel reads a process only through its IPC buffer**:
+  one fixed page per process; a syscall names a length, never a
+  pointer (decision D1 of step 3, seL4's IPC buffer). *(step 3)*
+
 INV-2 (trap frame exclusivity) gains the U→S case, with `sscratch`
 holding the kernel stack. INV-12 (the bump-allocator arena is
 boot-only) is revisited once the kernel no longer instantiates wasmi.
