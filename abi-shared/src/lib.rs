@@ -107,13 +107,57 @@ pub const SYS_RING_SETUP: usize = 24;
 /// Drain up to N submission entries from the caller's ring.
 pub const SYS_RING_SUBMIT: usize = 25;
 
+// ── U-mode process syscalls (ADR-004 step 3) ──────────────────────
+//
+// What a U-mode process (`wari-rt`, or a kernel self-test stub) asks
+// of the kernel by `ecall`: number in `a7`, arguments in `a0`/`a1`,
+// result in `a0` (a byte count or a `SyscallError` return value).
+// `SYS_EXIT` (1) above is shared with this set.
+
+/// Diagnostic round trip: returns `a0 + 1` (wrapping). Used by the
+/// boot self-test and the measurement build to prove an argument and
+/// a result cross the `ecall`.
+pub const SYS_ECHO: usize = 26;
+/// Write to a stream: `a0` = descriptor (only [`umode::FD_STDOUT`]),
+/// `a1` = byte count. The bytes are the first `a1` bytes of the
+/// caller's IPC buffer ([`umode::IPC_BUFFER_VA`]); no pointer crosses.
+/// Returns the count written, or `InvalidArgument` for another
+/// descriptor or a count above [`umode::IPC_BUFFER_LEN`], or
+/// `NotMapped` if the caller has no IPC buffer.
+pub const SYS_WRITE: usize = 27;
+
 /// Highest syscall number currently defined. Used for bounds checks
 /// in the dispatch path and for the size of any dispatch table.
 ///
 /// Note: slot 10 is **retired** (formerly `SYS_SPAWN_ELF`, see Wari
-/// R7). The live syscalls are 0..=9, 11..=16, and 17..=25 (Phase 1b
-/// cap-management + the cap-fastpath register/unregister + ring pair).
-pub const SYS_MAX: usize = SYS_RING_SUBMIT;
+/// R7). The live syscalls are 0..=9, 11..=16, 17..=25 (Phase 1b
+/// cap-management + the cap-fastpath register/unregister + ring pair)
+/// and 26..=27 (U-mode processes).
+pub const SYS_MAX: usize = SYS_WRITE;
+
+/// The page a U-mode process and the kernel exchange data through
+/// (ADR-004 step 3, decision D1).
+///
+/// Every process has one IPC buffer at a fixed address in its own
+/// address space. A syscall that carries data names only a length;
+/// the data is in this page. The kernel therefore never follows a
+/// pointer chosen by the process: the only check it needs is
+/// `len <= IPC_BUFFER_LEN`.
+///
+/// Prior art: seL4's IPC buffer (one registered page per thread that
+/// message words beyond the registers travel through), chosen over
+/// Linux's `copy_from_user` of arbitrary user pointers.
+pub mod umode {
+    /// Virtual address of the IPC buffer: the last page of the user
+    /// window (`wari_mem::uspace`, slot 128, `0x20_0000_0000` +
+    /// 1 GiB), clear of the code at the window's start. The kernel
+    /// asserts at compile time that it lies in the window.
+    pub const IPC_BUFFER_VA: usize = 0x20_3FFF_F000;
+    /// Size of the IPC buffer: one 4 KiB page.
+    pub const IPC_BUFFER_LEN: usize = 4096;
+    /// The one descriptor `SYS_WRITE` accepts: the console.
+    pub const FD_STDOUT: usize = 1;
+}
 
 // ── Error codes ────────────────────────────────────────────────
 //
@@ -825,8 +869,23 @@ mod tests {
         // Cap-management ops end at SYS_CAP_LOOKUP=21; register/unregister
         // extend to 23; the ring setup/submit pair extends to 25. SYS_MAX
         // pins both the symbolic and numeric value.
-        assert_eq!(SYS_MAX, SYS_RING_SUBMIT);
-        assert_eq!(SYS_MAX, 25);
+        assert_eq!(SYS_MAX, SYS_WRITE);
+        assert_eq!(SYS_MAX, 27);
+    }
+
+    #[test]
+    fn umode_syscalls_follow_the_ring_pair() {
+        // Appended at the end, never reusing a number: SYS_ECHO is not
+        // 0 (SYS_PUTCHAR) even though the step-1 stub used 0.
+        assert_eq!(SYS_ECHO, SYS_RING_SUBMIT + 1);
+        assert_eq!(SYS_WRITE, SYS_ECHO + 1);
+        assert_ne!(SYS_ECHO, SYS_PUTCHAR);
+    }
+
+    #[test]
+    fn ipc_buffer_is_one_aligned_page() {
+        assert_eq!(umode::IPC_BUFFER_LEN, 4096);
+        assert_eq!(umode::IPC_BUFFER_VA % umode::IPC_BUFFER_LEN, 0);
     }
 
     #[test]
@@ -846,7 +905,6 @@ mod tests {
         assert_eq!(SYS_CAP_UNREGISTER, 23);
         assert_eq!(SYS_RING_SETUP, 24);
         assert_eq!(SYS_RING_SUBMIT, 25);
-        assert_eq!(SYS_MAX, SYS_RING_SUBMIT);
         // And not stepping on SYS_REBOOT.
         assert_ne!(SYS_CAP_MINT, SYS_REBOOT);
     }
